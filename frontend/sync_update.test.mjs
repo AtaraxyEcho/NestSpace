@@ -10,8 +10,21 @@ const ROUTE_URL = pathToFileURL(
   join(dirname(fileURLToPath(import.meta.url)), 'worker', 'index.ts'),
 ).href
 
-const { buildProjectSyncUpdate, buildTimelineEvents, parseGithubRepo, isNonGithubHost, formatStarCount } =
-  await import(ROUTE_URL)
+const {
+  buildProjectSyncUpdate,
+  buildTimelineEvents,
+  parseGithubRepo,
+  isNonGithubHost,
+  formatStarCount,
+  extractPreviewImages,
+  parsePreviewImages,
+  sanitizeImageUrl,
+  resolveRepoAssetUrl,
+} = await import(ROUTE_URL)
+
+// 封面 = 相册第一张（生产代码只维护 extractPreviewImages 一处实现）
+const firstImage = (md, owner, repo, branch) =>
+  extractPreviewImages(md, owner, repo, branch)[0] ?? ''
 
 const baseRow = (over = {}) => ({
   id: '001',
@@ -210,4 +223,183 @@ const stored = JSON.parse(String(withTimeline.columns.timeline_json))
 assert.equal(stored.length, 3, 'case 9a: 同步会写入 timeline_json')
 assert.equal(stored[0].title, 'Release v2.4.1', 'case 9b: 落库时间线含真实 Release')
 
-console.log('sync_update：全部用例通过（字段归属 / 格式口径 / 文档规则 / 地址解析 / 时间线）✓')
+// ============================================
+// 6. 预览图提取（README 首图；跳过徽章与 SVG 图标）
+// ============================================
+assert.equal(
+  firstImage('![shot](https://cdn.example.com/a.png)', 'o', 'r', 'main'),
+  'https://cdn.example.com/a.png',
+  'case 10a: 绝对地址原样使用',
+)
+assert.equal(
+  firstImage('![shot](./docs/a.png)', 'o', 'r', 'main'),
+  'https://raw.githubusercontent.com/o/r/main/docs/a.png',
+  'case 10b: 相对路径按默认分支解析',
+)
+assert.equal(
+  firstImage('<img src="docs/b.png" width="600" />', 'o', 'r', 'master'),
+  'https://raw.githubusercontent.com/o/r/master/docs/b.png',
+  'case 10c: HTML img 同样识别，分支取自 default_branch',
+)
+assert.equal(
+  firstImage(
+    `![build](https://img.shields.io/badge/build-passing-green)
+![shot](docs/c.png)`,
+    'o',
+    'r',
+    'main',
+  ),
+  'https://raw.githubusercontent.com/o/r/main/docs/c.png',
+  'case 10d: 跳过 shields.io 徽章，取下一张',
+)
+assert.equal(
+  firstImage('![logo](docs/logo.svg)', 'o', 'r', 'main'),
+  'https://raw.githubusercontent.com/o/r/main/docs/logo.svg',
+  'case 10e: 只有矢量图时仍可用（位图优先）',
+)
+assert.equal(
+  firstImage(
+    `![logo](docs/logo.svg)
+![shot](docs/shot.png)`,
+    'o',
+    'r',
+    'main',
+  ),
+  'https://raw.githubusercontent.com/o/r/main/docs/shot.png',
+  'case 10f: 有位图时优先位图',
+)
+assert.equal(firstImage('no image here', 'o', 'r', 'main'), '', 'case 10g: 没有图片返回空串（不编造）')
+assert.equal(firstImage('', 'o', 'r', 'main'), '', 'case 10h: 空文本返回空串')
+assert.equal(
+  resolveRepoAssetUrl('data:image/png;base64,AAAA', 'o', 'r', 'main'),
+  '',
+  'case 11a: data: 内联资源不作为预览图',
+)
+assert.equal(
+  resolveRepoAssetUrl('//cdn.example.com/a.png', 'o', 'r', 'main'),
+  'https://cdn.example.com/a.png',
+  'case 11b: 协议相对地址补 https',
+)
+assert.equal(
+  resolveRepoAssetUrl('/docs/a.png', 'o', 'r', 'main'),
+  'https://raw.githubusercontent.com/o/r/main/docs/a.png',
+  'case 11c: 以 / 开头的仓库内绝对路径',
+)
+
+const withPreview = buildProjectSyncUpdate(
+  baseRow({ has_preview: 0, has_preview_images: 0, readme_head_en: '![shot](docs/x.png)' }),
+  meta(),
+  [],
+  null,
+)
+assert.equal(
+  withPreview.columns.preview_image_url,
+  'https://raw.githubusercontent.com/nestspace/aperture/main/docs/x.png',
+  'case 12a: 文档已齐时也能从 README 头部片段提取封面',
+)
+assert.deepEqual(
+  JSON.parse(String(withPreview.columns.preview_images_json)),
+  ['https://raw.githubusercontent.com/nestspace/aperture/main/docs/x.png'],
+  'case 12a2: 同一趟同时写相册',
+)
+const keepPreview = buildProjectSyncUpdate(
+  baseRow({ has_preview: 1, has_preview_images: 1, readme_head_en: '![other](docs/y.png)' }),
+  meta(),
+  [],
+  null,
+)
+assert.equal('preview_image_url' in keepPreview.columns, false, 'case 12b: 已有封面不覆盖')
+assert.equal('preview_images_json' in keepPreview.columns, false, 'case 12b2: 已有相册不覆盖')
+
+const galleryOnlyMissing = buildProjectSyncUpdate(
+  baseRow({ has_preview: 1, has_preview_images: 0, readme_head_en: '![a](docs/a.png)\n![b](docs/b.png)' }),
+  meta(),
+  [],
+  null,
+)
+assert.equal('preview_image_url' in galleryOnlyMissing.columns, false, 'case 12c: 已有封面时不改写封面')
+assert.deepEqual(
+  JSON.parse(String(galleryOnlyMissing.columns.preview_images_json)),
+  [
+    'https://raw.githubusercontent.com/nestspace/aperture/main/docs/a.png',
+    'https://raw.githubusercontent.com/nestspace/aperture/main/docs/b.png',
+  ],
+  'case 12d: 仅相册为空时补齐相册（多张，顺序保持）',
+)
+
+// ============================================
+// 7. 相册提取与解析（多张 / 去重 / 上限 / 白名单）
+// ============================================
+const multi = extractPreviewImages(
+  `![s1](docs/one.png)
+![s2](docs/two.png)
+![s3](https://cdn.example.com/three.png)`,
+  'o',
+  'r',
+  'main',
+)
+assert.deepEqual(
+  multi,
+  [
+    'https://raw.githubusercontent.com/o/r/main/docs/one.png',
+    'https://raw.githubusercontent.com/o/r/main/docs/two.png',
+    'https://cdn.example.com/three.png',
+  ],
+  'case 13a: 多张按出现顺序返回（绝对地址原样保留）',
+)
+assert.deepEqual(
+  extractPreviewImages('![a](docs/a.png)\n![a](docs/a.png)', 'o', 'r', 'main'),
+  ['https://raw.githubusercontent.com/o/r/main/docs/a.png'],
+  'case 13b: 同一地址去重',
+)
+assert.deepEqual(
+  extractPreviewImages('', 'o', 'r', 'main'),
+  [],
+  'case 13c: 没有图片返回空数组（不编造）',
+)
+assert.deepEqual(
+  extractPreviewImages(
+    `![build](https://img.shields.io/badge/build-passing-green)
+![logo](docs/logo.svg)
+![s1](docs/s1.png)
+![s2](docs/s2.png)`,
+    'o',
+    'r',
+    'main',
+  ),
+  [
+    'https://raw.githubusercontent.com/o/r/main/docs/s1.png',
+    'https://raw.githubusercontent.com/o/r/main/docs/s2.png',
+    'https://raw.githubusercontent.com/o/r/main/docs/logo.svg',
+  ],
+  'case 13d: 徽章排除；位图在前、矢量收尾；多张顺序不变',
+)
+const many = extractPreviewImages(
+  Array.from({ length: 15 }, (_, i) => `![s${i}](docs/s${i}.png)`).join('\n'),
+  'o',
+  'r',
+  'main',
+)
+assert.equal(many.length, 12, 'case 13e: 相册最多 12 张')
+assert.equal(many[0], 'https://raw.githubusercontent.com/o/r/main/docs/s0.png', 'case 13f: 截断保留最前面的图')
+
+assert.equal(
+  sanitizeImageUrl('data:image/png;base64,AAAA'),
+  '',
+  'case 14a: data: 被丢弃',
+)
+assert.equal(sanitizeImageUrl('javascript:alert(1)'), '', 'case 14b: javascript: 被丢弃')
+assert.equal(sanitizeImageUrl('docs/a.png'), '', 'case 14c: 相对路径不算合法绝对地址')
+assert.equal(sanitizeImageUrl('https://cdn.example.com/a.png'), 'https://cdn.example.com/a.png', 'case 14d: http(s) 放行')
+
+assert.deepEqual(
+  parsePreviewImages('["https://a.example/1.png","javascript:alert(1)","https://a.example/1.png"]'),
+  ['https://a.example/1.png'],
+  'case 15a: JSON 字符串解析 + 白名单 + 去重',
+)
+assert.deepEqual(parsePreviewImages('not json'), [], 'case 15b: 坏 JSON 退化为空数组')
+assert.deepEqual(parsePreviewImages('{"a":1}'), [], 'case 15c: 非数组退化为空数组')
+assert.deepEqual(parsePreviewImages(undefined), [], 'case 15d: 空值退化为空数组')
+assert.deepEqual(parsePreviewImages([1, null, 'https://a.example/x.png']), ['https://a.example/x.png'], 'case 15e: 非字符串项被剔除')
+
+console.log('sync_update：全部用例通过（字段归属 / 格式口径 / 文档规则 / 地址解析 / 时间线 / 预览图 / 相册）✓')

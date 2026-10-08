@@ -999,6 +999,13 @@ function DetailPage({
 }) {
   const related = items.filter((item) => item.id !== project.id).slice(0, 2)
   const demoUrl = demoHref(project)
+  // 相册：优先多张；只有封面时退化为单张；都没有则不渲染预览区
+  const previewImages =
+    project.previewImages && project.previewImages.length > 0
+      ? project.previewImages
+      : project.previewImageUrl
+        ? [project.previewImageUrl]
+        : []
   const [detailTab, setDetailTab] =
     useState<"overview" | "readme" | "deployment">("overview")
 
@@ -1173,6 +1180,16 @@ function DetailPage({
           ))}
         </nav>
       </section>
+
+      {previewImages.length > 0 ? (
+        <section className="detail-section preview-section">
+          <div className="detail-section-label">
+            <span className="eyebrow">PLATE / 预览</span>
+            <span>PROJECT PREVIEW</span>
+          </div>
+          <PreviewPlate images={previewImages} alt={project.name} />
+        </section>
+      ) : null}
 
       <div
         id="detail-panel-overview"
@@ -1896,6 +1913,27 @@ function textToTimeline(text: string): Project["timeline"] {
     }))
 }
 
+// 相册列存的是 JSON 字符串（管理端原值）；坏数据一律退化为空数组，避免编辑时抛错
+function parsePreviewImagesJson(raw: string | undefined): string[] {
+  if (!raw || !raw.trim()) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed)
+      ? parsed.filter((url): url is string => typeof url === "string" && url.trim() !== "")
+      : []
+  } catch {
+    return []
+  }
+}
+
+// 抽屉里相册用逐行 URL 编辑；没有相册时退化为单张封面，第一行即封面
+function galleryToText(project: Project): string {
+  const gallery = parsePreviewImagesJson(project.preview_images_json)
+  const list =
+    gallery.length > 0 ? gallery : project.preview_image_url ? [project.preview_image_url] : []
+  return list.join("\n")
+}
+
 function AdminPage({
   items,
   onChange,
@@ -1915,6 +1953,8 @@ function AdminPage({
   const [featuresText, setFeaturesText] = useState("")
   const [metricsText, setMetricsText] = useState("")
   const [timelineText, setTimelineText] = useState("")
+  // 相册同理：逐行 URL 暂存，保存时序列化回 JSON 字符串
+  const [previewImagesText, setPreviewImagesText] = useState("")
   const [notice, setNotice] = useState("")
   const [contentLanguage, setContentLanguage] = useState<Language>("zh")
   // 站点文案与合规设置：初始为内置默认值，挂载后从 D1 拉取覆盖
@@ -2134,17 +2174,21 @@ function AdminPage({
         .map((event) => `${event.date} | ${event.title} | ${event.note}`)
         .join("\n"),
     )
+    setPreviewImagesText(galleryToText(editing))
   }, [editing?.id])
 
   const saveProject = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!editing) return
     // 数组字段以逐行文本编辑，保存前统一解析回结构化数据
+    const previewImages = textToFeatures(previewImagesText)
     const payload: Project = {
       ...editing,
       features: textToFeatures(featuresText),
       metrics: textToMetrics(metricsText),
       timeline: textToTimeline(timelineText),
+      preview_images_json: JSON.stringify(previewImages),
+      preview_image_url: previewImages[0] ?? "",
     }
     const isNew = !items.some((item) => item.id === payload.id)
     setNotice("正在持久化到 Cloudflare D1 边缘数据库...")
@@ -2200,6 +2244,8 @@ function AdminPage({
       timeline: [],
       demoUrl: "",
       demoEnabled: false,
+      preview_image_url: "",
+      preview_images_json: "[]",
     })
   }
 
@@ -4142,6 +4188,31 @@ function AdminPage({
                 </label>
               </div>
               <label>
+                预览图（每行一个 URL，第一行为封面）
+                <textarea
+                  className="doc-editor"
+                  value={previewImagesText}
+                  onChange={(event) => setPreviewImagesText(event.target.value)}
+                  placeholder={"https://…/shot-1.png\nhttps://…/shot-2.png"}
+                />
+                <small>
+                  详情页「PLATE / 预览」相册；需填绝对地址（自动提取的值已解析为绝对地址）。
+                  留空则下次同步从 README 自动提取，最多 12 张。
+                </small>
+              </label>
+              {textToFeatures(previewImagesText).length > 0 ? (
+                <div className="preview-thumbs preview-thumbs-admin">
+                  {textToFeatures(previewImagesText)
+                    .slice(0, 8)
+                    .map((url, i) => (
+                      <span key={`${url}-${i}`} className="preview-thumb-admin">
+                        <img src={url} alt="" loading="lazy" />
+                        {i === 0 ? <em>封面</em> : null}
+                      </span>
+                    ))}
+                </div>
+              ) : null}
+              <label>
                 内部笔记
                 <textarea
                   value={editing.internal_notes ?? ""}
@@ -4255,6 +4326,137 @@ function detectBrowserLanguage(): Language {
 function detectSystemTheme(): boolean {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false
   return window.matchMedia("(prefers-color-scheme: dark)").matches
+}
+
+// 详情页预览图：可翻看的「标本托板」相册。
+// 受限动效约定：整体倾斜角度很小（≤6°），不加模糊、不做无限循环；
+// 触屏与 prefers-reduced-motion 下退化为静态托板（仍可翻页）。
+// 每张图按自身宽高判断方向：横图走宽板 cover，竖图（手机截图）收窄成手机框 contain，避免被裁掉。
+function PreviewPlate({ images, alt }: { images: string[]; alt: string }) {
+  const MAX_TILT_DEG = 6
+  const [tilt, setTilt] = useState<{ x: number; y: number } | null>(null)
+  const [index, setIndex] = useState(0)
+  const [portrait, setPortrait] = useState(false)
+  const touchStartX = useRef<number | null>(null)
+  const interactive = useMemo(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false
+    return (
+      window.matchMedia("(hover: hover) and (pointer: fine)").matches &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    )
+  }, [])
+
+  // 切换标本（相册来源变化）时回到第一张
+  useEffect(() => {
+    setIndex(0)
+  }, [images])
+
+  const total = images.length
+  const safeIndex = total > 0 ? Math.min(index, total - 1) : 0
+  const current = images[safeIndex]
+  if (!current) return null
+
+  const step = (delta: number) => {
+    if (total <= 1) return
+    setIndex((value) => (value + delta + total) % total)
+  }
+
+  return (
+    <div className="preview-gallery">
+      <div
+        className={`preview-plate ${portrait ? "is-portrait" : "is-landscape"}`}
+        tabIndex={total > 1 ? 0 : -1}
+        aria-label={total > 1 ? `${alt} 预览图，第 ${safeIndex + 1} / ${total} 张` : undefined}
+        onMouseMove={(event) => {
+          if (!interactive) return
+          const rect = event.currentTarget.getBoundingClientRect()
+          const px = (event.clientX - rect.left) / rect.width - 0.5
+          const py = (event.clientY - rect.top) / rect.height - 0.5
+          setTilt({ x: -py * MAX_TILT_DEG * 2, y: px * MAX_TILT_DEG * 2 })
+        }}
+        onMouseLeave={() => setTilt(null)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") {
+            event.preventDefault()
+            step(-1)
+          } else if (event.key === "ArrowRight") {
+            event.preventDefault()
+            step(1)
+          }
+        }}
+        onTouchStart={(event) => {
+          touchStartX.current = event.touches[0]?.clientX ?? null
+        }}
+        onTouchEnd={(event) => {
+          const startX = touchStartX.current
+          const endX = event.changedTouches[0]?.clientX
+          touchStartX.current = null
+          if (startX === null || endX === undefined) return
+          if (Math.abs(endX - startX) > 40) step(endX < startX ? 1 : -1)
+        }}
+        style={
+          tilt
+            ? ({
+                "--tilt-x": `${tilt.x.toFixed(2)}deg`,
+                "--tilt-y": `${tilt.y.toFixed(2)}deg`,
+              } as React.CSSProperties)
+            : undefined
+        }
+      >
+        <div className="preview-plate-inner">
+          <img
+            key={current}
+            src={current}
+            alt={`${alt} 预览 ${safeIndex + 1}`}
+            loading={safeIndex === 0 ? "eager" : "lazy"}
+            onLoad={(event) => {
+              const el = event.currentTarget
+              if (el.naturalWidth && el.naturalHeight) {
+                setPortrait(el.naturalHeight > el.naturalWidth)
+              }
+            }}
+          />
+        </div>
+        {total > 1 ? (
+          <>
+            <button
+              type="button"
+              className="preview-nav preview-prev"
+              aria-label="上一张预览图"
+              onClick={() => step(-1)}
+            >
+              ‹
+            </button>
+            <button
+              type="button"
+              className="preview-nav preview-next"
+              aria-label="下一张预览图"
+              onClick={() => step(1)}
+            >
+              ›
+            </button>
+          </>
+        ) : null}
+      </div>
+      {total > 1 ? (
+        <div className="preview-thumbs" role="tablist" aria-label="预览图列表">
+          {images.map((url, i) => (
+            <button
+              key={url}
+              type="button"
+              role="tab"
+              aria-selected={i === safeIndex}
+              aria-label={`第 ${i + 1} 张预览图`}
+              className={`preview-thumb${i === safeIndex ? " is-active" : ""}`}
+              onClick={() => setIndex(i)}
+            >
+              <img src={url} alt="" loading="lazy" />
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function DetailLoading({

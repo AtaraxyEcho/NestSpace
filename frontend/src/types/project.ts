@@ -38,10 +38,18 @@ export type Project = {
   compose_dev?: string
   compose_prod?: string
   docs_synced_at?: string
+  /** 管理端同样是 snake_case；公开详情/列表见下方 camelCase 版本 */
+  preview_image_url?: string
+  /** 管理端原始值：JSON 字符串数组，抽屉按行解析编辑；写回时序列化 */
+  preview_images_json?: string
   // 标本文档：公开详情接口 GET /api/projects/:id 返回（列表接口不携带，避免列表体积膨胀）
   readmeZh?: string
   readmeEn?: string
   composeDev?: string
   composeProd?: string
   docsSyncedAt?: string
+  /** 详情页预览图封面（自动提取或管理端填写） */
+  previewImageUrl?: string
+  /** 详情页预览相册（有序绝对地址；缺失时退化为单张封面） */
+  previewImages?: string[]
 }

@@ -459,6 +459,57 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .metric-strip div { min-height: 180px; padding: 34px; border-right: 1px solid rgba(232,223,208,.18); }
 .metric-strip span { display: block; font: 8px var(--font-mono); letter-spacing: .18em; color: #b8ab98; }
 .metric-strip strong { display: block; margin-top: 34px; font-size: clamp(48px, 5vw, 72px); line-height: .8; }
+/* 详情页预览图「标本托板」相册：跟随指针的小角度倾斜 + 分层投影；不加模糊、不做无限循环 */
+.preview-section { background: var(--bg-base); }
+.preview-gallery {
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  width: fit-content; max-width: 100%; margin: 8px auto 0;
+}
+.preview-plate {
+  --tilt-x: 0deg;
+  --tilt-y: 0deg;
+  position: relative; width: fit-content; perspective: 1200px;
+}
+.preview-plate:focus-visible { outline: 1px solid var(--accent); outline-offset: 6px; }
+.preview-plate-inner {
+  padding: 10px; border: 1px solid var(--line-strong); background: var(--bg-elevated);
+  transform: rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
+  transition: transform 300ms var(--ease-hover, ease-out), box-shadow 300ms ease-out;
+  box-shadow: 10px 12px 0 color-mix(in srgb, var(--accent) 16%, transparent), 0 34px 60px -34px rgba(42,38,32,.32);
+}
+.preview-plate img { display: block; }
+/* 横图走宽板；竖图（手机截图）收窄成手机框，contain 不裁 */
+.preview-plate.is-landscape img { max-width: min(880px, 82vw); max-height: 62vh; object-fit: cover; }
+.preview-plate.is-portrait img { max-width: min(420px, 72vw); max-height: 70vh; object-fit: contain; }
+.preview-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 34px; height: 34px; display: grid; place-items: center;
+  font: 16px var(--font-mono); line-height: 1;
+  border: 1px solid var(--line-strong); background: var(--bg-elevated); color: var(--ink-primary);
+  cursor: pointer; transition: background 200ms var(--ease-hover, ease-out);
+}
+.preview-nav:hover { background: var(--bg-surface); }
+.preview-prev { left: -12px; }
+.preview-next { right: -12px; }
+.preview-thumbs { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: min(880px, 88vw); }
+.preview-thumb {
+  width: 72px; height: 48px; padding: 0; overflow: hidden; cursor: pointer;
+  border: 1px solid var(--line-default); background: var(--bg-elevated);
+}
+.preview-thumb img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.preview-thumb.is-active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+/* 管理端抽屉里的相册缩略图（首张标「封面」） */
+.preview-thumbs-admin { justify-content: flex-start; max-width: 100%; margin-bottom: 19px; }
+.preview-thumb-admin { position: relative; width: 96px; height: 64px; overflow: hidden; border: 1px solid #c5c5bc; background: #ecebe5; }
+.preview-thumb-admin img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.preview-thumb-admin em {
+  position: absolute; left: 0; bottom: 0; padding: 1px 5px;
+  font: 8px var(--font-mono); font-style: normal; letter-spacing: .1em;
+  background: var(--accent); color: var(--bg-base);
+}
+@media (prefers-reduced-motion: reduce) {
+  .preview-plate-inner { transition: none; transform: none; }
+}
 .evolution-section { background: var(--bg-surface); }
 .evolution-list { border-top: 1px solid var(--line-strong); }
 .evolution-list article { display: grid; grid-template-columns: .5fr .8fr 1.3fr 3fr; align-items: baseline; gap: 30px; min-height: 120px; padding: 32px 20px; border-bottom: 1px solid var(--line-default); }

@@ -90,7 +90,7 @@ app.get('/projects', async (c) => {
         id, date, status, name, cn, latin, habitat, type, language,
         stars, year, shape, version, updated, repository, challenge, solution,
         demo_url, demo_enabled,
-        description_json, features_json, metrics_json, timeline_json
+        description_json, features_json, metrics_json, timeline_json, preview_image_url, preview_images_json
       FROM projects
       WHERE status IN ('LIVE', 'BETA')
       ORDER BY sort_order ASC, date DESC
@@ -125,6 +125,7 @@ app.get('/projects', async (c) => {
         features: safeJsonParse(row.features_json, []),
         metrics: safeJsonParse(row.metrics_json, []),
         timeline: safeJsonParse(row.timeline_json, []),
+        ...publicGallery(row),
       }
     })
 
@@ -145,7 +146,7 @@ app.get('/projects/:id', async (c) => {
         stars, year, shape, version, updated, repository, challenge, solution,
         demo_url, demo_enabled,
         description_json, features_json, metrics_json, timeline_json,
-        readme_zh, readme_en, compose_dev, compose_prod, docs_synced_at
+        readme_zh, readme_en, compose_dev, compose_prod, docs_synced_at, preview_image_url, preview_images_json
       FROM projects
       WHERE id = ? AND status IN ('LIVE', 'BETA')
     `).bind(id).first()
@@ -186,6 +187,7 @@ app.get('/projects/:id', async (c) => {
       composeDev: row.compose_dev ?? '',
       composeProd: row.compose_prod ?? '',
       docsSyncedAt: row.docs_synced_at ?? '',
+      ...publicGallery(row),
     })
   } catch (err: any) {
     return c.json({ error: 'Failed to retrieve project detail' }, 500)
@@ -383,12 +385,24 @@ adminApp.post('/projects', async (c) => {
     }
     const demoEnabled = body.demoEnabled === true ? 1 : 0
 
+    // 预览图/相册：与 PUT 同口径，写入侧只放行 http(s) 绝对地址
+    const previewImages = parsePreviewImages(
+      body.previewImages !== undefined ? body.previewImages : body.preview_images_json,
+    )
+    const previewImageUrl =
+      sanitizeImageUrl(
+        body.previewImageUrl !== undefined ? body.previewImageUrl : body.preview_image_url,
+      ) ||
+      previewImages[0] ||
+      ''
+
     await c.env.DB.prepare(`
       INSERT INTO projects (
         id, date, status, name, cn, latin, habitat, type, language, stars, year, shape, version, updated, repository,
         demo_url, demo_enabled,
-        challenge, solution, description_json, features_json, metrics_json, timeline_json, internal_notes, sort_order
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        challenge, solution, description_json, features_json, metrics_json, timeline_json, internal_notes, sort_order,
+        preview_image_url, preview_images_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       body.id,
       body.date || new Date().toISOString().slice(0, 7).replace('-', '.'),
@@ -415,6 +429,8 @@ adminApp.post('/projects', async (c) => {
       JSON.stringify(body.timeline || []),
       body.internal_notes || '',
       body.sort_order || 0,
+      previewImageUrl,
+      JSON.stringify(previewImages),
     ).run()
 
     return c.json({ success: true, message: '项目创建成功' }, 201)
@@ -519,6 +535,18 @@ adminApp.put('/projects/:id', async (c) => {
     if (demoEnabledPatch !== undefined) {
       assignments.push('demo_enabled = ?')
       values.push(demoEnabledPatch)
+    }
+    // 预览图/相册：写入侧只放行 http(s) 绝对地址；相册经白名单/去重/限量后序列化
+    if (body.previewImages !== undefined || body.preview_images_json !== undefined) {
+      const source = body.previewImages !== undefined ? body.previewImages : body.preview_images_json
+      assignments.push('preview_images_json = ?')
+      values.push(JSON.stringify(parsePreviewImages(source)))
+    }
+    if (body.previewImageUrl !== undefined || body.preview_image_url !== undefined) {
+      const source =
+        body.previewImageUrl !== undefined ? body.previewImageUrl : body.preview_image_url
+      assignments.push('preview_image_url = ?')
+      values.push(sanitizeImageUrl(source))
     }
     if (assignments.length === 0) {
       return c.json({ error: 'No editable fields provided' }, 400)
@@ -779,6 +807,112 @@ async function fetchProjectDocs(
   return docs
 }
 
+// 预览图/相册：从 README 文本里取真实截图（跳过 shields.io 之类徽章与 SVG 图标）
+const PREVIEW_BADGE_HINTS = [
+  'shields.io',
+  'badge',
+  'badgen',
+  'travis-ci',
+  'codecov',
+  'coveralls',
+  'cirrus-ci',
+  'appveyor',
+  'buymeacoffee',
+]
+// 相册上限：详情页没必要展示更多，也避免同步把整篇 README 的装饰图都搬进来
+const PREVIEW_IMAGE_LIMIT = 12
+
+/** 把 README 里的相对路径解析成 raw.githubusercontent 绝对地址；已是绝对 URL 的原样返回 */
+export function resolveRepoAssetUrl(
+  raw: string,
+  owner: string,
+  repo: string,
+  defaultBranch?: string | null,
+): string {
+  const url = String(raw ?? '').trim()
+  if (!url) return ''
+  if (/^https?:\/\//i.test(url)) return url
+  if (/^\/\//.test(url)) return `https:${url}`
+  // 内联/协议型资源一律不当作预览图
+  if (/^(data|javascript|mailto|blob):/i.test(url) || url.startsWith('#')) return ''
+  const branch = String(defaultBranch ?? '').trim() || 'main'
+  const path = url.replace(/^\.\//, '').replace(/^\//, '')
+  return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`
+}
+
+/** 只放行 http(s) 绝对地址；其余（含 data:、相对路径、空值）一律丢弃 */
+export function sanitizeImageUrl(raw: unknown): string {
+  const url = String(raw ?? '').trim()
+  return /^https?:\/\//i.test(url) ? url : ''
+}
+
+/**
+ * 相册列的解析（读侧与写侧共用）：接受 JSON 字符串或数组，坏数据退化为空数组；
+ * 顺带做 http(s) 白名单、去重与限量，保证非法地址不会进入公开接口或 <img src>。
+ */
+export function parsePreviewImages(raw: unknown): string[] {
+  let source: unknown = raw
+  if (typeof raw === 'string') {
+    const text = raw.trim()
+    if (!text) return []
+    source = safeJsonParse(text, [])
+  }
+  if (!Array.isArray(source)) return []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const item of source) {
+    const url = sanitizeImageUrl(item)
+    if (!url || seen.has(url)) continue
+    seen.add(url)
+    out.push(url)
+    if (out.length >= PREVIEW_IMAGE_LIMIT) break
+  }
+  return out
+}
+
+/**
+ * 从 README 提取全部真实截图（有序、去重、上限 PREVIEW_IMAGE_LIMIT）：
+ * 位图优先于矢量图，徽章与内联资源一律排除；找不到时返回空数组（不编造占位图）。
+ */
+export function extractPreviewImages(
+  markdown: string | null | undefined,
+  owner: string,
+  repo: string,
+  defaultBranch?: string | null,
+): string[] {
+  const text = String(markdown ?? '')
+  const candidates: string[] = []
+  for (const match of text.matchAll(/!\[[^\]]*\]\(([^)\s]+)/g)) candidates.push(match[1])
+  for (const match of text.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)) candidates.push(match[1])
+
+  const isBadge = (url: string) => {
+    const lower = url.toLowerCase()
+    return PREVIEW_BADGE_HINTS.some((hint) => lower.includes(hint))
+  }
+  const isVector = (url: string) => /\.svg(\?|#|$)/i.test(url)
+  // 先位图、后矢量，徽章一律排除；顺序保持不变
+  const ordered = [
+    ...candidates.filter((url) => !isBadge(url) && !isVector(url)),
+    ...candidates.filter((url) => !isBadge(url)),
+  ]
+  return parsePreviewImages(
+    ordered.map((url) => resolveRepoAssetUrl(url, owner, repo, defaultBranch)),
+  )
+}
+
+/** 封面与相册对外统一口径：相册缺失时退化为单张封面，封面缺失时退化为相册第一张 */
+export function publicGallery(row: { preview_image_url?: unknown; preview_images_json?: unknown }): {
+  previewImageUrl: string
+  previewImages: string[]
+} {
+  const images = parsePreviewImages(row.preview_images_json)
+  const cover = sanitizeImageUrl(row.preview_image_url) || images[0] || ''
+  return {
+    previewImageUrl: cover,
+    previewImages: images.length > 0 ? images : cover ? [cover] : [],
+  }
+}
+
 function nowStamp(): string {
   return new Date().toISOString().slice(0, 19).replace('T', ' ')
 }
@@ -795,9 +929,15 @@ export type SyncSourceRow = {
   has_readme_en: number
   has_compose_dev: number
   has_compose_prod: number
+  has_preview: number
+  has_preview_images: number
+  /** README 开头片段：文档已齐时不必再抓取，也能从头部拿到首图 */
+  readme_head_en: string
+  readme_head_zh: string
 }
 
 export type RepoMeta = {
+  default_branch?: string
   stargazers_count?: number
   forks_count?: number
   open_issues_count?: number
@@ -920,6 +1060,27 @@ export function buildProjectSyncUpdate(
     }
   }
 
+  // 预览图/相册：编辑所有 → 只在空白时从 README 提取；管理员覆盖过的不动
+  if (row.has_preview !== 1 || row.has_preview_images !== 1) {
+    const parsed = parseGithubRepo(row.repository)
+    const readmeText = docs?.readmeEn || docs?.readmeZh || row.readme_head_en || row.readme_head_zh
+    if (parsed && readmeText) {
+      const images = extractPreviewImages(readmeText, parsed.owner, parsed.repo, meta.default_branch)
+      if (images.length > 0) {
+        const filled: string[] = []
+        if (row.has_preview !== 1) {
+          columns.preview_image_url = images[0]
+          filled.push('封面')
+        }
+        if (row.has_preview_images !== 1) {
+          columns.preview_images_json = JSON.stringify(images)
+          filled.push(`相册 ${images.length} 张`)
+        }
+        notes.push(`预览图已从 README 提取（${filled.join(' / ')}）`)
+      }
+    }
+  }
+
   if (docs) {
     const candidates: Array<[string, string, boolean]> = [
       ['readme_zh', docs.readmeZh, row.has_readme_zh === 1],
@@ -958,7 +1119,11 @@ adminApp.post('/github-sync', async (c) => {
               (readme_zh <> '') AS has_readme_zh,
               (readme_en <> '') AS has_readme_en,
               (compose_dev <> '') AS has_compose_dev,
-              (compose_prod <> '') AS has_compose_prod
+              (compose_prod <> '') AS has_compose_prod,
+              (preview_image_url <> '') AS has_preview,
+              (preview_images_json <> '' AND preview_images_json <> '[]') AS has_preview_images,
+              substr(readme_en, 1, 2000) AS readme_head_en,
+              substr(readme_zh, 1, 2000) AS readme_head_zh
        FROM projects ORDER BY sort_order ASC LIMIT ${QUERY_ROW_LIMIT}`,
     ).all()
 
@@ -967,16 +1132,7 @@ adminApp.post('/github-sync', async (c) => {
     // 继续跑只会把配额与 Worker 时间浪费在必然失败的调用上。
     // 另：此处刻意保持串行（不并发），避免匿名 API 上的突发压力触发更严格的限流。
     let rateLimited = false
-    for (const row of results as unknown as {
-      id: string
-      name: string
-      repository: string
-      description_json: string
-      has_readme_zh: number
-      has_readme_en: number
-      has_compose_dev: number
-      has_compose_prod: number
-    }[]) {
+    for (const row of results as unknown as SyncSourceRow[]) {
       if (rateLimited) {
         outcomes.push({
           id: row.id,
@@ -1266,14 +1422,21 @@ adminApp.post('/github-import', async (c) => {
 
     // 导入时同步抓取 README / Compose，让新标本开箱即有完整文档
     const docs = await fetchProjectDocs(owner, repo, ghHeaders)
+    // 预览图/相册：从 README 提取全部真实截图（相对路径按默认分支解析），封面取第一张
+    const previewImages = extractPreviewImages(
+      docs.readmeEn || docs.readmeZh,
+      owner,
+      repo,
+      repoData.default_branch,
+    )
 
     const insertProject = (id: string) =>
       c.env.DB.prepare(`
       INSERT INTO projects (
         id, date, status, name, cn, latin, habitat, type, language, stars, year, shape, version, updated, repository,
         challenge, solution, description_json, features_json, metrics_json, timeline_json, internal_notes, sort_order,
-        readme_zh, readme_en, compose_dev, compose_prod, docs_synced_at
-      ) VALUES (?, ?, 'LIVE', ?, ?, ?, 'GitHub Field', 'Tool', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
+        readme_zh, readme_en, compose_dev, compose_prod, docs_synced_at, preview_image_url, preview_images_json
+      ) VALUES (?, ?, 'LIVE', ?, ?, ?, 'GitHub Field', 'Tool', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       id,
       createdDate,
@@ -1299,6 +1462,8 @@ adminApp.post('/github-import', async (c) => {
       docs.composeDev,
       docs.composeProd,
       nowStamp(),
+      previewImages[0] ?? '',
+      JSON.stringify(previewImages),
     ).run()
 
     // 编号是"先查最大号再插入"推出来的：并发导入可能算出同一个号，
