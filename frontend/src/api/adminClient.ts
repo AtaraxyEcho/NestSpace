@@ -130,6 +130,30 @@ export async function saveAdminSiteSettings(settings: SiteSettings): Promise<{ s
 }
 
 /**
+ * 管理端触发 GitHub 同步：按各项目仓库地址拉取最新 stars / 推送时间 / Release 版本
+ */
+export async function syncGithubRepos(): Promise<{
+  success: boolean
+  results?: Array<Record<string, unknown>>
+  error?: string
+}> {
+  try {
+    const res = await fetch('/api/admin/github-sync', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    })
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}))
+      return { success: false, error: (errJson as any).error || `同步失败: HTTP ${res.status}` }
+    }
+    const data = await res.json()
+    return { success: true, results: data.results }
+  } catch (err: any) {
+    return { success: false, error: `网络异常: ${err.message}` }
+  }
+}
+
+/**
  * 管理端从 D1 数据库删除项目
  */
 export async function deleteAdminProject(id: string): Promise<{ success: boolean; error?: string }> {

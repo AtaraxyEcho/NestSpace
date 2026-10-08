@@ -366,18 +366,88 @@ adminApp.delete('/projects/:id', async (c) => {
   }
 })
 
+// 管理端：GitHub 同步——按各项目的 repository 地址拉取公开仓库的最新
+// stars / 最近推送时间 / 最新 Release 版本并写回 D1（公开仓库无需 Token）
+adminApp.post('/github-sync', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(
+      'SELECT id, name, repository FROM projects ORDER BY sort_order ASC',
+    ).all()
+
+    const outcomes: Record<string, unknown>[] = []
+    for (const row of results as unknown as { id: string; name: string; repository: string }[]) {
+      const match = /^github\.com\/([^/\s]+)\/([^/\s#?]+)/.exec((row.repository || '').trim())
+      if (!match) {
+        outcomes.push({ id: row.id, name: row.name, status: 'skipped', note: '仓库地址为空或非 GitHub 格式' })
+        continue
+      }
+      const [, owner, repo] = match
+      try {
+        const ghHeaders = { 'User-Agent': 'NestSpace-Sync', Accept: 'application/vnd.github+json' }
+        const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+          headers: ghHeaders,
+        })
+        if (!repoRes.ok) {
+          outcomes.push({ id: row.id, name: row.name, status: 'error', note: `GitHub API ${repoRes.status}` })
+          continue
+        }
+        const data: any = await repoRes.json()
+        const starsCount = typeof data.stargazers_count === 'number' ? data.stargazers_count : 0
+        const stars = starsCount >= 1000 ? `${(starsCount / 1000).toFixed(1)}k` : String(starsCount)
+        const updated = String(data.pushed_at || '').slice(0, 10).replace(/-/g, '.')
+        let version: string | null = null
+        try {
+          const relRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases/latest`, {
+            headers: ghHeaders,
+          })
+          if (relRes.ok) version = ((await relRes.json()) as any).tag_name ?? null
+        } catch {
+          // Release 信息获取失败不阻断整体同步
+        }
+
+        const sets = ['stars = ?']
+        const values: (string | number)[] = [stars]
+        if (updated) {
+          sets.push('updated = ?')
+          values.push(updated)
+        }
+        if (version) {
+          sets.push('version = ?')
+          values.push(version)
+        }
+        sets.push('updated_at = CURRENT_TIMESTAMP')
+        values.push(row.id)
+        await c.env.DB.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`).bind(...values).run()
+
+        outcomes.push({
+          id: row.id,
+          name: data.full_name || row.name,
+          status: 'synced',
+          stars,
+          version: version || '',
+          updated: updated || '',
+        })
+      } catch {
+        outcomes.push({ id: row.id, name: row.name, status: 'error', note: 'GitHub 请求失败' })
+      }
+    }
+
+    return c.json({ success: true, results: outcomes })
+  } catch (err: any) {
+    console.error('GitHub sync error:', err)
+    return c.json({ error: 'Sync failed' }, 500)
+  }
+})
+
 // ==========================================
 // 3. 站点文案设置接口
 // ==========================================
 
-// 公开端：获取站点文案（空字段由前端回退到内置默认值，无敏感信息）
+// 公开端：获取站点文案与配置（空字段由前端回退到内置默认值，无敏感信息）
 app.get('/site-settings', async (c) => {
   try {
     const row: any = await c.env.DB.prepare(`
-      SELECT hero_en, hero_zh, subtitle_en, subtitle_zh, about_en, about_zh,
-             github_url, contact_email, seo_title, seo_description,
-             icp_enabled, icp_number, icp_url
-      FROM site_settings WHERE id = 1
+      SELECT * FROM site_settings WHERE id = 1
     `).first()
 
     if (!row) return c.json({})
@@ -396,6 +466,16 @@ app.get('/site-settings', async (c) => {
       icpEnabled: row.icp_enabled === 1,
       icpNumber: row.icp_number ?? '',
       icpUrl: row.icp_url ?? '',
+      logoText: row.logo_text ?? '',
+      logoSubtext: row.logo_subtext ?? '',
+      logoImageUrl: row.logo_image_url ?? '',
+      logoType: row.logo_type || 'text',
+      navItems: safeJsonParse(row.nav_items_json, null),
+      statsSinceYear: row.stats_since_year ?? '',
+      statsAsOfDate: row.stats_as_of_date ?? '',
+      customCitations: row.custom_citations ?? '',
+      activityLogMode: row.activity_log_mode || 'auto',
+      customActivityLog: safeJsonParse(row.activity_log_json, []),
     })
   } catch (err: any) {
     // 出错时返回空对象：公开端文案回退到前端内置默认值，不影响站点展示
@@ -418,6 +498,19 @@ const SITE_SETTINGS_COLUMNS: Record<string, string> = {
   seoDescription: 'seo_description',
   icpNumber: 'icp_number',
   icpUrl: 'icp_url',
+  logoText: 'logo_text',
+  logoSubtext: 'logo_subtext',
+  logoImageUrl: 'logo_image_url',
+  logoType: 'logo_type',
+  statsSinceYear: 'stats_since_year',
+  statsAsOfDate: 'stats_as_of_date',
+  customCitations: 'custom_citations',
+  activityLogMode: 'activity_log_mode',
+}
+
+const SITE_SETTINGS_JSON_COLUMNS: Record<string, string> = {
+  navItems: 'nav_items_json',
+  customActivityLog: 'activity_log_json',
 }
 
 // 管理端：获取站点设置原始值
@@ -443,6 +536,16 @@ adminApp.get('/site-settings', async (c) => {
       icpEnabled: row.icp_enabled === 1,
       icpNumber: row.icp_number ?? '',
       icpUrl: row.icp_url ?? '',
+      logoText: row.logo_text ?? '',
+      logoSubtext: row.logo_subtext ?? '',
+      logoImageUrl: row.logo_image_url ?? '',
+      logoType: row.logo_type || 'text',
+      navItems: safeJsonParse(row.nav_items_json, null),
+      statsSinceYear: row.stats_since_year ?? '',
+      statsAsOfDate: row.stats_as_of_date ?? '',
+      customCitations: row.custom_citations ?? '',
+      activityLogMode: row.activity_log_mode || 'auto',
+      customActivityLog: safeJsonParse(row.activity_log_json, []),
     })
   } catch (err: any) {
     console.error('Admin fetch site settings error:', err)
@@ -462,6 +565,13 @@ adminApp.put('/site-settings', async (c) => {
       if (body[field] !== undefined) {
         insertColumns.push(column)
         insertValues.push(String(body[field]))
+        updateAssignments.push(`${column} = excluded.${column}`)
+      }
+    }
+    for (const [field, column] of Object.entries(SITE_SETTINGS_JSON_COLUMNS)) {
+      if (body[field] !== undefined) {
+        insertColumns.push(column)
+        insertValues.push(JSON.stringify(body[field]))
         updateAssignments.push(`${column} = excluded.${column}`)
       }
     }

@@ -1,4 +1,10 @@
-import type { SiteSettings } from '../types/siteSettings'
+import type { SiteSettings, NavItemConfig } from '../types/siteSettings'
+
+export const DEFAULT_NAV_ITEMS: NavItemConfig[] = [
+  { id: 'cabinet', labelEn: 'Cabinet', labelZh: '标本陈列', visible: true },
+  { id: 'curator', labelEn: 'Curator', labelZh: '馆长手记', visible: true },
+  { id: 'index', labelEn: 'Index', labelZh: '馆藏目录', visible: true },
+]
 
 // 站点文案内置默认值：D1 中对应字段为空时回退到这里；
 // 修改默认文案后需重新构建部署（管理端改动则即时生效、无需重新部署）。
@@ -19,21 +25,58 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   icpEnabled: false,
   icpNumber: '',
   icpUrl: 'https://beian.miit.gov.cn/',
+
+  // 标头与品牌 Logo 设置
+  logoText: 'NESTSPACE',
+  logoSubtext: 'ATARAXYECHO',
+  logoImageUrl: '',
+  logoType: 'text',
+
+  // 顶部导航栏配置（默认调换 Curator 与 Index）
+  navItems: DEFAULT_NAV_ITEMS,
+
+  // 馆藏数据与活跃度配置
+  statsSinceYear: '',
+  statsAsOfDate: '',
+  customCitations: '',
+  activityLogMode: 'auto',
+  customActivityLog: [],
 }
 
-/** 将服务端返回的设置与默认值合并：字符串空值回退默认，布尔值直接生效 */
+/** 将服务端返回的设置与默认值合并：字符串空值回退默认，布尔值及数组直接生效 */
 export function mergeSiteSettings(data: Partial<SiteSettings> | null | undefined): SiteSettings {
-  const merged: SiteSettings = { ...DEFAULT_SITE_SETTINGS }
+  const merged: SiteSettings = {
+    ...DEFAULT_SITE_SETTINGS,
+    navItems: [...DEFAULT_NAV_ITEMS],
+    customActivityLog: [],
+  }
   if (!data) return merged
-  const target = merged as unknown as Record<string, string | boolean>
-  const source = data as unknown as Record<string, string | boolean | undefined>
+
+  const target = merged as unknown as Record<string, unknown>
+  const source = data as unknown as Record<string, unknown>
+
   for (const key of Object.keys(DEFAULT_SITE_SETTINGS)) {
     const value = source[key]
-    if (typeof value === 'boolean') {
+    if (value === undefined || value === null) continue
+
+    if (key === 'navItems') {
+      if (Array.isArray(value) && value.length > 0) {
+        target[key] = value
+      }
+    } else if (key === 'customActivityLog') {
+      if (Array.isArray(value)) {
+        target[key] = value
+      }
+    } else if (typeof value === 'boolean') {
       target[key] = value
-    } else if (typeof value === 'string' && value) {
+    } else if (typeof value === 'string') {
+      if (value !== '') {
+        target[key] = value
+      }
+    } else {
       target[key] = value
     }
   }
+
   return merged
 }

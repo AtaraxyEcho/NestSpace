@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import type { Language, Project, ProjectShape, ProjectStatus } from "./types/project"
 import { fallbackProjects as projects } from "./data/fallbackProjects"
-import { DEFAULT_SITE_SETTINGS } from "./data/defaultSiteSettings"
+import { DEFAULT_SITE_SETTINGS, DEFAULT_NAV_ITEMS } from "./data/defaultSiteSettings"
 import { fetchPublicProjects, fetchSiteSettings } from "./api/client"
 import {
   verifyAndFetchAdminProjects,
@@ -10,8 +10,10 @@ import {
   getAdminToken,
   fetchAdminSiteSettings,
   saveAdminSiteSettings,
+  syncGithubRepos,
 } from "./api/adminClient"
-import type { SiteSettings } from "./types/siteSettings"
+import type { SiteSettings, NavItemConfig } from "./types/siteSettings"
+import { computeCatalogueStats, computeActivityTimeline } from "./utils/stats"
 
 
 function SpecimenSvg({ shape }: { shape: Project["shape"] }) {
@@ -178,33 +180,107 @@ function SpecimenCard({
   )
 }
 
+// 站内章节锚点：默认已调换 Curator 与 Index 的位置（Cabinet → Curator → Index）
+const SECTION_ANCHORS = ["cabinet", "curator", "index", "colophon"]
+
+function routeFromHash(hash: string) {
+  const clean = hash.replace(/^#/, "")
+  if (!clean || SECTION_ANCHORS.includes(clean)) return "home"
+  return clean
+}
+
+function LogoWordmark({ settings }: { settings: SiteSettings }) {
+  const logoText = settings.logoText || "NESTSPACE"
+  const logoSubtext = settings.logoSubtext || "ATARAXYECHO"
+  const logoType = settings.logoType || "text"
+  const logoImageUrl = settings.logoImageUrl
+
+  return (
+    <a className="wordmark" href="#cabinet">
+      {logoType !== "text" && logoImageUrl ? (
+        <img src={logoImageUrl} alt={logoText} className="wordmark-logo-img" />
+      ) : null}
+      {logoType !== "image" ? (
+        <>
+          {logoText}
+          {logoSubtext ? <span> — {logoSubtext}</span> : null}
+        </>
+      ) : null}
+    </a>
+  )
+}
+
 function Header({
   language,
   setLanguage,
   dark,
   setDark,
-  onAdmin,
+  settings,
 }: {
   language: Language
   setLanguage: (value: Language) => void
   dark: boolean
   setDark: (value: boolean) => void
-  onAdmin: () => void
+  settings: SiteSettings
 }) {
+  const navList = (
+    settings.navItems && settings.navItems.length > 0
+      ? settings.navItems
+      : DEFAULT_NAV_ITEMS
+  ).filter((item) => item.visible !== false)
+
+  // 导航选中态：按当前滚动位置高亮对应章节（scroll-spy）
+  const [activeSection, setActiveSection] = useState<string>("cabinet")
+
+  useEffect(() => {
+    let frame = 0
+    const update = () => {
+      frame = 0
+      // 取"阈值线以下、最靠近阈值线"的章节
+      const threshold = window.innerHeight * 0.45
+      let current = "cabinet"
+      let currentTop = -Infinity
+      for (const item of navList) {
+        const el = document.getElementById(item.id)
+        if (!el) continue
+        const top = el.getBoundingClientRect().top
+        if (top <= threshold && top > currentTop) {
+          current = item.id
+          currentTop = top
+        }
+      }
+      setActiveSection((prev) => (prev === current ? prev : current))
+    }
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(update)
+    }
+    update()
+    window.addEventListener("scroll", onScroll, { passive: true })
+    return () => {
+      window.removeEventListener("scroll", onScroll)
+      if (frame) cancelAnimationFrame(frame)
+    }
+  }, [navList])
+
   return (
     <header className="site-header">
-      <a className="wordmark" href="#cabinet">
-        NESTSPACE <span>— ATARAXYECHO</span>
-      </a>
+      <LogoWordmark settings={settings} />
       <nav aria-label="Primary navigation">
-        <a className="active" href="#cabinet">
-          Cabinet
-        </a>
-        <a href="#index">Index</a>
-        <a href="#curator">Curator</a>
-        <button type="button" className="nav-button" onClick={onAdmin}>
-          Admin
-        </button>
+        {navList.map((item) => {
+          const label =
+            language === "zh"
+              ? item.labelZh || item.labelEn
+              : item.labelEn || item.labelZh
+          return (
+            <a
+              key={item.id}
+              className={activeSection === item.id ? "active" : ""}
+              href={`#${item.id}`}
+            >
+              {label}
+            </a>
+          )
+        })}
       </nav>
       <div className="header-tools">
         <span className="volume">VOL. 01 · {new Date().getFullYear()}</span>
@@ -265,6 +341,10 @@ function SpiralGallery({
       const height =
         window.innerHeight < 700 ? 430 : window.innerWidth < 900 ? 500 : 620
 
+      // 与 .spiral-stage 的 perspective(2400px) 对应：把 Z 轴深度折算为等效的 2D
+      // 位移与缩放（卡片恒为 rotateY(0)，投影几何完全一致），规避深层 translateZ
+      // 在部分浏览器中的命中测试错位，保证卡片内按钮可点击。
+      const PERSPECTIVE = 2400
       cardsRef.current.forEach((card, index) => {
         if (!card) return
         const relAngle = index * step - p * totalAngle
@@ -274,11 +354,13 @@ function SpiralGallery({
         const facing = Math.cos(relAngle)
         const visibleFacing = Math.max(0, facing)
         const opacity = facing <= 0 ? 0 : Math.pow(visibleFacing, 0.7)
-        const blur = facing <= 0 ? 12 : (1 - facing) * 5
+        // 模糊曲线收敛：正面卡片恒为 0，侧向最多 3px，保证文字始终可读
+        const blur = facing <= 0 ? 10 : (1 - facing) * 3
         const scale = facing <= 0 ? 0.68 : 0.82 + facing * 0.18
-        card.style.transform = `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, ${z.toFixed(2)}px) rotateY(0deg) scale(${scale.toFixed(4)})`
+        const project = PERSPECTIVE / (PERSPECTIVE - z)
+        card.style.transform = `translate3d(${(x * project).toFixed(2)}px, ${(y * project).toFixed(2)}px, 0px) scale(${(scale * project).toFixed(4)})`
         card.style.opacity = opacity.toFixed(3)
-        card.style.filter = `blur(${blur.toFixed(2)}px)`
+        card.style.filter = blur <= 0.05 ? "none" : `blur(${blur.toFixed(2)}px)`
         card.style.pointerEvents = opacity > 0.8 ? "auto" : "none"
         card.style.zIndex = `${Math.round((facing + 1) * 100)}`
       })
@@ -368,20 +450,40 @@ function SpiralGallery({
 function CatalogueStats({
   language,
   items,
+  settings,
 }: {
   language: Language
   items: Project[]
+  settings: SiteSettings
 }) {
+  const computed = computeCatalogueStats(items, settings)
+  const timelineData = computeActivityTimeline(items, settings)
+
   const stats = [
-    ["SPECIMENS", String(items.length).padStart(2, "0"), "Open-source works"],
-    ["CITATIONS", "8.4k", `Across ${items.length} habitats`],
+    [
+      "SPECIMENS",
+      computed.specimensCount,
+      language === "zh" ? "件开源标本" : "Open-source works",
+    ],
+    [
+      "CITATIONS",
+      computed.citations,
+      language === "zh"
+        ? `分布于 ${computed.distinctHabitats} 个栖息地`
+        : `Across ${computed.distinctHabitats} habitats`,
+    ],
     [
       "RANGE",
-      String(new Set(items.map((item) => item.language)).size).padStart(2, "0"),
-      "Languages observed",
+      computed.distinctLanguages,
+      language === "zh" ? "种技术语言" : "Languages observed",
     ],
-    ["SINCE", "2021", "Collected with care"],
+    [
+      "SINCE",
+      computed.sinceYear,
+      language === "zh" ? "悉心收藏至今" : "Collected with care",
+    ],
   ]
+
   return (
     <section className="section stats-section reveal-section">
       <div className="section-heading">
@@ -392,7 +494,7 @@ function CatalogueStats({
             <em>/ {language === "zh" ? "馆藏统计" : "Collection record"}</em>
           </h2>
         </div>
-        <span className="as-of">AS OF 2024.10</span>
+        <span className="as-of">AS OF {computed.asOfDate}</span>
       </div>
       <div className="stats-grid">
         {stats.map((stat, index) => (
@@ -408,22 +510,36 @@ function CatalogueStats({
           </article>
         ))}
       </div>
-      <div className="timeline">
+      <div
+        className="timeline"
+        style={{
+          gridTemplateColumns: `2fr repeat(${timelineData.length}, 1fr)`,
+        }}
+      >
         <div className="timeline-copy">
           <span className="eyebrow">ACTIVITY LOG</span>
-          <p>Each year marks another layer in the cabinet.</p>
+          <p>
+            {language === "zh"
+              ? "历年的生长轨迹，记录着标本室沉淀的年轮。"
+              : "Each year marks another layer in the cabinet."}
+          </p>
         </div>
-        {[38, 62, 79, 100].map((height, index) => (
-          <div className="timeline-year" key={height}>
+        {timelineData.map((item, index) => (
+          <div
+            className="timeline-year"
+            key={item.year}
+            title={`${item.year}: ${item.count} 项动态 / 记录`}
+          >
+            <small>{item.count} items</small>
             <i
               style={
                 {
-                  "--bar-height": `${height}%`,
-                  "--delay": `${index * 100}ms`,
+                  "--bar-height": `${item.height}%`,
+                  "--delay": `${index * 90}ms`,
                 } as React.CSSProperties
               }
             />
-            <span>{2021 + index}</span>
+            <span>{item.year}</span>
           </div>
         ))}
       </div>
@@ -564,24 +680,22 @@ function SiteFooter({
   items,
   settings,
   onOpen,
-  onAdmin,
 }: {
   items: Project[]
   settings: SiteSettings
   onOpen: (project: Project) => void
-  onAdmin: () => void
 }) {
   return (
     <footer className="site-footer">
       <div className="footer-grid">
         <div className="footer-brand">
           <span className="eyebrow">AN OPEN CABINET</span>
-          <strong>NestSpace</strong>
-          <em>巢空间</em>
+          <strong>{settings.logoText || "NestSpace"}</strong>
+          <em>{settings.logoSubtext || "巢空间"}</em>
           <p>
-            The open-source collection of AtaraxyEcho.
+            The open-source collection of {settings.logoSubtext || "AtaraxyEcho"}.
             <br />
-            AtaraxyEcho 的开源项目标本馆。
+            {settings.logoSubtext || "AtaraxyEcho"} 的开源项目标本馆。
           </p>
         </div>
         <div>
@@ -599,8 +713,8 @@ function SiteFooter({
         <div>
           <b>COLLECTION</b>
           <a href="#cabinet">Cabinet</a>
-          <a href="#index">Index</a>
           <a href="#curator">Curator</a>
+          <a href="#index">Index</a>
           <a href="#colophon">Colophon</a>
         </div>
         <div>
@@ -613,13 +727,10 @@ function SiteFooter({
             GitHub ↗
           </a>
           <a href={`mailto:${settings.contactEmail}`}>Contact ↗</a>
-          <button type="button" onClick={onAdmin}>
-            Admin console →
-          </button>
         </div>
       </div>
       <div className="footer-bottom" id="colophon">
-        <span>Collected with care, since 2021</span>
+        <span>Collected with care, since {computeCatalogueStats(items, settings).sinceYear}</span>
         {settings.icpEnabled && settings.icpNumber ? (
           <a
             href={settings.icpUrl || "https://beian.miit.gov.cn/"}
@@ -643,7 +754,6 @@ function DetailPage({
   dark,
   settings,
   onBack,
-  onAdmin,
   onLanguage,
   onTheme,
   onOpen,
@@ -654,7 +764,6 @@ function DetailPage({
   dark: boolean
   settings: SiteSettings
   onBack: () => void
-  onAdmin: () => void
   onLanguage: () => void
   onTheme: () => void
   onOpen: (project: Project) => void
@@ -667,7 +776,14 @@ function DetailPage({
     <main className="detail-page">
       <header className="detail-header">
         <button type="button" className="wordmark" onClick={onBack}>
-          NESTSPACE <span>— ATARAXYECHO</span>
+          {settings.logoType !== "text" && settings.logoImageUrl ? (
+            <img src={settings.logoImageUrl} alt={settings.logoText || "NESTSPACE"} className="wordmark-logo-img" />
+          ) : null}
+          {settings.logoType !== "image" ? (
+            <>
+              {settings.logoText || "NESTSPACE"} <span>— {settings.logoSubtext || "ATARAXYECHO"}</span>
+            </>
+          ) : null}
         </button>
         <span className="detail-location">CABINET / SPEC—{project.id}</span>
         <div className="header-tools">
@@ -676,9 +792,6 @@ function DetailPage({
           </button>
           <button type="button" onClick={onTheme}>
             {dark ? "LIGHT" : "DARK"}
-          </button>
-          <button type="button" onClick={onAdmin}>
-            ADMIN
           </button>
         </div>
       </header>
@@ -926,12 +1039,22 @@ function DetailPage({
           ))}
         </div>
       </section>
-      <SiteFooter items={items} settings={settings} onOpen={onOpen} onAdmin={onAdmin} />
+      <SiteFooter items={items} settings={settings} onOpen={onOpen} />
     </main>
   )
 }
 
-type AdminView = "overview" | "content" | "projects" | "sync" | "settings"
+type AdminView = "overview" | "navigation" | "stats" | "content" | "projects" | "sync" | "settings"
+
+type GithubSyncResult = {
+  id: string
+  name: string
+  status: string
+  note?: string
+  stars?: string
+  version?: string
+  updated?: string
+}
 
 function AdminGateway({
   items,
@@ -1045,9 +1168,11 @@ function AdminPage({
     ...DEFAULT_SITE_SETTINGS,
   })
   const [syncing, setSyncing] = useState(false)
-  const [syncFrequency, setSyncFrequency] = useState("daily")
+  const [syncResults, setSyncResults] = useState<GithubSyncResult[] | null>(null)
   const viewNames: Record<AdminView, string> = {
     overview: "馆藏总览",
+    navigation: "导航与标头",
+    stats: "馆藏统计",
     content: "内容管理",
     projects: "项目管理",
     sync: "GitHub 同步",
@@ -1070,6 +1195,25 @@ function AdminPage({
         ? "站点设置已保存，刷新公开站点即可生效。"
         : `保存失败: ${res.error || "请检查网络或口令权限"}`,
     )
+  }
+
+  const runGithubSync = async () => {
+    setSyncing(true)
+    setNotice("正在从 GitHub 采集仓库数据…")
+    const res = await syncGithubRepos()
+    setSyncing(false)
+    if (!res.success || !res.results) {
+      setNotice(`同步失败: ${res.error || "未知错误"}`)
+      return
+    }
+    const results = res.results as GithubSyncResult[]
+    setSyncResults(results)
+    const synced = results.filter((r) => r.status === "synced").length
+    setNotice(`同步完成：${synced}/${results.length} 个仓库已更新。`)
+    // 刷新项目列表以反映 stars / 版本 / 更新时间的变化
+    verifyAndFetchAdminProjects().then((refresh) => {
+      if (refresh.success && refresh.data) onChange(refresh.data)
+    })
   }
 
   const filtered = items.filter((item) => {
@@ -1167,31 +1311,45 @@ function AdminPage({
           </button>
           <button
             type="button"
+            className={view === "navigation" ? "active" : ""}
+            onClick={() => setView("navigation")}
+          >
+            <span>02</span> 导航与标头
+          </button>
+          <button
+            type="button"
+            className={view === "stats" ? "active" : ""}
+            onClick={() => setView("stats")}
+          >
+            <span>03</span> 馆藏统计
+          </button>
+          <button
+            type="button"
             className={view === "content" ? "active" : ""}
             onClick={() => setView("content")}
           >
-            <span>02</span> 内容管理
+            <span>04</span> 内容管理
           </button>
           <button
             type="button"
             className={view === "projects" ? "active" : ""}
             onClick={() => setView("projects")}
           >
-            <span>03</span> 项目管理
+            <span>05</span> 项目管理
           </button>
           <button
             type="button"
             className={view === "sync" ? "active" : ""}
             onClick={() => setView("sync")}
           >
-            <span>04</span> GitHub 同步
+            <span>06</span> GitHub 同步
           </button>
           <button
             type="button"
             className={view === "settings" ? "active" : ""}
             onClick={() => setView("settings")}
           >
-            <span>05</span> 站点设置
+            <span>07</span> 站点设置
           </button>
         </nav>
         <div className="admin-sidebar-foot">
@@ -1261,14 +1419,16 @@ function AdminPage({
                 <small>公开可见</small>
               </article>
               <article>
-                <span>总引用</span>
-                <strong>8.4k</strong>
-                <small>持续增长</small>
+                <span>总引用 Stars</span>
+                <strong>{computeCatalogueStats(items, siteContent).citations}</strong>
+                <small>实时计算累加</small>
               </article>
               <article>
-                <span>系统状态</span>
-                <strong className="status-word">HEALTHY</strong>
-                <small>最后检查：刚刚</small>
+                <span>技术语言跨度</span>
+                <strong className="status-word">
+                  {computeCatalogueStats(items, siteContent).distinctLanguages} 种
+                </strong>
+                <small>涵盖 {computeCatalogueStats(items, siteContent).distinctHabitats} 个栖息地</small>
               </article>
             </div>
             <div className="admin-overview-grid">
@@ -1342,6 +1502,500 @@ function AdminPage({
                   </div>
                 </dl>
               </article>
+            </div>
+          </div>
+        )}
+
+        {view === "navigation" && (
+          <div className="admin-content">
+            <div className="admin-page-title compact">
+              <div>
+                <span className="eyebrow">HEADER & LOGO / 02</span>
+                <h1>导航与标头控制</h1>
+                <p>自定义顶部栏导航项顺序、中英名称、展示状态及网站品牌 Logo。</p>
+              </div>
+              <button
+                type="button"
+                className="admin-primary"
+                onClick={saveSettings}
+              >
+                保存并生效
+              </button>
+            </div>
+
+            <div className="settings-grid">
+              <section className="settings-card">
+                <span className="eyebrow">NAVIGATION ORDER & LABELS</span>
+                <h2>导航项控制</h2>
+                <p style={{ fontSize: "12px", color: "#64685f", marginTop: "-16px", marginBottom: "16px" }}>
+                  通过 ▲ / ▼ 调整顶部栏显示顺序，并自定义各章节的中英文显示文案。
+                </p>
+
+                <div className="nav-config-list">
+                  {(siteContent.navItems && siteContent.navItems.length > 0
+                    ? siteContent.navItems
+                    : DEFAULT_NAV_ITEMS
+                  ).map((item, index) => (
+                    <div className="nav-config-item" key={item.id}>
+                      <div className="nav-order-btns">
+                        <button
+                          type="button"
+                          title="上移"
+                          disabled={index === 0}
+                          onClick={() => {
+                            const currentList = [
+                              ...(siteContent.navItems && siteContent.navItems.length > 0
+                                ? siteContent.navItems
+                                : DEFAULT_NAV_ITEMS),
+                            ]
+                            const temp = currentList[index - 1]
+                            currentList[index - 1] = currentList[index]
+                            currentList[index] = temp
+                            setSiteContent({ ...siteContent, navItems: currentList })
+                          }}
+                        >
+                          ▲
+                        </button>
+                        <button
+                          type="button"
+                          title="下移"
+                          disabled={
+                            index ===
+                            (siteContent.navItems && siteContent.navItems.length > 0
+                              ? siteContent.navItems.length
+                              : DEFAULT_NAV_ITEMS.length) -
+                              1
+                          }
+                          onClick={() => {
+                            const currentList = [
+                              ...(siteContent.navItems && siteContent.navItems.length > 0
+                                ? siteContent.navItems
+                                : DEFAULT_NAV_ITEMS),
+                            ]
+                            const temp = currentList[index + 1]
+                            currentList[index + 1] = currentList[index]
+                            currentList[index] = temp
+                            setSiteContent({ ...siteContent, navItems: currentList })
+                          }}
+                        >
+                          ▼
+                        </button>
+                      </div>
+                      <div>
+                        <small style={{ display: "block", fontSize: "9px", color: "#85887f" }}>英文显示</small>
+                        <input
+                          value={item.labelEn}
+                          onChange={(e) => {
+                            const currentList = [
+                              ...(siteContent.navItems && siteContent.navItems.length > 0
+                                ? siteContent.navItems
+                                : DEFAULT_NAV_ITEMS),
+                            ]
+                            const copy = currentList.map((n) =>
+                              n.id === item.id ? { ...n, labelEn: e.target.value } : n,
+                            )
+                            setSiteContent({ ...siteContent, navItems: copy })
+                          }}
+                          placeholder="英文名称"
+                        />
+                      </div>
+                      <div>
+                        <small style={{ display: "block", fontSize: "9px", color: "#85887f" }}>中文显示</small>
+                        <input
+                          value={item.labelZh}
+                          onChange={(e) => {
+                            const currentList = [
+                              ...(siteContent.navItems && siteContent.navItems.length > 0
+                                ? siteContent.navItems
+                                : DEFAULT_NAV_ITEMS),
+                            ]
+                            const copy = currentList.map((n) =>
+                              n.id === item.id ? { ...n, labelZh: e.target.value } : n,
+                            )
+                            setSiteContent({ ...siteContent, navItems: copy })
+                          }}
+                          placeholder="中文名称"
+                        />
+                      </div>
+                      <label className="visible-toggle">
+                        <input
+                          type="checkbox"
+                          checked={item.visible !== false}
+                          onChange={(e) => {
+                            const currentList = [
+                              ...(siteContent.navItems && siteContent.navItems.length > 0
+                                ? siteContent.navItems
+                                : DEFAULT_NAV_ITEMS),
+                            ]
+                            const copy = currentList.map((n) =>
+                              n.id === item.id ? { ...n, visible: e.target.checked } : n,
+                            )
+                            setSiteContent({ ...siteContent, navItems: copy })
+                          }}
+                        />
+                        <span>显示</span>
+                      </label>
+                      <span className="nav-id-tag">#{item.id}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
+                  <button
+                    type="button"
+                    style={{
+                      padding: "6px 12px",
+                      border: "1px solid #c5c6bf",
+                      background: "transparent",
+                      fontSize: "11px",
+                      cursor: "pointer",
+                    }}
+                    onClick={() => {
+                      setSiteContent({
+                        ...siteContent,
+                        navItems: [
+                          { id: "cabinet", labelEn: "Cabinet", labelZh: "标本陈列", visible: true },
+                          { id: "curator", labelEn: "Curator", labelZh: "馆长手记", visible: true },
+                          { id: "index", labelEn: "Index", labelZh: "馆藏目录", visible: true },
+                        ],
+                      })
+                    }}
+                  >
+                    重置为推荐顺序 (Cabinet → Curator → Index)
+                  </button>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <span className="eyebrow">IDENTITY & BRAND</span>
+                <h2>网站 Logo 设置</h2>
+
+                <label>
+                  Logo 展示模式
+                  <select
+                    value={siteContent.logoType || "text"}
+                    onChange={(e) =>
+                      setSiteContent({
+                        ...siteContent,
+                        logoType: e.target.value as SiteSettings["logoType"],
+                      })
+                    }
+                  >
+                    <option value="text">仅文字 (Text)</option>
+                    <option value="image">仅图片/图标 (Image)</option>
+                    <option value="both">图文结合 (Both)</option>
+                  </select>
+                </label>
+
+                <label>
+                  Logo 品牌主名称
+                  <input
+                    value={siteContent.logoText || ""}
+                    onChange={(e) =>
+                      setSiteContent({ ...siteContent, logoText: e.target.value })
+                    }
+                    placeholder="NESTSPACE"
+                  />
+                  <small>在顶部栏左侧突出展示的品牌文本</small>
+                </label>
+
+                <label>
+                  副标题 / 署名
+                  <input
+                    value={siteContent.logoSubtext || ""}
+                    onChange={(e) =>
+                      setSiteContent({ ...siteContent, logoSubtext: e.target.value })
+                    }
+                    placeholder="ATARAXYECHO"
+                  />
+                  <small>品牌名称后以破折号连接的辅助署名</small>
+                </label>
+
+                <label>
+                  Logo 图标/图片 URL
+                  <input
+                    value={siteContent.logoImageUrl || ""}
+                    onChange={(e) =>
+                      setSiteContent({ ...siteContent, logoImageUrl: e.target.value })
+                    }
+                    placeholder="https://... 或 /favicon.ico"
+                  />
+                  <small>支持 SVG 或 PNG 矢量/透明图标，建议高度约 20-30px</small>
+                </label>
+
+                <div className="logo-preview-box">
+                  <span>HEADER LOGO PREVIEW / 标头实时预览</span>
+                  <div className="logo-preview-display">
+                    <a className="wordmark" href="#cabinet" onClick={(e) => e.preventDefault()}>
+                      {siteContent.logoType !== "text" && siteContent.logoImageUrl ? (
+                        <img
+                          src={siteContent.logoImageUrl}
+                          alt="Logo"
+                          className="wordmark-logo-img"
+                        />
+                      ) : null}
+                      {siteContent.logoType !== "image" ? (
+                        <>
+                          {siteContent.logoText || "NESTSPACE"}
+                          {siteContent.logoSubtext ? (
+                            <span> — {siteContent.logoSubtext}</span>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </a>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className="admin-primary"
+                  style={{ marginTop: "24px" }}
+                  onClick={saveSettings}
+                >
+                  保存标头与 Logo 设置
+                </button>
+              </section>
+            </div>
+          </div>
+        )}
+
+        {view === "stats" && (
+          <div className="admin-content">
+            <div className="admin-page-title compact">
+              <div>
+                <span className="eyebrow">RECORD & TIMELINE / 03</span>
+                <h1>馆藏统计与动态</h1>
+                <p>修复与维护前台 Catalogue 统计数据及 ACTIVITY LOG 活跃度时间线。</p>
+              </div>
+              <button
+                type="button"
+                className="admin-primary"
+                onClick={saveSettings}
+              >
+                保存统计设置
+              </button>
+            </div>
+
+            <div className="settings-grid">
+              <section className="settings-card">
+                <span className="eyebrow">CATALOGUE STATS / 馆藏概览</span>
+                <h2>基础指标控制</h2>
+
+                <div
+                  style={{
+                    padding: "14px",
+                    background: "#e8e7e0",
+                    border: "1px solid #c8c7bf",
+                    marginBottom: "20px",
+                    fontSize: "12px",
+                    lineHeight: "1.7",
+                  }}
+                >
+                  <div><strong>当前实时计算值：</strong></div>
+                  <div>标本总数 (Specimens)：{items.length} 件</div>
+                  <div>
+                    累计引用 (Citations)：{computeCatalogueStats(items).citations} (基于各项目 stars)
+                  </div>
+                  <div>涵盖语言 (Range)：{computeCatalogueStats(items).distinctLanguages} 种</div>
+                  <div>最早年份 (Since)：{computeCatalogueStats(items).sinceYear}</div>
+                  <div>最新更新 (As of)：{computeCatalogueStats(items).asOfDate}</div>
+                </div>
+
+                <label>
+                  自定义引用量 (CITATIONS)
+                  <input
+                    value={siteContent.customCitations || ""}
+                    onChange={(e) =>
+                      setSiteContent({ ...siteContent, customCitations: e.target.value })
+                    }
+                    placeholder={`留空自动根据项目累加 (${computeCatalogueStats(items).citations})`}
+                  />
+                  <small>留空时自动计算所有项目的 Stars 之和；填写时以此自定义值为准（如 8.4k、10k）</small>
+                </label>
+
+                <label>
+                  收录起始年份 (SINCE)
+                  <input
+                    value={siteContent.statsSinceYear || ""}
+                    onChange={(e) =>
+                      setSiteContent({ ...siteContent, statsSinceYear: e.target.value })
+                    }
+                    placeholder={`留空自动取最早年份 (${computeCatalogueStats(items).sinceYear})`}
+                  />
+                  <small>留空时自动推算项目中最早年份（如 2021）；填写时固定展示该年份</small>
+                </label>
+
+                <label>
+                  统计截止日期 (AS OF)
+                  <input
+                    value={siteContent.statsAsOfDate || ""}
+                    onChange={(e) =>
+                      setSiteContent({ ...siteContent, statsAsOfDate: e.target.value })
+                    }
+                    placeholder={`留空自动取最新项目更新月 (${computeCatalogueStats(items).asOfDate})`}
+                  />
+                  <small>如：2024.10 或当前年月</small>
+                </label>
+
+                <button
+                  type="button"
+                  className="admin-primary"
+                  onClick={saveSettings}
+                >
+                  保存馆藏指标设置
+                </button>
+              </section>
+
+              <section className="settings-card">
+                <span className="eyebrow">ACTIVITY LOG / 活跃度年鉴</span>
+                <h2>活跃度时间线</h2>
+
+                <label>
+                  时间线生成模式
+                  <select
+                    value={siteContent.activityLogMode || "auto"}
+                    onChange={(e) =>
+                      setSiteContent({
+                        ...siteContent,
+                        activityLogMode: e.target.value as "auto" | "custom",
+                      })
+                    }
+                  >
+                    <option value="auto">自动根据项目与历程聚合 (推荐)</option>
+                    <option value="custom">手动自定义年份与记录数</option>
+                  </select>
+                  <small>
+                    {siteContent.activityLogMode === "auto"
+                      ? "自动分析所有项目的发布年份、更新时间与时间线里程碑，动态生成连贯年鉴。"
+                      : "手动指定每一年的记录数与权重比例。"}
+                  </small>
+                </label>
+
+                <div style={{ marginTop: "20px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: "12px", fontWeight: "600" }}>时间线年份列表</span>
+                    {siteContent.activityLogMode === "custom" && (
+                      <button
+                        type="button"
+                        style={{
+                          padding: "4px 10px",
+                          fontSize: "11px",
+                          cursor: "pointer",
+                          border: "1px solid #c5c6bf",
+                          background: "#f4f3ee",
+                        }}
+                        onClick={() => {
+                          const current = computeActivityTimeline(items, siteContent)
+                          setSiteContent({
+                            ...siteContent,
+                            activityLogMode: "custom",
+                            customActivityLog: current,
+                          })
+                        }}
+                      >
+                        从自动数据复制初始化
+                      </button>
+                    )}
+                  </div>
+
+                  <table className="stats-config-table">
+                    <thead>
+                      <tr>
+                        <th>年份</th>
+                        <th>动态项数 (权重)</th>
+                        <th>高度比例</th>
+                        {siteContent.activityLogMode === "custom" && <th>操作</th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {computeActivityTimeline(items, siteContent).map((logItem, idx) => (
+                        <tr key={logItem.year}>
+                          <td><strong>{logItem.year}</strong></td>
+                          <td>
+                            {siteContent.activityLogMode === "custom" ? (
+                              <input
+                                type="number"
+                                value={logItem.count}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value, 10) || 0
+                                  const cur =
+                                    siteContent.customActivityLog && siteContent.customActivityLog.length > 0
+                                      ? [...siteContent.customActivityLog]
+                                      : computeActivityTimeline(items, siteContent)
+                                  cur[idx] = { ...cur[idx], count: val }
+                                  setSiteContent({ ...siteContent, customActivityLog: cur })
+                                }}
+                              />
+                            ) : (
+                              <span>{logItem.count} 项动态</span>
+                            )}
+                          </td>
+                          <td>
+                            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                              <div style={{ width: "60px", height: "8px", background: "#c8c7bf", position: "relative" }}>
+                                <div style={{ width: `${logItem.height}%`, height: "100%", background: "#60765c" }} />
+                              </div>
+                              <span style={{ fontSize: "10px", color: "#777b70" }}>{logItem.height}%</span>
+                            </div>
+                          </td>
+                          {siteContent.activityLogMode === "custom" && (
+                            <td>
+                              <div className="stats-config-actions">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const copy = [...siteContent.customActivityLog]
+                                    copy.splice(idx, 1)
+                                    setSiteContent({ ...siteContent, customActivityLog: copy })
+                                  }}
+                                >
+                                  删除
+                                </button>
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  {siteContent.activityLogMode === "custom" && (
+                    <button
+                      type="button"
+                      style={{
+                        marginTop: "12px",
+                        padding: "6px 14px",
+                        border: "1px solid #c5c6bf",
+                        background: "#f4f3ee",
+                        fontSize: "11px",
+                        cursor: "pointer",
+                      }}
+                      onClick={() => {
+                        const cur =
+                          siteContent.customActivityLog && siteContent.customActivityLog.length > 0
+                            ? [...siteContent.customActivityLog]
+                            : computeActivityTimeline(items, siteContent)
+                        const lastYear = cur.length > 0 ? cur[cur.length - 1].year + 1 : new Date().getFullYear()
+                        setSiteContent({
+                          ...siteContent,
+                          customActivityLog: [...cur, { year: lastYear, count: 2, height: 60 }],
+                        })
+                      }}
+                    >
+                      ＋ 新增年份
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  className="admin-primary"
+                  style={{ marginTop: "24px" }}
+                  onClick={saveSettings}
+                >
+                  保存活跃度设置
+                </button>
+              </section>
             </div>
           </div>
         )}
@@ -1593,74 +2247,62 @@ function AdminPage({
               <div>
                 <span className="eyebrow">REMOTE COLLECTION / 04</span>
                 <h1>GitHub 同步</h1>
-                <p>从仓库读取 README、部署文档、版本与引用数据。</p>
+                <p>从 GitHub 拉取各项目的最新 stars、推送时间与 Release 版本。</p>
               </div>
               <button
                 type="button"
                 className="admin-primary"
                 disabled={syncing}
-                onClick={() => {
-                  setSyncing(true)
-                  window.setTimeout(() => {
-                    setSyncing(false)
-                    setNotice("同步完成：4 个仓库均为最新状态。")
-                  }, 900)
-                }}
+                onClick={runGithubSync}
               >
                 {syncing ? "正在采集…" : "立即同步"}
               </button>
             </div>
             <div className="sync-layout">
               <section className="settings-card">
-                <span className="eyebrow">CONNECTION</span>
-                <h2>连接设置</h2>
+                <span className="eyebrow">HOW IT WORKS</span>
+                <h2>同步说明</h2>
                 <label>
-                  GitHub Personal Access Token
-                  <input type="password" defaultValue="ghp_nestspace_demo" />
-                  <small>仅保存在加密环境变量中，页面不会读取明文。</small>
+                  同步内容
+                  <small>
+                    按各项目"仓库地址"字段（github.com/&lt;owner&gt;/&lt;repo&gt;）调用
+                    GitHub 公开 API，更新 stars 数、最近推送时间与最新 Release
+                    版本号，并立即写回 D1 数据库。
+                  </small>
                 </label>
                 <label>
-                  自动同步频率
-                  <select
-                    value={syncFrequency}
-                    onChange={(event) => setSyncFrequency(event.target.value)}
-                  >
-                    <option value="hourly">每小时</option>
-                    <option value="daily">每天</option>
-                    <option value="weekly">每周</option>
-                    <option value="manual">仅手动</option>
-                  </select>
-                </label>
-                <label className="toggle-row">
-                  <span>
-                    <strong>同步 README</strong>
-                    <small>自动更新项目详情正文</small>
-                  </span>
-                  <input type="checkbox" defaultChecked />
-                </label>
-                <label className="toggle-row">
-                  <span>
-                    <strong>同步部署文档</strong>
-                    <small>读取 DEPLOYMENT.md 与发布记录</small>
-                  </span>
-                  <input type="checkbox" defaultChecked />
+                  无需 Token
+                  <small>
+                    公开仓库的读取不需要任何凭证；GitHub 匿名限额为每 IP
+                    60 次/小时，本站规模的手动同步完全够用。仓库地址在"项目管理"中维护。
+                  </small>
                 </label>
               </section>
               <section className="settings-card sync-log">
                 <span className="eyebrow">SYNC LOG</span>
-                <h2>最近采集记录</h2>
-                {items.map((item, index) => (
-                  <div key={item.id}>
+                <h2>最近同步结果</h2>
+                {syncResults === null && (
+                  <div className="empty-state">
+                    <strong>尚未执行同步</strong>
+                    <span>点击"立即同步"从 GitHub 拉取最新仓库数据。</span>
+                  </div>
+                )}
+                {syncResults?.map((result, index) => (
+                  <div key={result.id}>
                     <span className="activity-mark">
                       {String(index + 1).padStart(2, "0")}
                     </span>
                     <p>
-                      <strong>{item.name}</strong>
+                      <strong>{result.name}</strong>
                       <small>
-                        README · {item.version} · {index + 2} 项更新
+                        {result.status === "synced"
+                          ? `★ ${result.stars} · ${result.version || "无 Release"} · ${result.updated}`
+                          : result.note || result.status}
                       </small>
                     </p>
-                    <time>{index === 0 ? "刚刚" : `${index + 1} 小时前`}</time>
+                    <time>
+                      {result.status === "synced" ? "已更新" : result.status === "skipped" ? "已跳过" : "失败"}
+                    </time>
                   </div>
                 ))}
               </section>
@@ -2042,7 +2684,7 @@ function AdminPage({
 export default function App() {
   const [language, setLanguage] = useState<Language>("en")
   const [dark, setDark] = useState(false)
-  const [route, setRoute] = useState(window.location.hash.slice(1) || "home")
+  const [route, setRoute] = useState(routeFromHash(window.location.hash))
   const [items, setItems] = useState<Project[]>(projects)
   const [loading, setLoading] = useState(false)
   const [siteSettings, setSiteSettings] = useState<SiteSettings>(DEFAULT_SITE_SETTINGS)
@@ -2093,8 +2735,12 @@ export default function App() {
 
   useEffect(() => {
     const onHashChange = () => {
-      setRoute(window.location.hash.slice(1) || "home")
-      window.scrollTo({ top: 0 })
+      const clean = window.location.hash.replace(/^#/, "")
+      setRoute(routeFromHash(window.location.hash))
+      // 章节锚点交由浏览器原生滚动定位；其余路由（详情页/管理端/返回）回到顶部
+      if (!clean || !SECTION_ANCHORS.includes(clean)) {
+        window.scrollTo({ top: 0 })
+      }
     }
     window.addEventListener("hashchange", onHashChange)
     return () => window.removeEventListener("hashchange", onHashChange)
@@ -2105,11 +2751,15 @@ export default function App() {
     if (route !== "home") return
     const observer = new IntersectionObserver(
       (entries) =>
-        entries.forEach(
-          (entry) =>
-            entry.isIntersecting && entry.target.classList.add("is-visible"),
-        ),
-      { threshold: 0.16 },
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("is-visible")
+          } else {
+            // 当元素离开视口时移除 is-visible 类，使反向/往回滚动时能够重新触发入场动画
+            entry.target.classList.remove("is-visible")
+          }
+        }),
+      { threshold: 0.12, rootMargin: "0px 0px -40px 0px" },
     )
     document
       .querySelectorAll(".section, .site-footer")
@@ -2145,7 +2795,6 @@ export default function App() {
         dark={dark}
         settings={siteSettings}
         onBack={() => navigate("home")}
-        onAdmin={() => navigate("admin")}
         onLanguage={() => setLanguage(language === "en" ? "zh" : "en")}
         onTheme={() => setDark(!dark)}
         onOpen={openProject}
@@ -2160,17 +2809,16 @@ export default function App() {
         setLanguage={setLanguage}
         dark={dark}
         setDark={setDark}
-        onAdmin={() => navigate("admin")}
+        settings={siteSettings}
       />
       <SpiralGallery language={language} items={items} settings={siteSettings} onOpen={openProject} />
-      <CatalogueStats language={language} items={items} />
+      <CatalogueStats language={language} items={items} settings={siteSettings} />
       <Curator language={language} settings={siteSettings} />
       <SpecimenIndex items={items} onOpen={openProject} />
       <SiteFooter
         items={items}
         settings={siteSettings}
         onOpen={openProject}
-        onAdmin={() => navigate("admin")}
       />
     </main>
   )

@@ -29,7 +29,8 @@ NestSpace/
 ├── migrations/                   # Cloudflare D1 边缘数据库建表与种子数据
 │   ├── 0001_create_projects.sql  # 表结构定义（字段脱敏、草稿状态、版本时间戳）
 │   ├── 0002_seed_initial_data.sql# 初始 4 个标本数据（Aperture, Lumen, Fjord, Meridian）
-│   └── 0003_create_site_settings.sql # 站点文案与备案号配置表（管理端可编辑）
+│   ├── 0003_create_site_settings.sql # 站点文案与备案号配置表（管理端可编辑）
+│   └── 0004_add_nav_and_logo_settings.sql # 顶部导航顺序、Logo 与统计指标扩展表结构
 │
 └── ARCHITECTURE_PLAN.md          # 详细架构与审查设计文档
 ```
@@ -65,9 +66,10 @@ database_id = "xxxx-xxxx-xxxx-xxxx"
 # 1. 创建表结构
 npx wrangler d1 execute nestspace-prod --remote --file=../migrations/0001_create_projects.sql
 
-# 2. 注入 4 个初始项目标本 + 创建站点文案配置表
+# 2. 注入 4 个初始项目标本 + 创建站点文案配置表与扩展表结构
 npx wrangler d1 execute nestspace-prod --remote --file=../migrations/0002_seed_initial_data.sql
 npx wrangler d1 execute nestspace-prod --remote --file=../migrations/0003_create_site_settings.sql
+npx wrangler d1 execute nestspace-prod --remote --file=../migrations/0004_add_nav_and_logo_settings.sql
 ```
 
 ---
@@ -179,6 +181,7 @@ cp .dev.vars.example .dev.vars
 npx wrangler d1 execute nestspace-prod --local --file=../migrations/0001_create_projects.sql
 npx wrangler d1 execute nestspace-prod --local --file=../migrations/0002_seed_initial_data.sql
 npx wrangler d1 execute nestspace-prod --local --file=../migrations/0003_create_site_settings.sql
+npx wrangler d1 execute nestspace-prod --local --file=../migrations/0004_add_nav_and_logo_settings.sql
 
 # 2. 构建静态资产（Worker 的资产目录指向 dist，必须先构建）
 npm run build
@@ -239,3 +242,13 @@ pnpm typecheck
 
 数据库字段为空时，公开站自动回退到 `frontend/src/data/defaultSiteSettings.ts` 的内置默认文案，
 因此未做任何配置的部署也始终有完整可读的内容。
+
+另有两点使用约定：
+
+- **管理端入口**：公开界面（页头/详情页/页脚）不展示任何管理入口按钮，通过直接访问
+  `https://你的域名/#admin` 进入（建议收藏）。这只是减少暴露面，真正的安全边界在
+  管理 API 层（见第三节三层防线）。
+- **GitHub 同步**：管理端「04 GitHub 同步」按各项目的仓库地址调用 GitHub 公开 API，
+  把最新 stars / 推送时间 / Release 版本写回 D1。公开仓库无需任何 Token；**私有仓库
+  在匿名 API 下不可见（会如实显示 404）**，如需同步请将项目仓库设为公开，或后续扩展
+  Token 支持。
