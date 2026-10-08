@@ -75,6 +75,16 @@ export interface SiteSettings extends FooterCopy {
   activityLogMode: 'auto' | 'custom' // "auto" 为按项目历史聚合，"custom" 为手动设置
   customActivityLog: ActivityLogItem[]
 
+  // 馆长手记（Curator）栏目文案（管理端「04 内容管理」可编辑；headline 支持多行）
+  curatorEyebrowEn: string
+  curatorEyebrowZh: string
+  curatorHeadlineEn: string
+  curatorHeadlineZh: string
+  curatorQuoteEn: string
+  curatorQuoteZh: string
+  curatorHabitat: string
+  curatorField: string
+
   // 展示偏好（管理端「07 站点设置」，公开站点真实消费）
   defaultLanguage: DefaultLanguagePreference // 无手动切换时前台初始语言
   defaultTheme: DefaultThemePreference // 无手动切换时前台初始主题

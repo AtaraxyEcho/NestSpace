@@ -65,6 +65,17 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   activityLogMode: 'auto',
   customActivityLog: [],
 
+  // 馆长手记栏目文案（默认等于改造前写死在组件里的文案）
+  curatorEyebrowEn: "CURATOR'S NOTE",
+  curatorEyebrowZh: '馆长手记',
+  curatorHeadlineEn: 'Build things\nthat take root',
+  curatorHeadlineZh: '把复杂的事做简单',
+  curatorQuoteEn:
+    'A good tool does not ask for attention. It takes root quietly, then makes room for other things to grow.',
+  curatorQuoteZh: '好的工具不应索取注意力。它应当安静地扎根，然后让别的事物生长。',
+  curatorHabitat: 'Shanghai / Remote',
+  curatorField: 'Design & Engineering',
+
   // 展示偏好：默认值等于既有行为（跟随浏览器/系统，统计与两个切换按钮全部开启）
   defaultLanguage: 'auto',
   defaultTheme: 'auto',

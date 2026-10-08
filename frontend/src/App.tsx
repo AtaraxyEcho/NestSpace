@@ -686,6 +686,13 @@ function CatalogueStats({
 }
 
 function Curator({ language, settings }: { language: Language; settings: SiteSettings }) {
+  const copy = (en: string, zh: string) => (language === "zh" ? zh || en : en || zh)
+  const headlineLines = (settings.curatorHeadlineEn || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const headlineZh = (settings.curatorHeadlineZh || "").trim()
+
   return (
     <section className="section curator-section" id="curator">
       <div className="curator-visual">
@@ -712,16 +719,20 @@ function Curator({ language, settings }: { language: Language; settings: SiteSet
         </span>
       </div>
       <div className="curator-copy">
-        <span className="eyebrow">CURATOR'S NOTE / 馆长手记</span>
+        <span className="eyebrow">
+          {copy(settings.curatorEyebrowEn, settings.curatorEyebrowZh)}
+        </span>
         <h2>
-          Build things
-          <br />
-          that take root <em>/ 把复杂的事做简单</em>
+          {headlineLines.map((line, index) => (
+            <span key={`${line}-${index}`}>
+              {index > 0 ? <br /> : null}
+              {line}
+            </span>
+          ))}
+          {headlineZh ? <em>/ {headlineZh}</em> : null}
         </h2>
         <blockquote>
-          {language === "zh"
-            ? "好的工具不应索取注意力。它应当安静地扎根，然后让别的事物生长。"
-            : "A good tool does not ask for attention. It takes root quietly, then makes room for other things to grow."}
+          {copy(settings.curatorQuoteEn, settings.curatorQuoteZh)}
         </blockquote>
         <p>
           {" "}
@@ -731,11 +742,11 @@ function Curator({ language, settings }: { language: Language; settings: SiteSet
         <dl>
           <div>
             <dt>HABITAT</dt>
-            <dd>Shanghai / Remote</dd>
+            <dd>{settings.curatorHabitat || "—"}</dd>
           </div>
           <div>
             <dt>FIELD</dt>
-            <dd>Design & Engineering</dd>
+            <dd>{settings.curatorField || "—"}</dd>
           </div>
           <div>
             <dt>GITHUB</dt>
@@ -2054,6 +2065,47 @@ function AdminPage({
     })
   }
 
+  // 展示顺序与接口一致：sort_order 升序，其次按采集日期倒序
+  const orderedItems = useMemo(
+    () =>
+      [...items].sort(
+        (a, b) =>
+          (a.sort_order ?? 0) - (b.sort_order ?? 0) ||
+          (a.date < b.date ? 1 : a.date > b.date ? -1 : 0),
+      ),
+    [items],
+  )
+
+  const canMove = (id: string, direction: -1 | 1) => {
+    const index = orderedItems.findIndex((item) => item.id === id)
+    const target = index + direction
+    return index >= 0 && target >= 0 && target < orderedItems.length
+  }
+
+  /** 上/下移一格：按当前展示顺序重排 sort_order，只写真正变化的行 */
+  const moveProject = async (id: string, direction: -1 | 1) => {
+    const index = orderedItems.findIndex((item) => item.id === id)
+    const target = index + direction
+    if (index < 0 || target < 0 || target >= orderedItems.length) return
+    const reordered = [...orderedItems]
+    ;[reordered[index], reordered[target]] = [reordered[target], reordered[index]]
+
+    setNotice("正在保存新的展示顺序...")
+    const changed = reordered
+      .map((item, position) => ({ item, position }))
+      .filter(({ item, position }) => (item.sort_order ?? 0) !== position)
+    for (const { item, position } of changed) {
+      const res = await saveAdminProject({ ...item, sort_order: position }, false)
+      if (!res.success) {
+        setNotice(`顺序保存失败: ${res.error || "请检查网络或口令权限"}`)
+        return
+      }
+    }
+    const refresh = await verifyAndFetchAdminProjects()
+    if (refresh.success && refresh.data) onChange(refresh.data)
+    setNotice(`展示顺序已更新（${changed.length} 个项目）。`)
+  }
+
   const filtered = items.filter((item) => {
     const matchesQuery = `${item.name} ${item.cn} ${item.type} ${item.language}`
       .toLowerCase()
@@ -3050,6 +3102,110 @@ function AdminPage({
                   />
                 </label>
               </section>
+              <section className="settings-card">
+                <span className="eyebrow">CURATOR COPY / 栏目文案</span>
+                <h2>手记栏目文案</h2>
+                <label>
+                  栏目标签（{contentLanguage === "zh" ? "中文" : "English"}）
+                  <input
+                    value={
+                      contentLanguage === "zh"
+                        ? siteContent.curatorEyebrowZh
+                        : siteContent.curatorEyebrowEn
+                    }
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        [contentLanguage === "zh"
+                          ? "curatorEyebrowZh"
+                          : "curatorEyebrowEn"]: event.target.value,
+                      })
+                    }
+                    placeholder={
+                      contentLanguage === "zh" ? "如：馆长手记" : "如：CURATOR'S NOTE"
+                    }
+                  />
+                  <small>显示在栏目标题上方的等宽小字；中英各一份，随访客语言切换</small>
+                </label>
+                <label>
+                  引言（{contentLanguage === "zh" ? "中文" : "English"}）
+                  <textarea
+                    value={
+                      contentLanguage === "zh"
+                        ? siteContent.curatorQuoteZh
+                        : siteContent.curatorQuoteEn
+                    }
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        [contentLanguage === "zh"
+                          ? "curatorQuoteZh"
+                          : "curatorQuoteEn"]: event.target.value,
+                      })
+                    }
+                  />
+                  <small>斜体引言段落，随访客语言切换</small>
+                </label>
+                <label>
+                  主标题（每行一句，前台逐行显示）
+                  <textarea
+                    value={siteContent.curatorHeadlineEn}
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        curatorHeadlineEn: event.target.value,
+                      })
+                    }
+                  />
+                  <small>两种语言模式下都会显示；下方中文尾注以斜体接在末尾</small>
+                </label>
+                <label>
+                  主标题 · 中文尾注
+                  <input
+                    value={siteContent.curatorHeadlineZh}
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        curatorHeadlineZh: event.target.value,
+                      })
+                    }
+                  />
+                  <small>留空则不显示尾注</small>
+                </label>
+                <div className="field-row">
+                  <label>
+                    HABITAT 值
+                    <input
+                      value={siteContent.curatorHabitat}
+                      onChange={(event) =>
+                        setSiteContent({
+                          ...siteContent,
+                          curatorHabitat: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    FIELD 值
+                    <input
+                      value={siteContent.curatorField}
+                      onChange={(event) =>
+                        setSiteContent({
+                          ...siteContent,
+                          curatorField: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  className="admin-primary"
+                  onClick={saveSettings}
+                >
+                  保存栏目文案
+                </button>
+              </section>
             </div>
           </div>
         )}
@@ -3115,6 +3271,7 @@ function AdminPage({
                     <th>版本</th>
                     <th>状态</th>
                     <th>最后更新</th>
+                    <th>顺序</th>
                     <th>
                       <span className="sr-only">操作</span>
                     </th>
@@ -3143,6 +3300,26 @@ function AdminPage({
                         </button>
                       </td>
                       <td>{item.updated}</td>
+                      <td>
+                        <div className="nav-order-btns">
+                          <button
+                            type="button"
+                            title="上移"
+                            disabled={!canMove(item.id, -1)}
+                            onClick={() => moveProject(item.id, -1)}
+                          >
+                            ▲
+                          </button>
+                          <button
+                            type="button"
+                            title="下移"
+                            disabled={!canMove(item.id, 1)}
+                            onClick={() => moveProject(item.id, 1)}
+                          >
+                            ▼
+                          </button>
+                        </div>
+                      </td>
                       <td>
                         <div className="row-actions">
                           <button
