@@ -22,7 +22,9 @@ NestSpace/
 │   │   ├── types/                # 数据类型定义 (project.ts / siteSettings.ts)
 │   │   └── App.tsx               # 动态数据渲染与安全管理端
 │   ├── .dev.vars.example         # 本地开发环境变量模板（复制为 .dev.vars 使用，不入 Git）
-│   ├── jwt_verify.test.mjs       # JWT 校验逻辑单元测试（node jwt_verify.test.mjs）
+│   ├── jwt_verify.test.mjs       # JWT 校验与 Access 白名单单元测试（pnpm test 依次跑以下三个文件）
+│   ├── demo_url.test.mjs         # 演示地址规范化单元测试
+│   ├── sync_update.test.mjs      # GitHub 同步字段归属 / 时间线生成单元测试
 │   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（本地与 Git 构建共用）
 │   └── package.json
 │
@@ -312,6 +314,18 @@ pnpm typecheck
   （频率超限）**立即停止后续请求**，其余标本标记为"已跳过"而不是逐个白白重试；仓库列表接口
   最多取 3 页（300 个），超出时管理端会明确提示"仅列出最近更新的 N 个"；所有列表类查询统一
   带 `LIMIT 500` 安全阀（当前馆藏规模远低于该值）。
+- **同步的字段归属**（迁移 `0007/0008` 之后）：
+  - **GitHub 权威、每次覆盖**：`stars`、`updated`、`version`、`language`、`date`/`year`（仓库创建时间）、
+    `metrics_json`（STARS / FORKS / OPEN ISSUES）、`features_json`（仓库 topics，前 4 个）、
+    `timeline_json`（按仓库事实生成：建档 / 最多 4 个 Release / 最近推送，按月倒序，最多 8 条）；
+    管理端「Stars 展示值 / 版本 / 技术语言 / 特性列表 / 指标」这几个输入框因此会被同步覆盖，界面已标注。
+  - **编辑所有、只在空白时填充**：`description_json` 与 README/Compose 文档；后台手写内容一律不覆盖。
+  - 星数展示口径统一为一份实现（≥1000 用 `2.8k`），卡片与指标卡不会再出现 `2.8k` 与 `2800` 并存。
+- **无 Release 的项目**：`version` 保持空串（不再编造 `v1.0.0`），前台会省略版本位而不是显示空占位。
+- **同步的健壮性**：所有 GitHub 出网请求带 10 秒超时（含 Access 证书端点），单个卡住的响应不会拖住整个同步；
+  响应里回传 `rateLimitRemaining`，管理端在同步/扫描提示里显示"GitHub 剩余额度"；
+  403 会结合配额头与响应体区分"频率超限"与"该仓库被拒绝"，只有确认限流才短路后续请求；
+  四个文档都已齐备的项目**跳过文档抓取**（原来每个项目都会空跑约 11 个候选路径请求）。
 - **标本文档抓取**（迁移 `0007`）：同步界面勾选「同时抓取 README / Compose 文档」后，按仓库
   `README.md`（辅以 `README.en.md` / `README.zh*.md` / `README_en-US.md` 等具名文件）与
   `deploy/dev|prod/docker-compose.yml`（辅以根目录 `docker-compose.yml`）抓取正文：

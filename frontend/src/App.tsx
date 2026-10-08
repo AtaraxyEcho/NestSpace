@@ -1050,7 +1050,18 @@ function DetailPage({
             <p className="latin">{project.latin}</p>
             <h1>{project.name}</h1>
             <p className="detail-cn">{project.cn}</p>
-            <p className="detail-intro">{project.description[language]}</p>
+            {(() => {
+              // 中文简介可能为空（导入不再把英文塞进 zh 字段）：回退到另一种语言，
+              // 而不是留一段空白
+              const intro =
+                project.description[language] ||
+                project.description[language === "zh" ? "en" : "zh"]
+              return intro ? (
+                <p className="detail-intro">{intro}</p>
+              ) : (
+                <p className="detail-intro section-empty">尚未填写简介</p>
+              )
+            })()}
             <div className="detail-actions">
               <a
                 className="button primary"
@@ -1089,7 +1100,8 @@ function DetailPage({
             <SpecimenSvg shape={project.shape} />
             <p className="hand-note">Observed in {project.habitat}</p>
             <span className="plate-status">
-              <b /> {project.status} · {project.version}
+              <b /> {project.status}
+              {project.version ? ` · ${project.version}` : ""}
             </span>
           </div>
         </div>
@@ -1164,12 +1176,20 @@ function DetailPage({
             <article>
               <span>THE CONDITION</span>
               <h2>Why it needed to exist.</h2>
-              <p>{project.challenge}</p>
+              {project.challenge ? (
+                <p>{project.challenge}</p>
+              ) : (
+                <p className="section-empty">尚未记录</p>
+              )}
             </article>
             <article>
               <span>THE RESPONSE</span>
               <h2>A narrow tool, carefully shaped.</h2>
-              <p>{project.solution}</p>
+              {project.solution ? (
+                <p>{project.solution}</p>
+              ) : (
+                <p className="section-empty">尚未记录</p>
+              )}
             </article>
           </div>
         </section>
@@ -1186,26 +1206,30 @@ function DetailPage({
               {String(project.features.length).padStart(2, "0")} TRAITS
             </span>
           </div>
-          <div className="capability-grid">
-            {project.features.map((feature, index) => (
-              <article key={feature}>
-                <span>0{index + 1}</span>
-                <h3>{feature}</h3>
-                <p>
-                  Designed as a stable part of the system rather than an
-                  optional afterthought.
-                </p>
-              </article>
-            ))}
-          </div>
-          <div className="metric-strip">
-            {project.metrics.map((metric) => (
-              <div key={metric.label}>
-                <span>{metric.label}</span>
-                <strong>{metric.value}</strong>
-              </div>
-            ))}
-          </div>
+          {project.features.length > 0 ? (
+            <div className="capability-grid">
+              {project.features.map((feature, index) => (
+                <article key={feature}>
+                  <span>0{index + 1}</span>
+                  <h3>{feature}</h3>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="section-empty">暂无特征标签</p>
+          )}
+          {project.metrics.length > 0 ? (
+            <div className="metric-strip">
+              {project.metrics.map((metric) => (
+                <div key={metric.label}>
+                  <span>{metric.label}</span>
+                  <strong>{metric.value}</strong>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="section-empty">暂无指标</p>
+          )}
         </section>
 
         <section className="detail-section evolution-section">
@@ -1213,16 +1237,20 @@ function DetailPage({
             <span className="eyebrow">EVOLUTION / 03</span>
             <span>A LIVING SPECIMEN</span>
           </div>
-          <div className="evolution-list">
-            {project.timeline.map((event, index) => (
-              <article key={event.date}>
-                <span className="event-index">0{index + 1}</span>
-                <time>{event.date}</time>
-                <h3>{event.title}</h3>
-                <p>{event.note}</p>
-              </article>
-            ))}
-          </div>
+          {project.timeline.length > 0 ? (
+            <div className="evolution-list">
+              {project.timeline.map((event, index) => (
+                <article key={`${event.date}-${event.title}-${index}`}>
+                  <span className="event-index">0{index + 1}</span>
+                  <time>{event.date}</time>
+                  <h3>{event.title}</h3>
+                  <p>{event.note}</p>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="section-empty">暂无时间线记录</p>
+          )}
         </section>
       </div>
 
@@ -1965,9 +1993,12 @@ function AdminPage({
     }
     setDiscoveredRepos(res.repos)
     setNotice(
-      res.truncated
+      (res.truncated
         ? `扫描完成：仓库数量超过上限，仅列出最近更新的 ${res.repos.length} 个（最多 3 页 300 个）。`
-        : `扫描完成：发现 ${res.repos.length} 个公开仓库。`,
+        : `扫描完成：发现 ${res.repos.length} 个公开仓库。`) +
+        (typeof res.rateLimitRemaining === "number"
+          ? ` GitHub 剩余额度 ${res.rateLimitRemaining}。`
+          : ""),
     )
   }
 
@@ -2011,7 +2042,12 @@ function AdminPage({
     const results = res.results as GithubSyncResult[]
     setSyncResults(results)
     const synced = results.filter((r) => r.status === "synced").length
-    setNotice(`同步完成：${synced}/${results.length} 个标本指标已更新。`)
+    setNotice(
+      `同步完成：${synced}/${results.length} 个标本指标已更新。` +
+        (typeof res.rateLimitRemaining === "number"
+          ? ` GitHub 剩余额度 ${res.rateLimitRemaining}。`
+          : ""),
+    )
     // 刷新项目列表以反映 stars / 版本 / 更新时间的变化
     verifyAndFetchAdminProjects().then((refresh) => {
       if (refresh.success && refresh.data) onChange(refresh.data)
@@ -2337,7 +2373,8 @@ function AdminPage({
                       <div>
                         <strong>{item.name}</strong>
                         <small>
-                          {item.updated} · {item.version}
+                          {item.updated}
+                          {item.version ? ` · ${item.version}` : ""}
                         </small>
                       </div>
                       <em>{item.status}</em>
@@ -3095,7 +3132,7 @@ function AdminPage({
                         <span className="table-tag">{item.type}</span>
                       </td>
                       <td>{item.language}</td>
-                      <td>{item.version}</td>
+                      <td>{item.version || "—"}</td>
                       <td>
                         <button
                           type="button"
@@ -3728,6 +3765,7 @@ function AdminPage({
                       setEditing({ ...editing, language: event.target.value })
                     }
                   />
+                  <small>由 GitHub 同步覆盖：会被仓库主语言重写（多语言可写进「特性列表」）</small>
                 </label>
               </div>
               <div className="field-row">
@@ -3739,6 +3777,7 @@ function AdminPage({
                       setEditing({ ...editing, version: event.target.value })
                     }
                   />
+                  <small>由 GitHub 同步覆盖：有 Release 时会被最新 tag 重写</small>
                 </label>
                 <label>
                   状态
@@ -3796,6 +3835,7 @@ function AdminPage({
                       setEditing({ ...editing, stars: event.target.value })
                     }
                   />
+                  <small>由 GitHub 同步覆盖：每次同步都会用仓库真实星数重写</small>
                 </label>
                 <label>
                   年份
@@ -3890,7 +3930,7 @@ function AdminPage({
                   value={featuresText}
                   onChange={(event) => setFeaturesText(event.target.value)}
                 />
-                <small>每行一条</small>
+                <small>每行一条；仓库有 topics 时会被同步覆盖，无 topics 则保留此处内容</small>
               </label>
               <label>
                 指标
@@ -3898,7 +3938,7 @@ function AdminPage({
                   value={metricsText}
                   onChange={(event) => setMetricsText(event.target.value)}
                 />
-                <small>每行一条，格式「标签 | 数值」，如「BUILD TIME | −63%」</small>
+                <small>每行一条，格式「标签 | 数值」；STARS / FORKS / OPEN ISSUES 会被同步覆盖</small>
               </label>
               <label>
                 时间线
@@ -3906,7 +3946,10 @@ function AdminPage({
                   value={timelineText}
                   onChange={(event) => setTimelineText(event.target.value)}
                 />
-                <small>每行一条，格式「日期 | 标题 | 说明」</small>
+                <small>
+                  每行一条，格式「日期 | 标题 | 说明」；勾选 GitHub 同步时会被按仓库事实
+                  （建档 / Release / 最近推送）重新生成，手工补充的内容会被覆盖
+                </small>
               </label>
               <div className="field-row">
                 <label>

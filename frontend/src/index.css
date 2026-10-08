@@ -450,6 +450,11 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .capability-grid article > span { font: 9px var(--font-mono); color: var(--ink-tertiary); }
 .capability-grid h3 { margin: 70px 0 16px; font-size: 25px; line-height: 1.1; }
 .capability-grid p { margin: 0; font-size: 14px; line-height: 1.6; color: var(--ink-secondary); }
+/* 详情页内容区为空时的单行占位：只说"还没有"，不塞模板文案 */
+.section-empty {
+  margin: 18px 0 0; color: var(--ink-tertiary);
+  font: 12px/1.7 var(--font-mono); letter-spacing: .06em;
+}
 .metric-strip { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 72px; background: var(--accent-dark); color: #e8dfd0; }
 .metric-strip div { min-height: 180px; padding: 34px; border-right: 1px solid rgba(232,223,208,.18); }
 .metric-strip span { display: block; font: 8px var(--font-mono); letter-spacing: .18em; color: #b8ab98; }

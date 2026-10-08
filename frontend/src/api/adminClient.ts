@@ -154,6 +154,8 @@ export async function syncGithubRepos(
 ): Promise<{
   success: boolean
   results?: Array<Record<string, unknown>>
+  /** GitHub 剩余请求额度（读到 X-RateLimit-Remaining 时给出） */
+  rateLimitRemaining?: number | null
   error?: string
 }> {
   try {
@@ -169,7 +171,11 @@ export async function syncGithubRepos(
       return { success: false, error: (errJson as any).error || `同步失败: HTTP ${res.status}` }
     }
     const data = await res.json()
-    return { success: true, results: data.results }
+    return {
+      success: true,
+      results: data.results,
+      rateLimitRemaining: typeof data.rateLimitRemaining === 'number' ? data.rateLimitRemaining : null,
+    }
   } catch (err: any) {
     return { success: false, error: `网络异常: ${err.message}` }
   }
@@ -187,6 +193,8 @@ export async function fetchGithubUserRepos(
   repos?: RemoteGithubRepo[]
   /** 仓库数量超过分页上限（3 页 300 个）时为真 */
   truncated?: boolean
+  /** GitHub 剩余请求额度 */
+  rateLimitRemaining?: number | null
   error?: string
 }> {
   try {
@@ -209,6 +217,7 @@ export async function fetchGithubUserRepos(
       username: data.username,
       repos: data.repos,
       truncated: Boolean(data.truncated),
+      rateLimitRemaining: typeof data.rateLimitRemaining === 'number' ? data.rateLimitRemaining : null,
     }
   } catch (err: any) {
     return { success: false, error: `网络异常: ${err.message}` }

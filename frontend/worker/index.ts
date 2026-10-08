@@ -555,8 +555,57 @@ adminApp.delete('/projects/:id', async (c) => {
   }
 })
 
+// ==========================================
+// GitHub 出网统一封装
+// ==========================================
+const GITHUB_FETCH_TIMEOUT_MS = 10_000
+
+// 最近一次 GitHub 响应读到的剩余额度：用于界面提示，也让 403 的归因更准确
+let lastRateLimitRemaining: number | null = null
+
+/** 所有 GitHub 请求都走这里：带超时，并记录 X-RateLimit-Remaining */
+async function ghFetch(url: string, headers: Record<string, string>): Promise<Response> {
+  const res = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
+  })
+  const remaining = res.headers.get('X-RateLimit-Remaining')
+  if (remaining !== null && remaining !== '') {
+    const parsed = Number(remaining)
+    if (Number.isFinite(parsed)) lastRateLimitRemaining = parsed
+  }
+  return res
+}
+
+/** 区分"频率限制"与"该仓库被拒绝"：403 之外还看配额头与响应体，避免误报原因 */
+async function isRateLimited(res: Response): Promise<boolean> {
+  if (res.status === 429) return true
+  if (res.status !== 403) return false
+  if (lastRateLimitRemaining === 0) return true
+  try {
+    return /rate limit|abuse|secondary/i.test(await res.clone().text())
+  } catch {
+    return false
+  }
+}
+
+/** 星数展示口径的唯一实现点：≥1000 用一位小数的 k，否则原样 */
+export function formatStarCount(count: unknown): string {
+  const value = typeof count === 'number' && Number.isFinite(count) && count > 0 ? count : 0
+  return value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value)
+}
+
+/** 仓库地址里带了主机名但不是 github.com（如 gitlab.com/owner/repo） */
+export function isNonGithubHost(rawUrl: string | null | undefined): boolean {
+  const cleaned = String(rawUrl ?? '')
+    .trim()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+  const host = cleaned.split('/')[0]?.toLowerCase() ?? ''
+  return host.includes('.') && host !== 'github.com' && host !== 'www.github.com'
+}
+
 /** 解析 GitHub 仓库地址，兼容完整 HTTPS、HTTP、SSH、无协议格式以及缺冒号格式（如 https//github.com/owner/repo） */
-function parseGithubRepo(rawUrl: string | null | undefined): { owner: string; repo: string } | null {
+export function parseGithubRepo(rawUrl: string | null | undefined): { owner: string; repo: string } | null {
   if (!rawUrl) return null
   const cleaned = rawUrl
     .trim()
@@ -566,9 +615,17 @@ function parseGithubRepo(rawUrl: string | null | undefined): { owner: string; re
     .replace(/^www\./i, '')
     .replace(/\.git$/i, '')
     .replace(/\/+$/, '')
-  const match = /^(?:github\.com\/)?([^/\s#?]+)\/([^/\s#?]+)/i.exec(cleaned)
-  if (!match) return null
-  return { owner: match[1], repo: match[2] }
+  // 带主机名时只认 github.com：其它站点（gitlab.com 等）返回 null，由调用方如实说明
+  if (isNonGithubHost(cleaned)) return null
+  const segments = cleaned.split('/').filter(Boolean)
+  const hostLike = (segments[0] ?? '').toLowerCase() === 'github.com'
+  const owner = hostLike ? segments[1] : segments[0]
+  const repo = hostLike ? segments[2] : segments[1]
+  if (!owner || !repo || !/^[A-Za-z0-9._-]+$/.test(owner) || !/^[A-Za-z0-9._-]+$/.test(repo)) {
+    return null
+  }
+  if (owner === '.' || owner === '..' || repo === '.' || repo === '..') return null
+  return { owner, repo }
 }
 
 /**
@@ -651,9 +708,9 @@ async function fetchGithubRawFile(
   headers: Record<string, string>,
 ): Promise<string | null> {
   try {
-    const res = await fetch(
+    const res = await ghFetch(
       `https://api.github.com/repos/${owner}/${repo}/contents/${path}`,
-      { headers: { ...headers, Accept: 'application/vnd.github.raw' } },
+      { ...headers, Accept: 'application/vnd.github.raw' },
     )
     if (!res.ok) return null
     const text = await res.text()
@@ -726,6 +783,168 @@ function nowStamp(): string {
   return new Date().toISOString().slice(0, 19).replace('T', ' ')
 }
 
+// 同步时的字段归属规则（唯一实现点，纯函数便于测试）：
+//   GitHub 权威 → 每次覆盖：stars / updated / version / language / date / year / metrics / features
+//   编辑所有   → 只在空白时填充：description / README / Compose / （challenge 等由管理端维护，同步不碰）
+export type SyncSourceRow = {
+  id: string
+  name: string
+  repository: string
+  description_json: string
+  has_readme_zh: number
+  has_readme_en: number
+  has_compose_dev: number
+  has_compose_prod: number
+}
+
+export type RepoMeta = {
+  stargazers_count?: number
+  forks_count?: number
+  open_issues_count?: number
+  pushed_at?: string
+  created_at?: string
+  language?: string
+  description?: string
+  topics?: unknown
+  full_name?: string
+}
+
+export type ReleaseInfo = { tag_name?: string; name?: string; published_at?: string }
+
+// 时间线（FIELD NOTES）只由 GitHub 事实生成：仓库建档、Release、最近推送。
+// 按月粒度、倒序、去重（创建月与推送月相同不再重复一条），最多 8 条。
+const TIMELINE_MAX_EVENTS = 8
+const TIMELINE_MAX_RELEASES = 4
+
+export function buildTimelineEvents(
+  meta: Pick<RepoMeta, 'created_at' | 'pushed_at' | 'full_name'>,
+  releases: ReleaseInfo[],
+): Array<{ date: string; title: string; note: string }> {
+  const month = (raw: unknown) => String(raw ?? '').slice(0, 7).replace(/-/g, '.')
+  const events: Array<{ date: string; title: string; note: string }> = []
+  const releaseList: ReleaseInfo[] = Array.isArray(releases) ? releases : []
+
+  const created = month(meta.created_at)
+  if (created) {
+    events.push({
+      date: created,
+      title: 'Repository created',
+      note: meta.full_name
+        ? `Initialized as ${meta.full_name} on GitHub.`
+        : 'Initialized on GitHub.',
+    })
+  }
+
+  for (const release of releaseList.slice(0, TIMELINE_MAX_RELEASES)) {
+    const tag = String(release.tag_name ?? '').trim()
+    const published = month(release.published_at)
+    if (!tag || !published) continue
+    events.push({
+      date: published,
+      title: `Release ${tag}`,
+      note: String(release.name ?? '').trim() || `Tagged ${tag} on GitHub.`,
+    })
+  }
+
+  const pushed = month(meta.pushed_at)
+  if (pushed && pushed !== created) {
+    events.push({
+      date: pushed,
+      title: 'Latest push',
+      note: 'Most recent commit pushed to the default branch.',
+    })
+  }
+
+  return events
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+    .slice(0, TIMELINE_MAX_EVENTS)
+}
+
+export function buildProjectSyncUpdate(
+  row: SyncSourceRow,
+  meta: RepoMeta,
+  releases: ReleaseInfo[],
+  docs: ProjectDocs | null,
+): { columns: Record<string, string | number>; notes: string[] } {
+  const columns: Record<string, string | number> = {}
+  const notes: string[] = []
+  // 入参来自 GitHub 响应，可能是 null / 非数组：这里兜底，避免整条同步崩掉
+  const releaseList: ReleaseInfo[] = Array.isArray(releases) ? releases : []
+
+  const starsCount = typeof meta.stargazers_count === 'number' ? meta.stargazers_count : 0
+  columns.stars = formatStarCount(starsCount)
+
+  const pushed = String(meta.pushed_at || '').slice(0, 10).replace(/-/g, '.')
+  if (pushed) columns.updated = pushed
+
+  const latestRelease = String(releaseList[0]?.tag_name ?? '').trim()
+  if (latestRelease) columns.version = latestRelease
+
+  const language = String(meta.language || '').trim()
+  if (language) columns.language = language
+
+  const created = String(meta.created_at || '').slice(0, 7).replace(/-/g, '.')
+  if (created) {
+    columns.date = created
+    columns.year = created.slice(0, 4)
+  }
+
+  // 时间线由 GitHub 事实生成（与字段归属一致：权威字段每次覆盖）
+  const timeline = buildTimelineEvents(meta, releaseList)
+  if (timeline.length > 0) columns.timeline_json = JSON.stringify(timeline)
+
+  // 指标卡与 stars 共用同一口径，避免出现"2.8k"与"2800"并存的矛盾
+  const metricValue = (raw: unknown) =>
+    raw === starsCount ? formatStarCount(raw) : String(typeof raw === 'number' ? raw : 0)
+  columns.metrics_json = JSON.stringify([
+    { label: 'STARS', value: metricValue(starsCount) },
+    { label: 'FORKS', value: metricValue(meta.forks_count) },
+    { label: 'OPEN ISSUES', value: metricValue(meta.open_issues_count) },
+  ])
+
+  const topics = Array.isArray(meta.topics)
+    ? meta.topics.filter((topic): topic is string => typeof topic === 'string' && topic.trim() !== '')
+    : []
+  if (topics.length > 0) {
+    columns.features_json = JSON.stringify(topics.slice(0, 4))
+  }
+
+  const descText = String(meta.description || '').trim()
+  if (descText) {
+    const current = safeJsonParse(row.description_json, {}) as { en?: string; zh?: string }
+    if ((current.en ?? '').trim() || (current.zh ?? '').trim()) {
+      notes.push('描述已保留，未覆盖后台手写文案')
+    } else {
+      columns.description_json = JSON.stringify({ en: descText, zh: descText })
+      notes.push('描述已按仓库信息首次填充')
+    }
+  }
+
+  if (docs) {
+    const candidates: Array<[string, string, boolean]> = [
+      ['readme_zh', docs.readmeZh, row.has_readme_zh === 1],
+      ['readme_en', docs.readmeEn, row.has_readme_en === 1],
+      ['compose_dev', docs.composeDev, row.has_compose_dev === 1],
+      ['compose_prod', docs.composeProd, row.has_compose_prod === 1],
+    ]
+    const filled: string[] = []
+    for (const [column, content, exists] of candidates) {
+      if (content && !exists) {
+        columns[column] = content
+        filled.push(column)
+      }
+    }
+    // 抓取过就刷新时间戳，哪怕这次一个字都没写（原来的实现只在填充时更新，界面会显示旧时间）
+    columns.docs_synced_at = nowStamp()
+    const fetchedAny = Boolean(docs.readmeZh || docs.readmeEn || docs.composeDev || docs.composeProd)
+    if (filled.length > 0) notes.push(`文档已填充 ${filled.join(' / ')}`)
+    else if (!fetchedAny) notes.push('未抓到文档（仓库无对应文件，或已达到 GitHub 频率限制）')
+    else notes.push('文档均已存在，未覆盖')
+  }
+
+  return { columns, notes }
+}
+
 // 管理端：GitHub 指标同步——按各项目的 repository 地址拉取最新 stars / 最近推送时间 / 最新 Release 版本并写回 D1
 // body.fetchDocs 为真时同时抓取 README 与 Compose 文档（只填充空白字段，不覆盖手工维护的内容）
 adminApp.post('/github-sync', async (c) => {
@@ -769,123 +988,75 @@ adminApp.post('/github-sync', async (c) => {
       }
       const parsed = parseGithubRepo(row.repository)
       if (!parsed) {
-        outcomes.push({ id: row.id, name: row.name, status: 'skipped', note: '仓库地址为空或非有效 GitHub 格式' })
+        outcomes.push({
+          id: row.id,
+          name: row.name,
+          status: 'skipped',
+          note: isNonGithubHost(row.repository)
+            ? '仓库地址不是 GitHub 地址（仅支持 github.com）'
+            : '仓库地址为空或非有效 GitHub 格式',
+        })
         continue
       }
       const { owner, repo } = parsed
       try {
-        const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-          headers: ghHeaders,
-        })
+        const repoRes = await ghFetch(`https://api.github.com/repos/${owner}/${repo}`, ghHeaders)
         if (!repoRes.ok) {
-          if (repoRes.status === 403) rateLimited = true
-          const errNote =
-            repoRes.status === 403
-              ? 'GitHub 访问频次超限 (403)，可在设置中填入 GitHub Token'
-              : repoRes.status === 404
+          const limited = await isRateLimited(repoRes)
+          if (limited) rateLimited = true
+          const errNote = limited
+            ? 'GitHub 访问频次超限，可在设置中填入 GitHub Token'
+            : repoRes.status === 404
               ? '仓库未找到或为私有仓库 (404)'
-              : `GitHub API 响应 ${repoRes.status}`
+              : `GitHub 请求被拒绝（${repoRes.status}）`
           outcomes.push({ id: row.id, name: row.name, status: 'error', note: errNote })
           continue
         }
         const data: any = await repoRes.json()
-        const starsCount = typeof data.stargazers_count === 'number' ? data.stargazers_count : 0
-        const stars = starsCount >= 1000 ? `${(starsCount / 1000).toFixed(1)}k` : String(starsCount)
-        const updated = String(data.pushed_at || '').slice(0, 10).replace(/-/g, '.')
-        let version: string | null = null
+
+        let releases: ReleaseInfo[] = []
         try {
-          const relRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases/latest`, {
-            headers: ghHeaders,
-          })
+          const relRes = await ghFetch(
+            `https://api.github.com/repos/${owner}/${repo}/releases?per_page=5`,
+            ghHeaders,
+          )
           if (relRes.ok) {
             const relData: any = await relRes.json()
-            version = relData.tag_name ?? null
+            if (Array.isArray(relData)) releases = relData
           }
         } catch {
           // Release 信息获取失败不阻断整体同步
         }
 
-        const descText = (data.description || '').trim()
-        const repoLang = (data.language || '').trim()
+        // 四个文档都已齐备时跳过抓取：原来是无条件跑一遍候选路径（最多约 11 个请求/项目）
+        const needsDocs =
+          row.has_readme_zh !== 1 ||
+          row.has_readme_en !== 1 ||
+          row.has_compose_dev !== 1 ||
+          row.has_compose_prod !== 1
+        const docs = fetchDocs && needsDocs ? await fetchProjectDocs(owner, repo, ghHeaders) : null
 
-        const sets = ['stars = ?']
-        const values: (string | number)[] = [stars]
-        if (updated) {
-          sets.push('updated = ?')
-          values.push(updated)
-        }
-        if (version) {
-          sets.push('version = ?')
-          values.push(version)
-        }
-        if (repoLang) {
-          sets.push('language = ?')
-          values.push(repoLang)
-        }
-        // 描述只在标本完全没有文案时做首次填充：后台手写的中英文简介一律不覆盖
-        let descNote: string | undefined
-        if (descText) {
-          const current = safeJsonParse(row.description_json, {}) as {
-            en?: string
-            zh?: string
-          }
-          const hasOwnCopy = Boolean(
-            (current.en ?? '').trim() || (current.zh ?? '').trim(),
-          )
-          if (hasOwnCopy) {
-            descNote = '描述已保留，未覆盖后台手写文案'
-          } else {
-            sets.push('description_json = ?')
-            values.push(JSON.stringify({ en: descText, zh: descText }))
-            descNote = '描述已按仓库信息首次填充'
-          }
-        }
-        // 文档抓取同样只填充空白字段：后台手工整理过的 README / Compose 一律不覆盖
-        let docNote: string | undefined
-        if (fetchDocs) {
-          const docs = await fetchProjectDocs(owner, repo, ghHeaders)
-          const candidates: Array<[string, string, boolean]> = [
-            ['readme_zh', docs.readmeZh, row.has_readme_zh === 1],
-            ['readme_en', docs.readmeEn, row.has_readme_en === 1],
-            ['compose_dev', docs.composeDev, row.has_compose_dev === 1],
-            ['compose_prod', docs.composeProd, row.has_compose_prod === 1],
-          ]
-          const filled: string[] = []
-          for (const [column, content, exists] of candidates) {
-            if (content && !exists) {
-              sets.push(`${column} = ?`)
-              values.push(content)
-              filled.push(column)
-            }
-          }
-          const fetchedAny = Boolean(
-            docs.readmeZh || docs.readmeEn || docs.composeDev || docs.composeProd,
-          )
-          if (filled.length > 0) {
-            sets.push('docs_synced_at = ?')
-            values.push(nowStamp())
-            docNote = `文档已填充 ${filled.join(' / ')}`
-          } else if (!fetchedAny) {
-            // 一个文件都没抓到：仓库里没有对应文件，或已触发 GitHub 频率限制
-            docNote = '未抓到文档（仓库无对应文件，或已达到 GitHub 频率限制）'
-          } else {
-            docNote = '文档均已存在，未覆盖'
-          }
-        }
+        const { columns, notes } = buildProjectSyncUpdate(row, data, releases, docs)
+        if (fetchDocs && !needsDocs) notes.push('文档均已存在，跳过抓取')
+        const entries = Object.entries(columns)
+        const sets = entries.map(([column]) => `${column} = ?`)
+        const values: (string | number)[] = entries.map(([, value]) => value)
         sets.push('updated_at = CURRENT_TIMESTAMP')
         values.push(row.id)
-        await c.env.DB.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`).bind(...values).run()
+        await c.env.DB.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`)
+          .bind(...values)
+          .run()
 
         outcomes.push({
           id: row.id,
           name: data.full_name || row.name,
           status: 'synced',
-          stars,
-          version: version || '',
-          updated: updated || '',
-          language: repoLang || undefined,
-          description: descText || undefined,
-          note: [descNote, docNote].filter(Boolean).join('；') || undefined,
+          stars: columns.stars,
+          version: String(columns.version ?? ''),
+          updated: columns.updated ?? '',
+          language: data.language || undefined,
+          description: (data.description || '').trim() || undefined,
+          note: notes.join('；') || undefined,
         })
       } catch (e: any) {
         console.error('GitHub sync row error:', row.id, e)
@@ -893,7 +1064,7 @@ adminApp.post('/github-sync', async (c) => {
       }
     }
 
-    return c.json({ success: true, results: outcomes })
+    return c.json({ success: true, results: outcomes, rateLimitRemaining: lastRateLimitRemaining })
   } catch (err: any) {
     console.error('GitHub sync error:', err)
     return c.json({ error: 'Sync failed' }, 500)
@@ -925,9 +1096,9 @@ adminApp.get('/github-repos', async (c) => {
     const REPO_PAGE_MAX = 3
     const ghRepos: any[] = []
     for (let page = 1; page <= REPO_PAGE_MAX; page++) {
-      const res = await fetch(
+      const res = await ghFetch(
         `https://api.github.com/users/${encodeURIComponent(username)}/repos?sort=updated&per_page=${REPO_PAGE_SIZE}&page=${page}`,
-        { headers: ghHeaders },
+        ghHeaders,
       )
 
       if (!res.ok) {
@@ -979,7 +1150,7 @@ adminApp.get('/github-repos', async (c) => {
       }
     })
 
-    return c.json({ success: true, username, repos: list, truncated })
+    return c.json({ success: true, username, repos: list, truncated, rateLimitRemaining: lastRateLimitRemaining })
   } catch (err: any) {
     console.error('GitHub repos fetch error:', err)
     return c.json({ error: 'Failed to fetch repositories' }, 500)
@@ -1008,9 +1179,13 @@ adminApp.post('/github-import', async (c) => {
     }
     const ghHeaders = getGithubHeaders(c, customToken)
 
-    const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers: ghHeaders })
+    const repoRes = await ghFetch(`https://api.github.com/repos/${owner}/${repo}`, ghHeaders)
     if (!repoRes.ok) {
-      return c.json({ error: `无法获取 GitHub 仓库信息 (${repoRes.status})` }, 400)
+      const limited = await isRateLimited(repoRes)
+      return c.json(
+        { error: limited ? 'GitHub 访问频次超限，请稍后重试或填入 Token' : `无法获取 GitHub 仓库信息 (${repoRes.status})` },
+        400,
+      )
     }
     const repoData: any = await repoRes.json()
 
@@ -1035,7 +1210,7 @@ adminApp.post('/github-import', async (c) => {
     const sortOrder = maxOrder + 1
 
     const starsCount = repoData.stargazers_count || 0
-    const stars = starsCount >= 1000 ? `${(starsCount / 1000).toFixed(1)}k` : String(starsCount)
+    const stars = formatStarCount(starsCount)
     const updated = String(repoData.pushed_at || '').slice(0, 10).replace(/-/g, '.') || new Date().toISOString().slice(0, 10).replace(/-/g, '.')
     const createdDate = String(repoData.created_at || '').slice(0, 7).replace(/-/g, '.') || updated.slice(0, 7)
     const year = createdDate.slice(0, 4) || String(new Date().getFullYear())
@@ -1044,51 +1219,63 @@ adminApp.post('/github-import', async (c) => {
     const shapes = ['aperture', 'lumen', 'fjord', 'meridian']
     const shape = shapes[maxNum % shapes.length]
 
-    // 提取 Release 版本号
-    let version = 'v1.0.0'
+    // 拉取最近的 Release：同时用于版本号与时间线事件
+    let releases: ReleaseInfo[] = []
     try {
-      const relRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases/latest`, { headers: ghHeaders })
+      const relRes = await ghFetch(
+        `https://api.github.com/repos/${owner}/${repo}/releases?per_page=5`,
+        ghHeaders,
+      )
       if (relRes.ok) {
         const relData: any = await relRes.json()
-        if (relData.tag_name) version = relData.tag_name
+        if (Array.isArray(relData)) releases = relData
       }
     } catch {
       // 忽略 Release 获取失败
     }
+    // 没有 Release 就留空，不再编造 'v1.0.0'（前台会省略版本位），同步拿到 tag 后会自动补上
+    const version = String(releases[0]?.tag_name ?? '').trim()
 
     const name = repoData.name
-    const cnName = repoData.name
-    const descText = repoData.description || `${name} — 开源工程实践`
+    // 中文名不再拿英文仓库名顶替：留空由管理员填写（抽屉里是必填项），
+    // 否则中文模式会直接显示英文名，像是"没同步/串位"
+    const cnName = ''
+    const descText = repoData.description || ''
     const language = repoData.language || 'TypeScript'
     const repository = `https://github.com/${repoData.full_name}`
 
-    const description = JSON.stringify({ en: descText, zh: descText })
+    // 同理：英文描述不再写进中文字段，留空由管理员填写；前台缺中文时会回退英文
+    const description = JSON.stringify({ en: descText, zh: '' })
+    // 只认真实 topics；没有就留空（不再塞 'Production Ready' 这类凑数文案），后续同步会自动补齐
     const features = JSON.stringify(
       Array.isArray(repoData.topics) && repoData.topics.length > 0
         ? repoData.topics.slice(0, 4)
-        : ['Open Source', language, 'Automated CI', 'Production Ready']
+        : []
     )
     const metrics = JSON.stringify([
-      { label: 'STARS', value: String(starsCount) },
+      { label: 'STARS', value: formatStarCount(starsCount) },
       { label: 'FORKS', value: String(repoData.forks_count || 0) },
       { label: 'OPEN ISSUES', value: String(repoData.open_issues_count || 0) },
     ])
-    const timeline = JSON.stringify([
-      { date: createdDate, title: 'Repository created', note: `Initialized as ${repoData.full_name} on GitHub.` },
-      { date: updated.slice(0, 7), title: 'Latest update', note: 'Recent activities synced from remote.' },
-    ])
+    const timeline = JSON.stringify(
+      buildTimelineEvents(
+        { created_at: repoData.created_at, pushed_at: repoData.pushed_at, full_name: repoData.full_name },
+        releases,
+      ),
+    )
 
     // 导入时同步抓取 README / Compose，让新标本开箱即有完整文档
     const docs = await fetchProjectDocs(owner, repo, ghHeaders)
 
-    await c.env.DB.prepare(`
+    const insertProject = (id: string) =>
+      c.env.DB.prepare(`
       INSERT INTO projects (
         id, date, status, name, cn, latin, habitat, type, language, stars, year, shape, version, updated, repository,
         challenge, solution, description_json, features_json, metrics_json, timeline_json, internal_notes, sort_order,
         readme_zh, readme_en, compose_dev, compose_prod, docs_synced_at
       ) VALUES (?, ?, 'LIVE', ?, ?, ?, 'GitHub Field', 'Tool', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
     `).bind(
-      newId,
+      id,
       createdDate,
       name,
       cnName,
@@ -1100,8 +1287,8 @@ adminApp.post('/github-import', async (c) => {
       version,
       updated,
       repository,
-      'Automated curation from GitHub remote repository.',
-      'Continuous development and field maintenance.',
+      '',
+      '',
       description,
       features,
       metrics,
@@ -1114,10 +1301,21 @@ adminApp.post('/github-import', async (c) => {
       nowStamp(),
     ).run()
 
+    // 编号是"先查最大号再插入"推出来的：并发导入可能算出同一个号，
+    // 撞主键时重算一次再试，而不是把 500 丢给用户
+    let finalId = newId
+    try {
+      await insertProject(finalId)
+    } catch (err: any) {
+      if (!/UNIQUE|constraint/i.test(String(err?.message ?? err))) throw err
+      finalId = String(parseInt(finalId, 10) + 1).padStart(3, '0')
+      await insertProject(finalId)
+    }
+
     return c.json({
       success: true,
-      message: `标本 SPEC—${newId} (${name}) 导入成功`,
-      id: newId,
+      message: `标本 SPEC—${finalId} (${name}) 导入成功`,
+      id: finalId,
       docs: {
         readmeZh: docs.readmeZh.length,
         readmeEn: docs.readmeEn.length,
@@ -1332,7 +1530,9 @@ async function fetchAccessCerts(teamName: string, forceRefresh = false): Promise
   ) {
     return accessCertsCache.jwks
   }
-  const res = await fetch(`https://${teamName}.cloudflareaccess.com/cdn-cgi/access/certs`)
+  const res = await fetch(`https://${teamName}.cloudflareaccess.com/cdn-cgi/access/certs`, {
+    signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
+  })
   if (!res.ok) {
     throw new Error(`Access certs endpoint responded ${res.status}`)
   }
