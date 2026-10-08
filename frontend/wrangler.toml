@@ -1,0 +1,9 @@
+name = "nestspace"
+compatibility_date = "2026-10-01"
+pages_build_output_dir = "./dist"
+
+# Cloudflare D1 边缘数据库绑定
+[[d1_databases]]
+binding = "DB"
+database_name = "nestspace-prod"
+database_id = "nestspace-local-preview-id" # 上线时替换为 npx wrangler d1 create 生成的真实 ID

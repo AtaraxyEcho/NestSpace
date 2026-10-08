@@ -1,0 +1,68 @@
+# ==============================================================================
+# NestSpace Root .gitignore
+# 专为 Cloudflare Pages + Functions + D1 边缘全栈打造的防泄漏与清洁配置
+# ==============================================================================
+
+# 1. 依赖与包管理器 (Dependencies & Stores)
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+package-lock.json.bak
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 2. 构建产物与缓存 (Build Outputs & Caches)
+dist/
+**/dist/
+build/
+**/build/
+.cache/
+**/.cache/
+.vite/
+**/.vite/
+*.tsbuildinfo
+vite.config.*.timestamp-*
+
+# 3. Cloudflare & Wrangler 本地边缘环境状态 (绝对禁止提交到 Git)
+# 包含本地 D1 SQLite 数据库状态、本地 Secrets 与会话文件
+.wrangler/
+**/.wrangler/
+.mf/
+**/.mf/
+
+# 4. 环境变量与机密文件 (Environment & Secrets)
+.env
+.env.*
+!.env.example
+.dev.vars
+*.pem
+*.key
+*.cert
+*.crt
+
+# 5. 日志与调试文件 (Logs & Debugging)
+logs/
+*.log
+npm-debug.log*
+*-debug.log*
+.claude-replay.*
+.tmp-*
+
+# 6. 编辑器与操作系统特定文件 (IDE & Operating System)
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# 7. 第三方平台与设计工具临时状态 (Platform Managed State)
+/.plugins/
+/.opencode-skills/
+**/.figma/design-context/

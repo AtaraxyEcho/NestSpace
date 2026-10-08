@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Production Builds
+dist/
+build/
+.cache/
+.vite/
+vite.config.*.timestamp-*
+*.tsbuildinfo
+
+# Cloudflare & Wrangler Local State (Contains local D1 DB SQLite states)
+.wrangler/
+.mf/
+
+# Secrets & Environment variables
+.env
+.env.*
+!.env.example
+.dev.vars
+*.pem
+*.key
+
+# Logs & Debug
+*-debug.log*
+npm-debug.log*
+yarn-debug.log*
+logs/
+*.log
+.claude-replay.*
+.tmp-*
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Platform & Figma Temp
+/.figma/design-context/
+/.plugins/
+/.opencode-skills/

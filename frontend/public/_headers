@@ -1,0 +1,33 @@
+# Cloudflare Pages 生产级安全响应标头（防劫持、防投毒、防暗链挂马、防点击劫持）
+
+/*
+  # 1. 严格内容安全策略 (Content Security Policy)
+  # - default-src 'self': 默认只允许加载同源资源
+  # - script-src 'self': 严禁加载任何未经授权的第三方恶意外链 JS（防恶意重定向、防挂马）
+  # - style-src 'self' 'unsafe-inline': 允许自身 CSS 及 Tailwind 样式
+  # - img-src 'self' data: https:; 允许自身及 HTTPS 安全图片
+  # - frame-ancestors 'none': 严禁被任何网站通过 iframe 嵌入（防点击劫持、防套壳钓鱼）
+  # - object-src 'none': 禁用 Flash/插件等废弃漏洞载体
+  # - base-uri 'self': 防止 base 标签劫持
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self';
+
+  # 2. 点击劫持防御
+  X-Frame-Options: DENY
+
+  # 3. 严格 MIME 类型探测防护（禁止将图片或普通文本伪装成可执行脚本）
+  X-Content-Type-Options: nosniff
+
+  # 4. 强制全站 HTTPS (HSTS)，防护期限 1 年，包含所有子域名，杜绝运营商 HTTP 明文劫持插入广告
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+
+  # 5. 跨域与引用泄漏防护
+  Referrer-Policy: strict-origin-when-cross-origin
+
+  # 6. 禁用敏感设备权限探测（麦克风、摄像头、地理定位等）
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+
+# 带内容哈希的构建产物（/assets/*）：文件名即指纹，内容一变文件名就变，
+# 可安全设置一年不可变缓存，回访访客零下载直接命中浏览器缓存。
+# index.html 不设置长缓存：由 Pages 默认的 ETag 协商缓存保证发版即时生效。
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
