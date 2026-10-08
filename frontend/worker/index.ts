@@ -445,6 +445,9 @@ adminApp.post('/github-sync', async (c) => {
           // Release 信息获取失败不阻断整体同步
         }
 
+        const descText = (data.description || '').trim()
+        const repoLang = (data.language || '').trim()
+
         const sets = ['stars = ?']
         const values: (string | number)[] = [stars]
         if (updated) {
@@ -454,6 +457,16 @@ adminApp.post('/github-sync', async (c) => {
         if (version) {
           sets.push('version = ?')
           values.push(version)
+        }
+        if (repoLang) {
+          sets.push('language = ?')
+          values.push(repoLang)
+        }
+        if (descText) {
+          // 增量同步英文与中文描述（若已有自定义描述则保留兼容）
+          const descObj = { en: descText, zh: descText }
+          sets.push('description_json = ?')
+          values.push(JSON.stringify(descObj))
         }
         sets.push('updated_at = CURRENT_TIMESTAMP')
         values.push(row.id)
@@ -466,6 +479,8 @@ adminApp.post('/github-sync', async (c) => {
           stars,
           version: version || '',
           updated: updated || '',
+          language: repoLang || undefined,
+          description: descText || undefined,
         })
       } catch (e: any) {
         outcomes.push({ id: row.id, name: row.name, status: 'error', note: `请求失败: ${e.message}` })
@@ -683,31 +698,7 @@ app.get('/site-settings', async (c) => {
 
     if (!row) return c.json({})
 
-    return c.json({
-      heroEn: row.hero_en ?? '',
-      heroZh: row.hero_zh ?? '',
-      subtitleEn: row.subtitle_en ?? '',
-      subtitleZh: row.subtitle_zh ?? '',
-      aboutEn: row.about_en ?? '',
-      aboutZh: row.about_zh ?? '',
-      githubUrl: row.github_url ?? '',
-      contactEmail: row.contact_email ?? '',
-      seoTitle: row.seo_title ?? '',
-      seoDescription: row.seo_description ?? '',
-      icpEnabled: row.icp_enabled === 1,
-      icpNumber: row.icp_number ?? '',
-      icpUrl: row.icp_url ?? '',
-      logoText: row.logo_text ?? '',
-      logoSubtext: row.logo_subtext ?? '',
-      logoImageUrl: row.logo_image_url ?? '',
-      logoType: row.logo_type || 'text',
-      navItems: safeJsonParse(row.nav_items_json, null),
-      statsSinceYear: row.stats_since_year ?? '',
-      statsAsOfDate: row.stats_as_of_date ?? '',
-      customCitations: row.custom_citations ?? '',
-      activityLogMode: row.activity_log_mode || 'auto',
-      customActivityLog: safeJsonParse(row.activity_log_json, []),
-    })
+    return c.json(settingsPayloadFromRow(row))
   } catch (err: any) {
     // 出错时返回空对象：公开端文案回退到前端内置默认值，不影响站点展示
     console.error('Error fetching site settings:', err)
@@ -737,11 +728,47 @@ const SITE_SETTINGS_COLUMNS: Record<string, string> = {
   statsAsOfDate: 'stats_as_of_date',
   customCitations: 'custom_citations',
   activityLogMode: 'activity_log_mode',
+  footerKickerEn: 'footer_kicker_en',
+  footerKickerZh: 'footer_kicker_zh',
+  footerBlurbEn: 'footer_blurb_en',
+  footerBlurbZh: 'footer_blurb_zh',
+  footerColSpecimensEn: 'footer_col_specimens_en',
+  footerColSpecimensZh: 'footer_col_specimens_zh',
+  footerColCollectionEn: 'footer_col_collection_en',
+  footerColCollectionZh: 'footer_col_collection_zh',
+  footerColLinksEn: 'footer_col_links_en',
+  footerColLinksZh: 'footer_col_links_zh',
+  footerGithubLabelEn: 'footer_github_label_en',
+  footerGithubLabelZh: 'footer_github_label_zh',
+  footerContactLabelEn: 'footer_contact_label_en',
+  footerContactLabelZh: 'footer_contact_label_zh',
+  footerColophonLinkEn: 'footer_colophon_link_en',
+  footerColophonLinkZh: 'footer_colophon_link_zh',
+  footerColophonLineEn: 'footer_colophon_line_en',
+  footerColophonLineZh: 'footer_colophon_line_zh',
+  footerCopyrightEn: 'footer_copyright_en',
+  footerCopyrightZh: 'footer_copyright_zh',
 }
 
 const SITE_SETTINGS_JSON_COLUMNS: Record<string, string> = {
   navItems: 'nav_items_json',
   customActivityLog: 'activity_log_json',
+}
+
+/**
+ * 把 D1 单行记录还原成前端 SiteSettings 载荷。
+ * 空字符串保持原样返回，由前端 mergeSiteSettings 回退到内置默认文案。
+ */
+function settingsPayloadFromRow(row: any): Record<string, unknown> {
+  const payload: Record<string, unknown> = {}
+  for (const [field, column] of Object.entries(SITE_SETTINGS_COLUMNS)) {
+    payload[field] = row[column] ?? ''
+  }
+  for (const [field, column] of Object.entries(SITE_SETTINGS_JSON_COLUMNS)) {
+    payload[field] = field === 'navItems' ? safeJsonParse(row[column], null) : safeJsonParse(row[column], [])
+  }
+  payload.icpEnabled = row.icp_enabled === 1
+  return payload
 }
 
 // 管理端：获取站点设置原始值
@@ -753,31 +780,7 @@ adminApp.get('/site-settings', async (c) => {
     if (!row) {
       return c.json({})
     }
-    return c.json({
-      heroEn: row.hero_en ?? '',
-      heroZh: row.hero_zh ?? '',
-      subtitleEn: row.subtitle_en ?? '',
-      subtitleZh: row.subtitle_zh ?? '',
-      aboutEn: row.about_en ?? '',
-      aboutZh: row.about_zh ?? '',
-      githubUrl: row.github_url ?? '',
-      contactEmail: row.contact_email ?? '',
-      seoTitle: row.seo_title ?? '',
-      seoDescription: row.seo_description ?? '',
-      icpEnabled: row.icp_enabled === 1,
-      icpNumber: row.icp_number ?? '',
-      icpUrl: row.icp_url ?? '',
-      logoText: row.logo_text ?? '',
-      logoSubtext: row.logo_subtext ?? '',
-      logoImageUrl: row.logo_image_url ?? '',
-      logoType: row.logo_type || 'text',
-      navItems: safeJsonParse(row.nav_items_json, null),
-      statsSinceYear: row.stats_since_year ?? '',
-      statsAsOfDate: row.stats_as_of_date ?? '',
-      customCitations: row.custom_citations ?? '',
-      activityLogMode: row.activity_log_mode || 'auto',
-      customActivityLog: safeJsonParse(row.activity_log_json, []),
-    })
+    return c.json(settingsPayloadFromRow(row))
   } catch (err: any) {
     console.error('Admin fetch site settings error:', err)
     return c.json({ error: 'Failed to fetch site settings' }, 500)

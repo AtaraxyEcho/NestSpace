@@ -8,8 +8,7 @@
   # - img-src 'self' data: https:; 允许自身及 HTTPS 安全图片
   # - frame-ancestors 'none': 严禁被任何网站通过 iframe 嵌入（防点击劫持、防套壳钓鱼）
   # - object-src 'none': 禁用 Flash/插件等废弃漏洞载体
-  # - base-uri 'self': 防止 base 标签劫持
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self';
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self';
 
   # 2. 点击劫持防御
   X-Frame-Options: DENY

@@ -36,6 +36,28 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   // 顶部导航栏配置（默认调换 Curator 与 Index）
   navItems: DEFAULT_NAV_ITEMS,
 
+  // 公开站点底部栏文案：{name} 取 Logo 副标题署名，{since} 取馆藏起始年份，{year} 取当前年份
+  footerKickerEn: 'AN OPEN CABINET',
+  footerKickerZh: '开放标本柜',
+  footerBlurbEn: 'The open-source collection of {name}.',
+  footerBlurbZh: '{name} 的开源项目标本馆。',
+  footerColSpecimensEn: 'SPECIMENS',
+  footerColSpecimensZh: '馆藏标本',
+  footerColCollectionEn: 'COLLECTION',
+  footerColCollectionZh: '馆藏章节',
+  footerColLinksEn: 'FIELD NOTES',
+  footerColLinksZh: '联系入口',
+  footerGithubLabelEn: 'GitHub ↗',
+  footerGithubLabelZh: 'GitHub ↗',
+  footerContactLabelEn: 'Contact ↗',
+  footerContactLabelZh: '联系邮箱 ↗',
+  footerColophonLinkEn: 'Colophon',
+  footerColophonLinkZh: '版本信息',
+  footerColophonLineEn: 'Collected with care, since {since}',
+  footerColophonLineZh: '自 {since} 年起，悉心收藏',
+  footerCopyrightEn: '© {year} NESTSPACE · OPEN SOURCE UNDER MIT',
+  footerCopyrightZh: '© {year} NESTSPACE · 以 MIT 协议开源',
+
   // 馆藏数据与活跃度配置
   statsSinceYear: '',
   statsAsOfDate: '',

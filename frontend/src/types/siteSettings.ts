@@ -14,8 +14,33 @@ export interface ActivityLogItem {
   note?: string
 }
 
+// 页脚占位符由渲染时替换：{since} 取馆藏起始年份，{year} 取当前年份
+// 公开站点底部栏文案（中英文各一份，跟随前台语言切换）
+export interface FooterCopy {
+  footerKickerEn: string
+  footerKickerZh: string
+  footerBlurbEn: string
+  footerBlurbZh: string
+  footerColSpecimensEn: string
+  footerColSpecimensZh: string
+  footerColCollectionEn: string
+  footerColCollectionZh: string
+  footerColLinksEn: string
+  footerColLinksZh: string
+  footerGithubLabelEn: string
+  footerGithubLabelZh: string
+  footerContactLabelEn: string
+  footerContactLabelZh: string
+  footerColophonLinkEn: string
+  footerColophonLinkZh: string
+  footerColophonLineEn: string
+  footerColophonLineZh: string
+  footerCopyrightEn: string
+  footerCopyrightZh: string
+}
+
 // 站点文案、导航与合规配置（存储于 D1 site_settings 表）
-export interface SiteSettings {
+export interface SiteSettings extends FooterCopy {
   heroEn: string
   heroZh: string
   subtitleEn: string

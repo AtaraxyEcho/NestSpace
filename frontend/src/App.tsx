@@ -165,7 +165,7 @@ function SpecimenCard({
               View specimen <span>↗</span>
             </button>
             <a
-              href={`https://${project.repository}`}
+              href={formatRepositoryUrl(project.repository)}
               className="button secondary"
               target="_blank"
               rel="noreferrer"
@@ -181,6 +181,18 @@ function SpecimenCard({
       </footer>
     </article>
   )
+}
+
+/** 规范化仓库 URL，避免 https:// 重复拼接或缺失协议导致 DNS 解析异常 */
+export function formatRepositoryUrl(repo: string | null | undefined): string {
+  if (!repo) return "https://github.com"
+  const trimmed = repo.trim()
+  if (!trimmed) return "https://github.com"
+  if (/^https?:\/\//i.test(trimmed)) return trimmed
+  if (/^git@github\.com:/i.test(trimmed)) {
+    return `https://github.com/${trimmed.replace(/^git@github\.com:/i, "").replace(/\.git$/i, "")}`
+  }
+  return `https://${trimmed.replace(/^\/+/, "")}`
 }
 
 // 站内章节锚点：Cabinet → Catalogue → Curator → Index
@@ -373,12 +385,17 @@ function SpiralGallery({
       const p = progressRef.current
       const step = Math.PI / 2
       const totalAngle = (items.length - 1) * step
+      // 针对 2K / 4K 27寸超高清大屏（宽屏 >= 1800px / 2400px）动态扩展旋转半径与纵向高度，
+      // 防止卡片聚集在屏幕中央过小而看不清内容
+      const w = window.innerWidth
+      const h = window.innerHeight
+      const maxRadius = w >= 2400 ? 980 : w >= 1800 ? 820 : 640
       const radius = Math.min(
-        620,
-        window.innerWidth * (window.innerWidth < 900 ? 0.44 : 0.43),
+        maxRadius,
+        w * (w < 900 ? 0.44 : w >= 2400 ? 0.36 : 0.42),
       )
       const height =
-        window.innerHeight < 700 ? 430 : window.innerWidth < 900 ? 500 : 620
+        h < 700 ? 430 : w < 900 ? 500 : w >= 2400 ? 840 : w >= 1800 ? 720 : 620
 
       // 与 .spiral-stage 的 perspective(2400px) 对应：把 Z 轴深度折算为等效的 2D
       // 位移与缩放（卡片恒为 rotateY(0)，投影几何完全一致），规避深层 translateZ
@@ -715,30 +732,83 @@ function SpecimenIndex({
   )
 }
 
+// 页脚文案占位符：{name} 取 Logo 副标题署名，{since} 取馆藏起始年份，{year} 取当前年份
+function fillFooterTemplate(text: string, vars: { name: string; since: string; year: number }) {
+  return text
+    .replace(/\{name\}/g, vars.name)
+    .replace(/\{since\}/g, vars.since)
+    .replace(/\{year\}/g, String(vars.year))
+}
+
 function SiteFooter({
   items,
   settings,
+  language,
   onOpen,
 }: {
   items: Project[]
   settings: SiteSettings
+  language: Language
   onOpen: (project: Project) => void
 }) {
+  const copy = (en: string, zh: string) =>
+    language === "zh" ? zh || en : en || zh
+  const stats = computeCatalogueStats(items, settings)
+  const templateVars = {
+    name: settings.logoSubtext || "AtaraxyEcho",
+    since: stats.sinceYear,
+    year: new Date().getFullYear(),
+  }
+  const fill = (text: string) => fillFooterTemplate(text, templateVars)
+
+  // COLLECTION 列跟随「导航与标头」的顺序、名称与显示状态，末尾固定 Colophon 入口
+  const navList =
+    settings.navItems && settings.navItems.length > 0
+      ? settings.navItems
+      : DEFAULT_NAV_ITEMS
+  const collectionLinks = navList
+    .filter((item) => item.visible !== false)
+    .map((item) => ({
+      id: item.id,
+      label:
+        language === "zh"
+          ? item.labelZh || item.labelEn
+          : item.labelEn || item.labelZh,
+    }))
+    .concat([
+      {
+        id: "colophon",
+        label: copy(settings.footerColophonLinkEn, settings.footerColophonLinkZh),
+      },
+    ])
+
+  const goToSection = (id: string) => {
+    // 顶栏 Logo 与 Cabinet 一致回到页面顶部，其余章节定位到自身锚点
+    if (id === "cabinet") {
+      window.scrollTo({ top: 0, behavior: "smooth" })
+    } else {
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth" })
+    }
+    if (window.location.hash) {
+      window.history.replaceState(null, "", window.location.pathname)
+    }
+  }
+
   return (
     <footer className="site-footer">
       <div className="footer-grid">
         <div className="footer-brand">
-          <span className="eyebrow">AN OPEN CABINET</span>
+          <span className="eyebrow">
+            {copy(settings.footerKickerEn, settings.footerKickerZh)}
+          </span>
           <strong>{settings.logoText || "NestSpace"}</strong>
           <em>{settings.logoSubtext || "巢空间"}</em>
-          <p>
-            The open-source collection of {settings.logoSubtext || "AtaraxyEcho"}.
-            <br />
-            {settings.logoSubtext || "AtaraxyEcho"} 的开源项目标本馆。
-          </p>
+          <p>{fill(copy(settings.footerBlurbEn, settings.footerBlurbZh))}</p>
         </div>
         <div>
-          <b>SPECIMENS</b>
+          <b>
+            {copy(settings.footerColSpecimensEn, settings.footerColSpecimensZh)}
+          </b>
           {items.map((project) => (
             <button
               type="button"
@@ -750,93 +820,51 @@ function SiteFooter({
           ))}
         </div>
         <div>
-          <b>COLLECTION</b>
-          <a
-            href="#cabinet"
-            onClick={(e) => {
-              e.preventDefault()
-              window.scrollTo({ top: 0, behavior: "smooth" })
-              if (window.location.hash) {
-                window.history.replaceState(null, "", window.location.pathname)
-              }
-            }}
-          >
-            Cabinet
-          </a>
-          <a
-            href="#catalogue"
-            onClick={(e) => {
-              e.preventDefault()
-              document.getElementById("catalogue")?.scrollIntoView({ behavior: "smooth" })
-              if (window.location.hash) {
-                window.history.replaceState(null, "", window.location.pathname)
-              }
-            }}
-          >
-            Catalogue
-          </a>
-          <a
-            href="#curator"
-            onClick={(e) => {
-              e.preventDefault()
-              document.getElementById("curator")?.scrollIntoView({ behavior: "smooth" })
-              if (window.location.hash) {
-                window.history.replaceState(null, "", window.location.pathname)
-              }
-            }}
-          >
-            Curator
-          </a>
-          <a
-            href="#index"
-            onClick={(e) => {
-              e.preventDefault()
-              document.getElementById("index")?.scrollIntoView({ behavior: "smooth" })
-              if (window.location.hash) {
-                window.history.replaceState(null, "", window.location.pathname)
-              }
-            }}
-          >
-            Index
-          </a>
-          <a
-            href="#colophon"
-            onClick={(e) => {
-              e.preventDefault()
-              document.getElementById("colophon")?.scrollIntoView({ behavior: "smooth" })
-              if (window.location.hash) {
-                window.history.replaceState(null, "", window.location.pathname)
-              }
-            }}
-          >
-            Colophon
-          </a>
+          <b>
+            {copy(settings.footerColCollectionEn, settings.footerColCollectionZh)}
+          </b>
+          {collectionLinks.map((link) => (
+            <a
+              key={link.id}
+              href={`#${link.id}`}
+              onClick={(e) => {
+                e.preventDefault()
+                goToSection(link.id)
+              }}
+            >
+              {link.label}
+            </a>
+          ))}
         </div>
         <div>
-          <b>FIELD NOTES</b>
+          <b>{copy(settings.footerColLinksEn, settings.footerColLinksZh)}</b>
           <a
             href={settings.githubUrl}
             target="_blank"
             rel="noreferrer"
           >
-            GitHub ↗
+            {copy(settings.footerGithubLabelEn, settings.footerGithubLabelZh)}
           </a>
-          <a href={`mailto:${settings.contactEmail}`}>Contact ↗</a>
+          <a href={`mailto:${settings.contactEmail}`}>
+            {copy(settings.footerContactLabelEn, settings.footerContactLabelZh)}
+          </a>
         </div>
       </div>
       <div className="footer-bottom" id="colophon">
-        <span>Collected with care, since {computeCatalogueStats(items, settings).sinceYear}</span>
+        <span>
+          {fill(copy(settings.footerColophonLineEn, settings.footerColophonLineZh))}
+        </span>
         {settings.icpEnabled && settings.icpNumber ? (
           <a
             href={settings.icpUrl || "https://beian.miit.gov.cn/"}
             target="_blank"
             rel="noreferrer"
-            style={{ font: '8px "IBM Plex Mono", monospace', letterSpacing: ".18em", color: "#b8ab98" }}
+            style={{ font: '8px var(--font-mono)', letterSpacing: ".18em", color: "#b8ab98" }}
           >
             {settings.icpNumber}
           </a>
         ) : null}
-        <small>© {new Date().getFullYear()} NESTSPACE · OPEN SOURCE UNDER MIT</small>
+        <small>{fill(copy(settings.footerCopyrightEn, settings.footerCopyrightZh))}</small>
       </div>
     </footer>
   )
@@ -905,7 +933,7 @@ function DetailPage({
             <div className="detail-actions">
               <a
                 className="button primary"
-                href={`https://${project.repository}`}
+                href={formatRepositoryUrl(project.repository)}
                 target="_blank"
                 rel="noreferrer"
               >
@@ -1134,12 +1162,74 @@ function DetailPage({
           ))}
         </div>
       </section>
-      <SiteFooter items={items} settings={settings} onOpen={onOpen} />
+      <SiteFooter
+        items={items}
+        settings={settings}
+        language={language}
+        onOpen={onOpen}
+      />
     </main>
   )
 }
 
-type AdminView = "overview" | "navigation" | "stats" | "content" | "projects" | "sync" | "settings"
+type AdminView = "overview" | "navigation" | "stats" | "content" | "footer" | "projects" | "sync" | "settings"
+
+// 页脚文案的中英字段键（均以 En / Zh 结尾，值类型均为 string）
+type FooterCopyEnKey = Extract<keyof SiteSettings, `${string}En`>
+type FooterCopyZhKey = Extract<keyof SiteSettings, `${string}Zh`>
+
+function FooterCopyField({
+  label,
+  hint,
+  language,
+  settings,
+  enKey,
+  zhKey,
+  onChange,
+  multiline,
+}: {
+  label: string
+  hint?: string
+  language: Language
+  settings: SiteSettings
+  enKey: FooterCopyEnKey
+  zhKey: FooterCopyZhKey
+  onChange: (
+    enKey: FooterCopyEnKey,
+    zhKey: FooterCopyZhKey,
+    next: { en: string; zh: string },
+  ) => void
+  multiline?: boolean
+}) {
+  const isZh = language === "zh"
+  const en = settings[enKey]
+  const zh = settings[zhKey]
+  const value = isZh ? zh : en
+  // 另一侧语言的值作为占位符，便于知道切回另一种语言时显示什么
+  const placeholder = isZh ? en : zh
+  const commit = (text: string) =>
+    onChange(enKey, zhKey, isZh ? { en, zh: text } : { en: text, zh })
+
+  return (
+    <label>
+      {label}
+      {multiline ? (
+        <textarea
+          value={value}
+          placeholder={placeholder}
+          onChange={(event) => commit(event.target.value)}
+        />
+      ) : (
+        <input
+          value={value}
+          placeholder={placeholder}
+          onChange={(event) => commit(event.target.value)}
+        />
+      )}
+      {hint ? <small>{hint}</small> : null}
+    </label>
+  )
+}
 
 type GithubSyncResult = {
   id: string
@@ -1149,6 +1239,255 @@ type GithubSyncResult = {
   stars?: string
   version?: string
   updated?: string
+  language?: string
+  description?: string
+}
+
+function AdminFooterView({
+  items,
+  settings,
+  contentLanguage,
+  onLanguage,
+  onPatch,
+  onSave,
+}: {
+  items: Project[]
+  settings: SiteSettings
+  contentLanguage: Language
+  onLanguage: (value: Language) => void
+  onPatch: (
+    enKey: FooterCopyEnKey,
+    zhKey: FooterCopyZhKey,
+    next: { en: string; zh: string },
+  ) => void
+  onSave: () => void
+}) {
+  const pick = (en: string, zh: string) =>
+    contentLanguage === "zh" ? zh || en : en || zh
+  const templateVars = {
+    name: settings.logoSubtext || "AtaraxyEcho",
+    since: computeCatalogueStats(items, settings).sinceYear,
+    year: new Date().getFullYear(),
+  }
+  const fill = (text: string) => fillFooterTemplate(text, templateVars)
+
+  // 预览与公开站点同源：COLLECTION 列取可见导航项 + 固定 Colophon 入口
+  const navList =
+    settings.navItems && settings.navItems.length > 0
+      ? settings.navItems
+      : DEFAULT_NAV_ITEMS
+  const collectionLinks = navList
+    .filter((item) => item.visible !== false)
+    .map((item) => ({ id: item.id, label: pick(item.labelEn, item.labelZh) }))
+    .concat([
+      {
+        id: "colophon",
+        label: pick(settings.footerColophonLinkEn, settings.footerColophonLinkZh),
+      },
+    ])
+
+  return (
+    <div className="admin-content">
+      <div className="admin-page-title compact">
+        <div>
+          <span className="eyebrow">FOOTER COPY / 08</span>
+          <h1>底部栏文案</h1>
+          <p>调整公开站点底部栏的品牌说明、栏目标题、链接文字与版权行，中英各一份，随访客语言切换。</p>
+        </div>
+        <button type="button" className="admin-primary" onClick={onSave}>
+          保存并生效
+        </button>
+      </div>
+
+      <div className="content-tabs" role="tablist" aria-label="页脚文案语言">
+        <button
+          type="button"
+          className={contentLanguage === "zh" ? "active" : ""}
+          onClick={() => onLanguage("zh")}
+        >
+          中文文案
+        </button>
+        <button
+          type="button"
+          className={contentLanguage === "en" ? "active" : ""}
+          onClick={() => onLanguage("en")}
+        >
+          English
+        </button>
+      </div>
+
+      <div className="settings-grid">
+        <section className="settings-card">
+          <span className="eyebrow">BRAND BLOCK / 品牌区</span>
+          <h2>品牌上方小标与说明</h2>
+          <FooterCopyField
+            label="品牌区上方小标"
+            hint="等宽小字号标签，位于 Logo 大字上方"
+            language={contentLanguage}
+            settings={settings}
+            enKey="footerKickerEn"
+            zhKey="footerKickerZh"
+            onChange={onPatch}
+          />
+          <FooterCopyField
+            label="品牌说明段落"
+            hint="支持 {'{name}'} 占位符，取自「02 导航与标头」的副标题署名"
+            language={contentLanguage}
+            settings={settings}
+            enKey="footerBlurbEn"
+            zhKey="footerBlurbZh"
+            onChange={onPatch}
+            multiline
+          />
+        </section>
+
+        <section className="settings-card">
+          <span className="eyebrow">COLUMN HEADINGS / 栏目标题</span>
+          <h2>三列标题与锚点文字</h2>
+          <FooterCopyField
+            label="标本列表列标题"
+            hint="内容为全部公开标本名称，来自「05 项目管理」"
+            language={contentLanguage}
+            settings={settings}
+            enKey="footerColSpecimensEn"
+            zhKey="footerColSpecimensZh"
+            onChange={onPatch}
+          />
+          <FooterCopyField
+            label="章节导航列标题"
+            hint="该列链接的顺序、名称与显示状态跟随「02 导航与标头」"
+            language={contentLanguage}
+            settings={settings}
+            enKey="footerColCollectionEn"
+            zhKey="footerColCollectionZh"
+            onChange={onPatch}
+          />
+          <FooterCopyField
+            label="外部链接列标题"
+            hint="该列包含 GitHub 与联系邮箱两个链接"
+            language={contentLanguage}
+            settings={settings}
+            enKey="footerColLinksEn"
+            zhKey="footerColLinksZh"
+            onChange={onPatch}
+          />
+          <FooterCopyField
+            label="Colophon 链接文字"
+            hint="章节导航列末尾固定项，点击滚动到底部版权行"
+            language={contentLanguage}
+            settings={settings}
+            enKey="footerColophonLinkEn"
+            zhKey="footerColophonLinkZh"
+            onChange={onPatch}
+          />
+        </section>
+
+        <section className="settings-card">
+          <span className="eyebrow">LINK LABELS / 链接文字</span>
+          <h2>外部链接显示文字</h2>
+          <FooterCopyField
+            label="GitHub 链接文字"
+            hint="链接地址来自「04 内容管理」的 GitHub"
+            language={contentLanguage}
+            settings={settings}
+            enKey="footerGithubLabelEn"
+            zhKey="footerGithubLabelZh"
+            onChange={onPatch}
+          />
+          <FooterCopyField
+            label="联系链接文字"
+            hint="链接指向 mailto:「04 内容管理」的联系邮箱"
+            language={contentLanguage}
+            settings={settings}
+            enKey="footerContactLabelEn"
+            zhKey="footerContactLabelZh"
+            onChange={onPatch}
+          />
+        </section>
+
+        <section className="settings-card">
+          <span className="eyebrow">BASELINE / 底行</span>
+          <h2>版权行</h2>
+          <FooterCopyField
+            label="底行左侧文案"
+            hint="支持 {'{since}'} 占位符，取馆藏起始年份（可在「03 馆藏统计」指定）"
+            language={contentLanguage}
+            settings={settings}
+            enKey="footerColophonLineEn"
+            zhKey="footerColophonLineZh"
+            onChange={onPatch}
+          />
+          <FooterCopyField
+            label="底行右侧版权行"
+            hint="支持 {'{year}'} 占位符，取当前年份；备案号在「07 站点设置」的备案信息卡片"
+            language={contentLanguage}
+            settings={settings}
+            enKey="footerCopyrightEn"
+            zhKey="footerCopyrightZh"
+            onChange={onPatch}
+          />
+          <p className="settings-card-note">
+            某项留空会回退到构建内置的默认文案（而非隐藏该行）；改动保存后即时生效，无需重新部署。
+          </p>
+        </section>
+      </div>
+
+      <div className="footer-preview">
+        <span>
+          FOOTER PREVIEW / 底部栏实时预览（{contentLanguage === "zh" ? "中文" : "English"}）
+        </span>
+        <div className="footer-preview-stage">
+          <div className="footer-preview-brand">
+            <span className="eyebrow">
+              {pick(settings.footerKickerEn, settings.footerKickerZh)}
+            </span>
+            <strong>{settings.logoText || "NESTSPACE"}</strong>
+            <em>{settings.logoSubtext || "ATARAXYECHO"}</em>
+            <p>{fill(pick(settings.footerBlurbEn, settings.footerBlurbZh))}</p>
+          </div>
+          <div className="footer-preview-cols">
+            <div>
+              <b>
+                {pick(settings.footerColSpecimensEn, settings.footerColSpecimensZh)}
+              </b>
+              {items.slice(0, 3).map((item) => (
+                <span key={item.id}>{item.name}</span>
+              ))}
+            </div>
+            <div>
+              <b>
+                {pick(settings.footerColCollectionEn, settings.footerColCollectionZh)}
+              </b>
+              {collectionLinks.map((link) => (
+                <span key={link.id}>{link.label}</span>
+              ))}
+            </div>
+            <div>
+              <b>{pick(settings.footerColLinksEn, settings.footerColLinksZh)}</b>
+              <span>
+                {pick(settings.footerGithubLabelEn, settings.footerGithubLabelZh)}
+              </span>
+              <span>
+                {pick(settings.footerContactLabelEn, settings.footerContactLabelZh)}
+              </span>
+            </div>
+          </div>
+          <div className="footer-preview-bottom">
+            <span>
+              {fill(pick(settings.footerColophonLineEn, settings.footerColophonLineZh))}
+            </span>
+            {settings.icpEnabled && settings.icpNumber ? (
+              <i>{settings.icpNumber}</i>
+            ) : null}
+            <small>{fill(pick(settings.footerCopyrightEn, settings.footerCopyrightZh))}</small>
+          </div>
+        </div>
+        <button type="button" className="admin-primary" onClick={onSave}>
+          保存底部栏文案
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function AdminGateway({
@@ -1275,6 +1614,7 @@ function AdminPage({
     navigation: "导航与标头",
     stats: "馆藏统计",
     content: "内容管理",
+    footer: "底部栏文案",
     projects: "项目管理",
     sync: "GitHub 同步",
     settings: "站点设置",
@@ -1300,6 +1640,18 @@ function AdminPage({
         ? "站点设置已保存，刷新公开站点即可生效。"
         : `保存失败: ${res.error || "请检查网络或口令权限"}`,
     )
+  }
+
+  const patchFooterPair = (
+    enKey: FooterCopyEnKey,
+    zhKey: FooterCopyZhKey,
+    next: { en: string; zh: string },
+  ) => {
+    setSiteContent({
+      ...siteContent,
+      [enKey]: next.en,
+      [zhKey]: next.zh,
+    } as SiteSettings)
   }
 
   const handleScanRepos = async () => {
@@ -1496,6 +1848,13 @@ function AdminPage({
             onClick={() => setView("settings")}
           >
             <span>07</span> 站点设置
+          </button>
+          <button
+            type="button"
+            className={view === "footer" ? "active" : ""}
+            onClick={() => setView("footer")}
+          >
+            <span>08</span> 底部栏
           </button>
         </nav>
         <div className="admin-sidebar-foot">
@@ -2593,12 +2952,12 @@ function AdminPage({
                       <strong>{result.name}</strong>
                       <small>
                         {result.status === "synced"
-                          ? `★ ${result.stars} · ${result.version || "无 Release"} · ${result.updated}`
+                          ? `★ ${result.stars} · ${result.version || "无 Release"} · ${result.updated}${result.language ? ` · ${result.language}` : ""}`
                           : result.note || result.status}
                       </small>
                     </p>
                     <time>
-                      {result.status === "synced" ? "已更新" : result.status === "skipped" ? "已跳过" : "失败"}
+                      {result.status === "synced" ? "已落库" : result.status === "skipped" ? "已跳过" : "失败"}
                     </time>
                   </div>
                 ))}
@@ -3150,6 +3509,7 @@ export default function App() {
       <SiteFooter
         items={items}
         settings={siteSettings}
+        language={language}
         onOpen={openProject}
       />
     </main>
