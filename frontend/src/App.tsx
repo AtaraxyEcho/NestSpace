@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { Language, Project, ProjectStatus } from "./types/project"
 import { fallbackProjects as projects } from "./data/fallbackProjects"
 import { DEFAULT_SITE_SETTINGS, DEFAULT_NAV_ITEMS } from "./data/defaultSiteSettings"
@@ -235,6 +235,9 @@ const SECTION_ANCHORS = ["cabinet", "catalogue", "curator", "index", "colophon"]
 
 // 详情页页签顺序：role=tab 的 aria-controls/id 与左右方向键导航都以此为准
 const DETAIL_TABS = ["overview", "readme", "deployment"] as const
+
+// 公开数据重读的最小间隔：管理端在独立子域，改动后切回公开页即可自动生效，又不至于每次聚焦都打接口
+const PUBLIC_REFRESH_MIN_INTERVAL_MS = 20 * 1000
 
 export function isAdminHost(): boolean {
   if (typeof window === "undefined") return false
@@ -2065,16 +2068,10 @@ function AdminPage({
     })
   }
 
-  // 展示顺序与接口一致：sort_order 升序，其次按采集日期倒序
-  const orderedItems = useMemo(
-    () =>
-      [...items].sort(
-        (a, b) =>
-          (a.sort_order ?? 0) - (b.sort_order ?? 0) ||
-          (a.date < b.date ? 1 : a.date > b.date ? -1 : 0),
-      ),
-    [items],
-  )
+  // 展示顺序直接采用接口返回的数组顺序（接口已按 sort_order ASC, date DESC 排好）。
+  // 不能在这里重排：sort_order 并列时 SQLite 的兜底顺序与 JS 稳定排序可能不同，
+  // 会让"上移/下移"作用的邻居错位，出现"改了顺序首页却没变"的假象。
+  const orderedItems = items
 
   const canMove = (id: string, direction: -1 | 1) => {
     const index = orderedItems.findIndex((item) => item.id === id)
@@ -4392,33 +4389,44 @@ export default function App() {
   const [settingsResolved, setSettingsResolved] = useState(false)
   // 展示偏好只套用一次，之后不覆盖访客手动切换的语言与主题
   const preferenceApplied = useRef(false)
+  // 最近一次公开数据重读时间（节流用）
+  const lastRefreshRef = useRef(0)
 
-  // 挂载时从 Cloudflare 边缘 API 异步同步最新的公开项目数据与站点文案
-  useEffect(() => {
-    let isMounted = true
-    fetchPublicProjects()
-      .then((data) => {
-        if (isMounted && data && data.length > 0) {
-          setItems(data)
-        }
-      })
-      .catch((err) => {
-        console.warn("Public API fetch note (fallback in use):", err)
-      })
-    fetchSiteSettings()
-      .then((settings) => {
-        if (isMounted) setSiteSettings(settings)
-      })
-      .catch(() => {
-        // 接口异常时保持内置默认文案
-      })
-      .finally(() => {
-        if (isMounted) setSettingsResolved(true)
-      })
-    return () => {
-      isMounted = false
+  // 从边缘 API 同步公开项目数据与站点文案。
+  // 管理端跑在独立子域（admin.*），改完顺序/文案后公开页不会自动感知，
+  // 因此标签页重新可见或窗口重新获得焦点时重读一次（最短间隔 20s）。
+  const refreshPublicData = useCallback(async (force = false) => {
+    const now = Date.now()
+    if (!force && now - lastRefreshRef.current < PUBLIC_REFRESH_MIN_INTERVAL_MS) {
+      return
+    }
+    lastRefreshRef.current = now
+    try {
+      const [projects, settings] = await Promise.all([
+        fetchPublicProjects(),
+        fetchSiteSettings(),
+      ])
+      if (projects && projects.length > 0) setItems(projects)
+      setSiteSettings(settings)
+    } catch (err) {
+      console.warn("Public API fetch note (fallback in use):", err)
+    } finally {
+      setSettingsResolved(true)
     }
   }, [])
+
+  useEffect(() => {
+    refreshPublicData(true)
+    const onWake = () => {
+      if (document.visibilityState === "visible") refreshPublicData()
+    }
+    window.addEventListener("focus", onWake)
+    document.addEventListener("visibilitychange", onWake)
+    return () => {
+      window.removeEventListener("focus", onWake)
+      document.removeEventListener("visibilitychange", onWake)
+    }
+  }, [refreshPublicData])
 
   // 套用管理端配置的展示偏好（仅一次）：显式指定语言/主题时覆盖初始值
   useEffect(() => {
