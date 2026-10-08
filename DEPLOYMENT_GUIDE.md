@@ -82,9 +82,11 @@ openssl rand -base64 32
 
 # 注入到 Worker（在 frontend 目录执行，自动读取 wrangler.toml 的项目名）
 npx wrangler secret put ADMIN_SECRET_KEY
+# （可选）注入 GitHub Personal Access Token，避免公共 IP 60 次/小时速率限制并支持私有仓库导入
+npx wrangler secret put GITHUB_TOKEN
 # 如需 preview 环境也可用密钥联调，可在控制台 Settings ➔ Variables 为 Preview 一并添加
 ```
-> 注意：请使用 32 字节以上纯随机字符串。不要使用人类可记忆的模式化口令
+> 注意：请使用 32 字节以上纯随机字符串作为 `ADMIN_SECRET_KEY`。不要使用人类可记忆的模式化口令
 > （如 `Curator_NestSpace_2026!#`），防止被在线暴力破解。
 
 ---
