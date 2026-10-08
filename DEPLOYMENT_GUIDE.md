@@ -112,20 +112,39 @@ npx wrangler secret put ADMIN_SECRET_KEY
 | Access JWT 签名校验（`Cf-Access-Jwt-Assertion` 头或 `CF_Authorization` Cookie） | 代码层 | 伪造身份头——明文头一律不信任，只认通过 RS256 签名验证的 JWT |
 | Zero Trust Access 边缘拦截 | 边缘层 | 让未认证请求根本到不了 Functions |
 
-### 1. 创建 Access 应用（边缘拦截）
+### 1. 配置独立管理子域名与 Access 应用（主流金标方案）
 
-1. 登录 Cloudflare Dashboard ➔ 左侧菜单点击 **Zero Trust**。
-2. 进入 **Access** ➔ **Applications** ➔ 点击 **Add an Application**：
-   - 选择 **Self-hosted（自托管）**。
-   - **Application name**：`NestSpace Curator Console`。
-   - **Application domain**：输入你的自定义域名，路径填 `/api/admin*`。
-3. 配置策略（**Policies**）：
-   - Policy name：`Admin Only`，Action：`Allow`。
-   - **Include 规则**：选择 **Emails** ➔ 填入**你的私人邮箱**。
-4. 在应用详情页记录 **AUD Tag**（应用基本信息中可见），下一步要用。
+为彻底杜绝公开主站与管理端的跨站风险，推荐将管理控制台部署在专属子域名 `admin.nestspace.online`：
 
-**防护效果**：任何人未登录调用 `/api/admin/*`，在 Cloudflare CDN 边缘直接被拦截；
-只有你的邮箱能收到 6 位一次性验证码，验证后才被边缘放行。
+1. **添加 DNS 记录**：
+   - 进入 Cloudflare 控制台 ➔ `nestspace.online` ➔ **DNS** ➔ **Records**。
+   - 添加记录：
+     - **Type**：`CNAME`
+     - **Name**：`admin`
+     - **Target**：`nestspace.online`
+     - **Proxy status**：开启 **Proxied（橙色小云朵）**
+2. **在 Worker 绑定该自定义域名**：
+   - 进入 **Workers & Pages** ➔ `nestspace` ➔ **Settings** ➔ **Domains & Routes**。
+   - 点击 **Add Custom Domain**，输入：`admin.nestspace.online`，等待生效。
+3. **创建 Zero Trust Access 拦截应用**：
+   - 登录 Cloudflare Dashboard ➔ 左侧菜单点击 **Zero Trust**。
+   - 进入 **Access** ➔ **Applications** ➔ 点击 **Add an Application**：
+     - 选择 **Self-hosted（自托管）**。
+     - **Application name**：`NestSpace Curator Console`。
+     - **Application domain**：
+       - **Subdomain**：`admin`
+       - **Domain**：`nestspace.online`
+       - **Path**：**留空**（整站全锁定保护）。
+   - 配置策略（**Policies**）：
+     - Policy name：`Admin Only`，Action：`Allow`。
+     - **Include 规则**：选择 **Emails** ➔ 填入**你的私人邮箱**。
+   - 在应用详情页记录 **AUD Tag**（应用基本信息中可见），下一步要用。
+
+**防护与交互效果**：
+- 访客在公开主站 `https://nestspace.online` 浏览作品，若手动敲入 `#admin`，前端会自动重定向至 `https://admin.nestspace.online`；
+- 访问 `https://admin.nestspace.online` 时，整站直接被 Cloudflare 边缘节点拦截并弹出邮箱验证码登录页；
+- 验证通过后浏览器写入 `CF_Authorization` Cookie，页面自动进入馆长控制台，点击「← 返回公开站点」自动跳回主站；
+- 未授权者在最外层 CDN 即被拦截，连后台前端与 API 的一个字节都无法获取。
 
 ### 2. 配置 JWT 校验环境变量（代码层第二防线）
 
@@ -142,9 +161,9 @@ npx wrangler secret put ADMIN_SECRET_KEY
 覆盖的入口被客户端伪造，代码层一律不作为凭据。** 若这两个变量未配置，管理 API 仅接受
 Bearer 密钥——同样是安全的默认状态（fail-closed）。
 
-配置生效后，已通过 Access 验证码验证的浏览器访问 `#admin` 管理页时会自动携带
-`CF_Authorization` Cookie，无需再输入口令即可进入；其他浏览器仍需输入
-`ADMIN_SECRET_KEY`。
+配置生效后，已通过 Access 验证码验证的浏览器访问管理后台时会自动携带
+`CF_Authorization` Cookie，无需再输入口令即可进入；本地开发或其他浏览器仍可输入
+`ADMIN_SECRET_KEY` 进入。
 
 ### 3. 关闭未受保护的入口（重要）
 

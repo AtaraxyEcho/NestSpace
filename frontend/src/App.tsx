@@ -183,7 +183,14 @@ function SpecimenCard({
 // 站内章节锚点：默认已调换 Curator 与 Index 的位置（Cabinet → Curator → Index）
 const SECTION_ANCHORS = ["cabinet", "curator", "index", "colophon"]
 
+export function isAdminHost(): boolean {
+  if (typeof window === "undefined") return false
+  const host = window.location.hostname.toLowerCase()
+  return host === "admin.nestspace.online" || host.startsWith("admin.")
+}
+
 function routeFromHash(hash: string) {
+  if (isAdminHost()) return "admin"
   const clean = hash.replace(/^#/, "")
   if (!clean || SECTION_ANCHORS.includes(clean)) return "home"
   return clean
@@ -2734,7 +2741,24 @@ export default function App() {
   }, [dark])
 
   useEffect(() => {
+    // 生产环境中，若在公开主站通过 #admin 访问后台，平滑跳转到受 Zero Trust 保护的专属子域名
+    const checkRedirect = () => {
+      if (
+        typeof window !== "undefined" &&
+        window.location.hash === "#admin" &&
+        !isAdminHost() &&
+        !["localhost", "127.0.0.1"].includes(window.location.hostname)
+      ) {
+        window.location.href = "https://admin.nestspace.online"
+        return true
+      }
+      return false
+    }
+
+    if (checkRedirect()) return
+
     const onHashChange = () => {
+      if (checkRedirect()) return
       const clean = window.location.hash.replace(/^#/, "")
       setRoute(routeFromHash(window.location.hash))
       // 章节锚点交由浏览器原生滚动定位；其余路由（详情页/管理端/返回）回到顶部
@@ -2781,7 +2805,13 @@ export default function App() {
       <AdminGateway
         items={items}
         onChange={setItems}
-        onExit={() => navigate("home")}
+        onExit={() => {
+          if (isAdminHost()) {
+            window.location.href = "https://nestspace.online"
+          } else {
+            navigate("home")
+          }
+        }}
       />
     )
   }
