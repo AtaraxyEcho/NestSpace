@@ -183,16 +183,24 @@ function SpecimenCard({
   )
 }
 
-/** 规范化仓库 URL，避免 https:// 重复拼接或缺失协议导致 DNS 解析异常 */
+/** 规范化仓库 URL，避免 https:// 重复拼接、缺冒号（如 https//）或缺失协议导致 DNS 解析异常 */
 export function formatRepositoryUrl(repo: string | null | undefined): string {
   if (!repo) return "https://github.com"
-  const trimmed = repo.trim()
+  let trimmed = repo.trim()
   if (!trimmed) return "https://github.com"
-  if (/^https?:\/\//i.test(trimmed)) return trimmed
   if (/^git@github\.com:/i.test(trimmed)) {
     return `https://github.com/${trimmed.replace(/^git@github\.com:/i, "").replace(/\.git$/i, "")}`
   }
-  return `https://${trimmed.replace(/^\/+/, "")}`
+  // 容错处理：清洗可能写错的协议头（如 https//、http//、https:/）
+  trimmed = trimmed
+    .replace(/^https?:\/\/?/i, "")
+    .replace(/^https?\/\//i, "")
+    .replace(/^\/+/, "")
+  // 如果是纯 owner/repo 形式（不带 github.com）
+  if (!/^github\.com/i.test(trimmed) && /^[^/\s#?]+\/[^/\s#?]+/.test(trimmed)) {
+    return `https://github.com/${trimmed}`
+  }
+  return `https://${trimmed}`
 }
 
 // 站内章节锚点：Cabinet → Catalogue → Curator → Index
@@ -1331,7 +1339,7 @@ function AdminFooterView({
           />
           <FooterCopyField
             label="品牌说明段落"
-            hint="支持 {'{name}'} 占位符，取自「02 导航与标头」的副标题署名"
+            hint="支持 {name} 占位符，取自「02 导航与标头」的副标题署名"
             language={contentLanguage}
             settings={settings}
             enKey="footerBlurbEn"
@@ -1410,7 +1418,7 @@ function AdminFooterView({
           <h2>版权行</h2>
           <FooterCopyField
             label="底行左侧文案"
-            hint="支持 {'{since}'} 占位符，取馆藏起始年份（可在「03 馆藏统计」指定）"
+            hint="支持 {since} 占位符，取馆藏起始年份（可在「03 馆藏统计」指定）"
             language={contentLanguage}
             settings={settings}
             enKey="footerColophonLineEn"
@@ -1419,7 +1427,7 @@ function AdminFooterView({
           />
           <FooterCopyField
             label="底行右侧版权行"
-            hint="支持 {'{year}'} 占位符，取当前年份；备案号在「07 站点设置」的备案信息卡片"
+            hint="支持 {year} 占位符，取当前年份；备案号在「07 站点设置」的备案信息卡片"
             language={contentLanguage}
             settings={settings}
             enKey="footerCopyrightEn"

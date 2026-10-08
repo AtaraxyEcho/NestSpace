@@ -366,17 +366,18 @@ adminApp.delete('/projects/:id', async (c) => {
   }
 })
 
-/** 解析 GitHub 仓库地址，兼容完整 HTTPS、HTTP、SSH 及无协议格式（如 github.com/owner/repo） */
+/** 解析 GitHub 仓库地址，兼容完整 HTTPS、HTTP、SSH、无协议格式以及缺冒号格式（如 https//github.com/owner/repo） */
 function parseGithubRepo(rawUrl: string | null | undefined): { owner: string; repo: string } | null {
   if (!rawUrl) return null
   const cleaned = rawUrl
     .trim()
     .replace(/^git@github\.com:/i, '')
-    .replace(/^https?:\/\//i, '')
+    .replace(/^https?:\/\/?/i, '')
+    .replace(/^https?\/\//i, '')
     .replace(/^www\./i, '')
     .replace(/\.git$/i, '')
     .replace(/\/+$/, '')
-  const match = /^github\.com\/([^/\s#?]+)\/([^/\s#?]+)/i.exec(cleaned)
+  const match = /^(?:github\.com\/)?([^/\s#?]+)\/([^/\s#?]+)/i.exec(cleaned)
   if (!match) return null
   return { owner: match[1], repo: match[2] }
 }
