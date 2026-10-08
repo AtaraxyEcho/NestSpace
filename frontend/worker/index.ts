@@ -366,29 +366,66 @@ adminApp.delete('/projects/:id', async (c) => {
   }
 })
 
-// 管理端：GitHub 同步——按各项目的 repository 地址拉取公开仓库的最新
-// stars / 最近推送时间 / 最新 Release 版本并写回 D1（公开仓库无需 Token）
+/** 解析 GitHub 仓库地址，兼容完整 HTTPS、HTTP、SSH 及无协议格式（如 github.com/owner/repo） */
+function parseGithubRepo(rawUrl: string | null | undefined): { owner: string; repo: string } | null {
+  if (!rawUrl) return null
+  const cleaned = rawUrl
+    .trim()
+    .replace(/^git@github\.com:/i, '')
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .replace(/\.git$/i, '')
+    .replace(/\/+$/, '')
+  const match = /^github\.com\/([^/\s#?]+)\/([^/\s#?]+)/i.exec(cleaned)
+  if (!match) return null
+  return { owner: match[1], repo: match[2] }
+}
+
+function getGithubHeaders(c: any, customToken?: string): Record<string, string> {
+  const token =
+    customToken ||
+    c.req.header('X-GitHub-Token') ||
+    (c.env as any).GITHUB_TOKEN
+  const headers: Record<string, string> = {
+    'User-Agent': 'NestSpace-Curator/1.0',
+    Accept: 'application/vnd.github+json',
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  return headers
+}
+
+// 管理端：GitHub 指标同步——按各项目的 repository 地址拉取最新 stars / 最近推送时间 / 最新 Release 版本并写回 D1
 adminApp.post('/github-sync', async (c) => {
   try {
+    const body = await c.req.json().catch(() => ({}))
+    const ghHeaders = getGithubHeaders(c, body?.token)
+
     const { results } = await c.env.DB.prepare(
       'SELECT id, name, repository FROM projects ORDER BY sort_order ASC',
     ).all()
 
     const outcomes: Record<string, unknown>[] = []
     for (const row of results as unknown as { id: string; name: string; repository: string }[]) {
-      const match = /^github\.com\/([^/\s]+)\/([^/\s#?]+)/.exec((row.repository || '').trim())
-      if (!match) {
-        outcomes.push({ id: row.id, name: row.name, status: 'skipped', note: '仓库地址为空或非 GitHub 格式' })
+      const parsed = parseGithubRepo(row.repository)
+      if (!parsed) {
+        outcomes.push({ id: row.id, name: row.name, status: 'skipped', note: '仓库地址为空或非有效 GitHub 格式' })
         continue
       }
-      const [, owner, repo] = match
+      const { owner, repo } = parsed
       try {
-        const ghHeaders = { 'User-Agent': 'NestSpace-Sync', Accept: 'application/vnd.github+json' }
         const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
           headers: ghHeaders,
         })
         if (!repoRes.ok) {
-          outcomes.push({ id: row.id, name: row.name, status: 'error', note: `GitHub API ${repoRes.status}` })
+          const errNote =
+            repoRes.status === 403
+              ? 'GitHub 访问频次超限 (403)，可在设置中填入 GitHub Token'
+              : repoRes.status === 404
+              ? '仓库未找到或为私有仓库 (404)'
+              : `GitHub API 响应 ${repoRes.status}`
+          outcomes.push({ id: row.id, name: row.name, status: 'error', note: errNote })
           continue
         }
         const data: any = await repoRes.json()
@@ -400,7 +437,10 @@ adminApp.post('/github-sync', async (c) => {
           const relRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases/latest`, {
             headers: ghHeaders,
           })
-          if (relRes.ok) version = ((await relRes.json()) as any).tag_name ?? null
+          if (relRes.ok) {
+            const relData: any = await relRes.json()
+            version = relData.tag_name ?? null
+          }
         } catch {
           // Release 信息获取失败不阻断整体同步
         }
@@ -427,8 +467,8 @@ adminApp.post('/github-sync', async (c) => {
           version: version || '',
           updated: updated || '',
         })
-      } catch {
-        outcomes.push({ id: row.id, name: row.name, status: 'error', note: 'GitHub 请求失败' })
+      } catch (e: any) {
+        outcomes.push({ id: row.id, name: row.name, status: 'error', note: `请求失败: ${e.message}` })
       }
     }
 
@@ -436,6 +476,197 @@ adminApp.post('/github-sync', async (c) => {
   } catch (err: any) {
     console.error('GitHub sync error:', err)
     return c.json({ error: 'Sync failed' }, 500)
+  }
+})
+
+// 管理端：扫描指定 GitHub 用户/组织的所有公开仓库，并标注哪些已在馆藏中
+adminApp.get('/github-repos', async (c) => {
+  try {
+    let username = (c.req.query('username') || '').trim()
+    const customToken = c.req.query('token')
+    const ghHeaders = getGithubHeaders(c, customToken)
+
+    if (!username) {
+      const settingsRow: any = await c.env.DB.prepare('SELECT github_url FROM site_settings WHERE id = 1').first()
+      if (settingsRow?.github_url) {
+        const match = /github\.com\/([^/\s#?]+)/i.exec(settingsRow.github_url)
+        if (match) username = match[1]
+      }
+    }
+
+    if (!username) {
+      username = 'AtaraxyEcho'
+    }
+
+    const res = await fetch(
+      `https://api.github.com/users/${encodeURIComponent(username)}/repos?sort=updated&per_page=100`,
+      { headers: ghHeaders },
+    )
+
+    if (!res.ok) {
+      const note =
+        res.status === 404
+          ? `未找到 GitHub 用户: ${username}`
+          : res.status === 403
+          ? 'GitHub API 访问速率超限 (403)，可提供 GitHub Token 提高限额'
+          : `GitHub 响应异常 (${res.status})`
+      return c.json({ error: note }, res.status >= 500 ? 500 : 400)
+    }
+
+    const ghRepos: any[] = await res.json()
+
+    // 拉取所有已有标本以供比对
+    const { results: existing } = await c.env.DB.prepare('SELECT id, name, repository FROM projects').all()
+    const importedMap = new Map<string, string>()
+    for (const p of existing as unknown as { id: string; name: string; repository: string }[]) {
+      const parsed = parseGithubRepo(p.repository)
+      if (parsed) {
+        importedMap.set(`${parsed.owner.toLowerCase()}/${parsed.repo.toLowerCase()}`, p.id)
+      }
+    }
+
+    const list = ghRepos.map((repo) => {
+      const key = (repo.full_name || '').toLowerCase()
+      const existingId = importedMap.get(key)
+      return {
+        id: repo.id,
+        name: repo.name,
+        full_name: repo.full_name,
+        description: repo.description || '',
+        stars: repo.stargazers_count || 0,
+        language: repo.language || '',
+        updated_at: String(repo.pushed_at || repo.updated_at || '').slice(0, 10).replace(/-/g, '.'),
+        created_at: String(repo.created_at || '').slice(0, 7).replace(/-/g, '.'),
+        html_url: repo.html_url,
+        is_fork: Boolean(repo.fork),
+        already_imported: Boolean(existingId),
+        specimen_id: existingId || null,
+      }
+    })
+
+    return c.json({ success: true, username, repos: list })
+  } catch (err: any) {
+    console.error('GitHub repos fetch error:', err)
+    return c.json({ error: 'Failed to fetch repositories' }, 500)
+  }
+})
+
+// 管理端：从 GitHub 仓库一键导入为馆藏标本
+adminApp.post('/github-import', async (c) => {
+  try {
+    const body = await c.req.json()
+    const repoFullName = (body.repoFullName || '').trim()
+    const customToken = body.token
+    if (!repoFullName || !repoFullName.includes('/')) {
+      return c.json({ error: '请提供正确的仓库全名（如 AtaraxyEcho/NestSpace）' }, 400)
+    }
+
+    const [owner, repo] = repoFullName.split('/')
+    const ghHeaders = getGithubHeaders(c, customToken)
+
+    const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers: ghHeaders })
+    if (!repoRes.ok) {
+      return c.json({ error: `无法获取 GitHub 仓库信息 (${repoRes.status})` }, 400)
+    }
+    const repoData: any = await repoRes.json()
+
+    // 检查是否已收录
+    const existing: any = await c.env.DB.prepare('SELECT id FROM projects WHERE repository LIKE ?').bind(`%${owner}/${repo}%`).first()
+    if (existing) {
+      return c.json({ error: `该仓库已作为标本 SPEC—${existing.id} 收录，无需重复导入` }, 400)
+    }
+
+    // 计算下一个新编号（如 SPEC—005）
+    const { results: allProjects } = await c.env.DB.prepare('SELECT id, sort_order FROM projects').all()
+    let maxNum = 0
+    let maxOrder = 0
+    for (const p of allProjects as any[]) {
+      const num = parseInt(p.id, 10)
+      if (!isNaN(num) && num > maxNum) maxNum = num
+      if (p.sort_order > maxOrder) maxOrder = p.sort_order
+    }
+    const newId = String(maxNum + 1).padStart(3, '0')
+    const sortOrder = maxOrder + 1
+
+    const starsCount = repoData.stargazers_count || 0
+    const stars = starsCount >= 1000 ? `${(starsCount / 1000).toFixed(1)}k` : String(starsCount)
+    const updated = String(repoData.pushed_at || '').slice(0, 10).replace(/-/g, '.') || new Date().toISOString().slice(0, 10).replace(/-/g, '.')
+    const createdDate = String(repoData.created_at || '').slice(0, 7).replace(/-/g, '.') || updated.slice(0, 7)
+    const year = createdDate.slice(0, 4) || String(new Date().getFullYear())
+
+    // 轮转几何形态
+    const shapes = ['aperture', 'lumen', 'fjord', 'meridian']
+    const shape = shapes[maxNum % shapes.length]
+
+    // 提取 Release 版本号
+    let version = 'v1.0.0'
+    try {
+      const relRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases/latest`, { headers: ghHeaders })
+      if (relRes.ok) {
+        const relData: any = await relRes.json()
+        if (relData.tag_name) version = relData.tag_name
+      }
+    } catch {
+      // 忽略 Release 获取失败
+    }
+
+    const name = repoData.name
+    const cnName = repoData.name
+    const descText = repoData.description || `${name} — 开源工程实践`
+    const language = repoData.language || 'TypeScript'
+    const repository = `https://github.com/${repoData.full_name}`
+
+    const description = JSON.stringify({ en: descText, zh: descText })
+    const features = JSON.stringify(
+      Array.isArray(repoData.topics) && repoData.topics.length > 0
+        ? repoData.topics.slice(0, 4)
+        : ['Open Source', language, 'Automated CI', 'Production Ready']
+    )
+    const metrics = JSON.stringify([
+      { label: 'STARS', value: String(starsCount) },
+      { label: 'FORKS', value: String(repoData.forks_count || 0) },
+      { label: 'OPEN ISSUES', value: String(repoData.open_issues_count || 0) },
+    ])
+    const timeline = JSON.stringify([
+      { date: createdDate, title: 'Repository created', note: `Initialized as ${repoData.full_name} on GitHub.` },
+      { date: updated.slice(0, 7), title: 'Latest update', note: 'Recent activities synced from remote.' },
+    ])
+
+    await c.env.DB.prepare(`
+      INSERT INTO projects (
+        id, date, status, name, cn, latin, habitat, type, language, stars, year, shape, version, updated, repository,
+        challenge, solution, description_json, features_json, metrics_json, timeline_json, internal_notes, sort_order
+      ) VALUES (?, ?, 'LIVE', ?, ?, ?, 'GitHub Field', 'Tool', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?)
+    `).bind(
+      newId,
+      createdDate,
+      name,
+      cnName,
+      `Specimen ${name}`,
+      language,
+      stars,
+      year,
+      shape,
+      version,
+      updated,
+      repository,
+      'Automated curation from GitHub remote repository.',
+      'Continuous development and field maintenance.',
+      description,
+      features,
+      metrics,
+      timeline,
+      sortOrder,
+    ).run()
+
+    return c.json({
+      success: true,
+      message: `标本 SPEC—${newId} (${name}) 导入成功`,
+      id: newId,
+    })
+  } catch (err: any) {
+    console.error('GitHub import error:', err)
+    return c.json({ error: `导入失败: ${err.message}` }, 500)
   }
 })
 

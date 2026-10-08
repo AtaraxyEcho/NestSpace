@@ -11,6 +11,9 @@ import {
   fetchAdminSiteSettings,
   saveAdminSiteSettings,
   syncGithubRepos,
+  fetchGithubUserRepos,
+  importGithubRepo,
+  type RemoteGithubRepo,
 } from "./api/adminClient"
 import type { SiteSettings, NavItemConfig } from "./types/siteSettings"
 import { computeCatalogueStats, computeActivityTimeline } from "./utils/stats"
@@ -1261,6 +1264,12 @@ function AdminPage({
   })
   const [syncing, setSyncing] = useState(false)
   const [syncResults, setSyncResults] = useState<GithubSyncResult[] | null>(null)
+  const [githubUser, setGithubUser] = useState("AtaraxyEcho")
+  const [githubToken, setGithubToken] = useState(() => sessionStorage.getItem("nestspace_gh_token") || "")
+  const [scanningRepos, setScanningRepos] = useState(false)
+  const [discoveredRepos, setDiscoveredRepos] = useState<RemoteGithubRepo[] | null>(null)
+  const [importingRepo, setImportingRepo] = useState<string | null>(null)
+
   const viewNames: Record<AdminView, string> = {
     overview: "馆藏总览",
     navigation: "导航与标头",
@@ -1275,6 +1284,10 @@ function AdminPage({
     fetchAdminSiteSettings().then((res) => {
       if (res.success && res.data) {
         setSiteContent(res.data)
+        if (res.data.githubUrl) {
+          const match = /github\.com\/([^/\s#?]+)/i.exec(res.data.githubUrl)
+          if (match) setGithubUser(match[1])
+        }
       }
     })
   }, [])
@@ -1289,10 +1302,51 @@ function AdminPage({
     )
   }
 
+  const handleScanRepos = async () => {
+    if (!githubUser.trim()) {
+      setNotice("请输入 GitHub 用户名")
+      return
+    }
+    setScanningRepos(true)
+    setNotice(`正在扫描 GitHub 用户 @${githubUser.trim()} 的所有公开仓库…`)
+    const res = await fetchGithubUserRepos(githubUser.trim(), githubToken.trim() || undefined)
+    setScanningRepos(false)
+    if (!res.success || !res.repos) {
+      setNotice(`扫描失败: ${res.error || "请检查网络或用户名"}`)
+      return
+    }
+    setDiscoveredRepos(res.repos)
+    setNotice(`扫描完成：发现 ${res.repos.length} 个公开仓库。`)
+  }
+
+  const handleImportRepo = async (repoFullName: string) => {
+    setImportingRepo(repoFullName)
+    setNotice(`正在将 ${repoFullName} 导入为馆藏标本…`)
+    const res = await importGithubRepo(repoFullName, githubToken.trim() || undefined)
+    setImportingRepo(null)
+    if (!res.success) {
+      setNotice(`导入失败: ${res.error}`)
+      return
+    }
+    setNotice(`✓ ${res.message || "导入成功"}`)
+    verifyAndFetchAdminProjects().then((refresh) => {
+      if (refresh.success && refresh.data) onChange(refresh.data)
+    })
+    setDiscoveredRepos((prev) =>
+      prev
+        ? prev.map((r) =>
+            r.full_name.toLowerCase() === repoFullName.toLowerCase()
+              ? { ...r, already_imported: true, specimen_id: res.id || null }
+              : r,
+          )
+        : null,
+    )
+  }
+
   const runGithubSync = async () => {
     setSyncing(true)
-    setNotice("正在从 GitHub 采集仓库数据…")
-    const res = await syncGithubRepos()
+    setNotice("正在从 GitHub 采集已有标本的最新指标…")
+    const res = await syncGithubRepos(githubToken.trim() || undefined)
     setSyncing(false)
     if (!res.success || !res.results) {
       setNotice(`同步失败: ${res.error || "未知错误"}`)
@@ -1301,7 +1355,7 @@ function AdminPage({
     const results = res.results as GithubSyncResult[]
     setSyncResults(results)
     const synced = results.filter((r) => r.status === "synced").length
-    setNotice(`同步完成：${synced}/${results.length} 个仓库已更新。`)
+    setNotice(`同步完成：${synced}/${results.length} 个标本指标已更新。`)
     // 刷新项目列表以反映 stars / 版本 / 更新时间的变化
     verifyAndFetchAdminProjects().then((refresh) => {
       if (refresh.success && refresh.data) onChange(refresh.data)
@@ -2337,46 +2391,197 @@ function AdminPage({
           <div className="admin-content">
             <div className="admin-page-title compact">
               <div>
-                <span className="eyebrow">REMOTE COLLECTION / 04</span>
-                <h1>GitHub 同步</h1>
-                <p>从 GitHub 拉取各项目的最新 stars、推送时间与 Release 版本。</p>
+                <span className="eyebrow">REMOTE COLLECTION / 06</span>
+                <h1>GitHub 同步与仓库发现</h1>
+                <p>扫描 GitHub 账号的公开仓库、一键导入为馆藏标本，并实时同步各项目的 Stars、Release 版本与更新时间。</p>
               </div>
-              <button
-                type="button"
-                className="admin-primary"
-                disabled={syncing}
-                onClick={runGithubSync}
-              >
-                {syncing ? "正在采集…" : "立即同步"}
-              </button>
             </div>
-            <div className="sync-layout">
+
+            {/* 配置与触发控制栏 */}
+            <div className="sync-toolbar-card">
+              <div className="sync-toolbar-grid">
+                <div>
+                  <label style={{ fontSize: "11px", fontWeight: "600", color: "#555950", display: "block", marginBottom: "6px" }}>
+                    GITHUB 账号 / 组织
+                  </label>
+                  <input
+                    type="text"
+                    value={githubUser}
+                    onChange={(e) => setGithubUser(e.target.value)}
+                    placeholder="如 AtaraxyEcho"
+                    style={{ width: "100%", padding: "8px 11px", border: "1px solid #c5c6bf", background: "#fdfdfc", fontFamily: "inherit", fontSize: "12px" }}
+                  />
+                  <small style={{ color: "#777b70", fontSize: "11px", marginTop: "5px", display: "block" }}>
+                    默认按「站点设置」中 GitHub 地址自动推导
+                  </small>
+                </div>
+                <div>
+                  <label style={{ fontSize: "11px", fontWeight: "600", color: "#555950", display: "block", marginBottom: "6px" }}>
+                    GITHUB TOKEN (可选)
+                  </label>
+                  <input
+                    type="password"
+                    value={githubToken}
+                    onChange={(e) => {
+                      setGithubToken(e.target.value)
+                      if (e.target.value) sessionStorage.setItem("nestspace_gh_token", e.target.value)
+                      else sessionStorage.removeItem("nestspace_gh_token")
+                    }}
+                    placeholder="ghp_xxx (提升 API 限制至 5000 次/时)"
+                    style={{ width: "100%", padding: "8px 11px", border: "1px solid #c5c6bf", background: "#fdfdfc", fontFamily: "inherit", fontSize: "12px" }}
+                  />
+                  <small style={{ color: "#777b70", fontSize: "11px", marginTop: "5px", display: "block" }}>
+                    仅保存在本地当前浏览器会话中，防公共 IP 频次超限
+                  </small>
+                </div>
+                <div style={{ display: "flex", gap: "10px", alignItems: "flex-start", paddingTop: "23px" }}>
+                  <button
+                    type="button"
+                    className="admin-primary"
+                    disabled={scanningRepos}
+                    onClick={handleScanRepos}
+                  >
+                    {scanningRepos ? "正在扫描…" : "🔍 扫描 GitHub 仓库"}
+                  </button>
+                  <button
+                    type="button"
+                    style={{
+                      padding: "8px 16px",
+                      border: "1px solid #20241f",
+                      background: "transparent",
+                      color: "#20241f",
+                      cursor: syncing ? "not-allowed" : "pointer",
+                      fontSize: "12px",
+                      fontFamily: "inherit",
+                      fontWeight: "500",
+                    }}
+                    disabled={syncing}
+                    onClick={runGithubSync}
+                  >
+                    {syncing ? "正在采集…" : "⚡ 同步已有标本指标"}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* 远程仓库扫描发现列表 */}
+            <section className="settings-card" style={{ marginTop: "20px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <span className="eyebrow">DISCOVERED REPOSITORIES</span>
+                  <h2 style={{ margin: "4px 0 0" }}>
+                    {githubUser ? `@${githubUser} 的公开仓库` : "代码仓库列表"}
+                  </h2>
+                </div>
+                {discoveredRepos && (
+                  <span style={{ fontSize: "12px", color: "#64685f", fontFamily: "monospace" }}>
+                    共发现 {discoveredRepos.length} 个仓库 · {discoveredRepos.filter((r) => r.already_imported).length} 件已入馆
+                  </span>
+                )}
+              </div>
+
+              {discoveredRepos === null ? (
+                <div className="empty-state" style={{ minHeight: "160px" }}>
+                  <strong>尚未扫描 GitHub 仓库</strong>
+                  <span>点击上方“🔍 扫描 GitHub 仓库”即可列出 @{githubUser || "当前用户"} 的所有公开仓库并一键导入。</span>
+                </div>
+              ) : discoveredRepos.length === 0 ? (
+                <div className="empty-state" style={{ minHeight: "160px" }}>
+                  <strong>未找到公开仓库</strong>
+                  <span>该账号下暂无可展示的公开仓库，或请求受到限额阻断。</span>
+                </div>
+              ) : (
+                <div style={{ overflowX: "auto", marginTop: "14px" }}>
+                  <table className="sync-discovered-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: "26%" }}>仓库名称 / 地址</th>
+                        <th>简介说明</th>
+                        <th style={{ width: "12%" }}>主要语言</th>
+                        <th style={{ width: "8%" }}>STARS</th>
+                        <th style={{ width: "12%" }}>最近推送</th>
+                        <th style={{ width: "18%", textAlign: "right" }}>馆藏状态 / 操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {discoveredRepos.map((repo) => (
+                        <tr key={repo.id}>
+                          <td>
+                            <strong style={{ display: "block", fontSize: "13px" }}>{repo.name}</strong>
+                            <a
+                              href={repo.html_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ color: "#777b70", fontSize: "11px", textDecoration: "none" }}
+                            >
+                              {repo.full_name} ↗
+                            </a>
+                          </td>
+                          <td style={{ color: "#555950", fontSize: "12px", lineHeight: "1.5" }}>
+                            {repo.description || "（暂无仓库简介）"}
+                          </td>
+                          <td>
+                            <span style={{ fontFamily: "monospace", fontSize: "11px", color: "#444" }}>
+                              {repo.language || "Markdown"}
+                            </span>
+                          </td>
+                          <td>
+                            <span style={{ fontFamily: "monospace", fontSize: "12px", fontWeight: "600" }}>
+                              ★ {repo.stars}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: "11px", color: "#777b70", fontFamily: "monospace" }}>
+                            {repo.updated_at}
+                          </td>
+                          <td style={{ textAlign: "right" }}>
+                            {repo.already_imported ? (
+                              <span className="sync-badge-imported">
+                                已收录 {repo.specimen_id ? `(SPEC—${repo.specimen_id})` : ""}
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="sync-import-btn"
+                                disabled={importingRepo === repo.full_name}
+                                onClick={() => handleImportRepo(repo.full_name)}
+                              >
+                                {importingRepo === repo.full_name ? "正在导入…" : "＋ 收录为标本"}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
+            {/* 同步原理与最近同步日志 */}
+            <div className="sync-layout" style={{ marginTop: "20px" }}>
               <section className="settings-card">
                 <span className="eyebrow">HOW IT WORKS</span>
-                <h2>同步说明</h2>
+                <h2>同步原理与规范</h2>
                 <label>
-                  同步内容
+                  仓库地址兼容
                   <small>
-                    按各项目"仓库地址"字段（github.com/&lt;owner&gt;/&lt;repo&gt;）调用
-                    GitHub 公开 API，更新 stars 数、最近推送时间与最新 Release
-                    版本号，并立即写回 D1 数据库。
+                    支持任意格式：<code>https://github.com/owner/repo</code>、<code>github.com/owner/repo</code> 或 <code>git@github.com:owner/repo.git</code>，系统会自动清洗标准化。
                   </small>
                 </label>
                 <label>
-                  无需 Token
+                  指标自动落库
                   <small>
-                    公开仓库的读取不需要任何凭证；GitHub 匿名限额为每 IP
-                    60 次/小时，本站规模的手动同步完全够用。仓库地址在"项目管理"中维护。
+                    同步成功后，仓库的 Stars 计数、最近 Push 日期（更新 AS OF）和最新 Release Tag（版本号）将自动写入 D1 数据库，前台主页即时更新。
                   </small>
                 </label>
               </section>
               <section className="settings-card sync-log">
                 <span className="eyebrow">SYNC LOG</span>
-                <h2>最近同步结果</h2>
+                <h2>已有标本同步记录</h2>
                 {syncResults === null && (
                   <div className="empty-state">
-                    <strong>尚未执行同步</strong>
-                    <span>点击"立即同步"从 GitHub 拉取最新仓库数据。</span>
+                    <strong>尚未执行指标同步</strong>
+                    <span>点击上方“⚡ 同步已有标本指标”刷新馆藏各标本的远程数据。</span>
                   </div>
                 )}
                 {syncResults?.map((result, index) => (

@@ -129,18 +129,36 @@ export async function saveAdminSiteSettings(settings: SiteSettings): Promise<{ s
   }
 }
 
+export type RemoteGithubRepo = {
+  id: number
+  name: string
+  full_name: string
+  description: string
+  stars: number
+  language: string
+  updated_at: string
+  created_at: string
+  html_url: string
+  is_fork: boolean
+  already_imported: boolean
+  specimen_id: string | null
+}
+
 /**
- * 管理端触发 GitHub 同步：按各项目仓库地址拉取最新 stars / 推送时间 / Release 版本
+ * 管理端触发 GitHub 指标同步：按各项目仓库地址拉取最新 stars / 推送时间 / Release 版本
  */
-export async function syncGithubRepos(): Promise<{
+export async function syncGithubRepos(token?: string): Promise<{
   success: boolean
   results?: Array<Record<string, unknown>>
   error?: string
 }> {
   try {
+    const headers = getAuthHeaders() as Record<string, string>
+    if (token) headers['X-GitHub-Token'] = token
     const res = await fetch('/api/admin/github-sync', {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers,
+      body: JSON.stringify({ token }),
     })
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}))
@@ -148,6 +166,71 @@ export async function syncGithubRepos(): Promise<{
     }
     const data = await res.json()
     return { success: true, results: data.results }
+  } catch (err: any) {
+    return { success: false, error: `网络异常: ${err.message}` }
+  }
+}
+
+/**
+ * 扫描指定 GitHub 用户/组织的所有公开仓库
+ */
+export async function fetchGithubUserRepos(
+  username?: string,
+  token?: string,
+): Promise<{
+  success: boolean
+  username?: string
+  repos?: RemoteGithubRepo[]
+  error?: string
+}> {
+  try {
+    const params = new URLSearchParams()
+    if (username) params.set('username', username)
+    if (token) params.set('token', token)
+    const headers = getAuthHeaders() as Record<string, string>
+    if (token) headers['X-GitHub-Token'] = token
+
+    const res = await fetch(`/api/admin/github-repos?${params.toString()}`, {
+      headers,
+    })
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}))
+      return { success: false, error: (errJson as any).error || `扫描失败: HTTP ${res.status}` }
+    }
+    const data = await res.json()
+    return { success: true, username: data.username, repos: data.repos }
+  } catch (err: any) {
+    return { success: false, error: `网络异常: ${err.message}` }
+  }
+}
+
+/**
+ * 从 GitHub 远程仓库一键导入为标本
+ */
+export async function importGithubRepo(
+  repoFullName: string,
+  token?: string,
+): Promise<{
+  success: boolean
+  id?: string
+  message?: string
+  error?: string
+}> {
+  try {
+    const headers = getAuthHeaders() as Record<string, string>
+    if (token) headers['X-GitHub-Token'] = token
+
+    const res = await fetch('/api/admin/github-import', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ repoFullName, token }),
+    })
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}))
+      return { success: false, error: (errJson as any).error || `导入失败: HTTP ${res.status}` }
+    }
+    const data = await res.json()
+    return { success: true, id: data.id, message: data.message }
   } catch (err: any) {
     return { success: false, error: `网络异常: ${err.message}` }
   }
