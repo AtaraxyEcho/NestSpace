@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "format": "oxfmt",
     "test": "node jwt_verify.test.mjs",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p functions/tsconfig.json"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p worker/tsconfig.json"
   },
   "dependencies": {
     "hono": "^4.7.2",

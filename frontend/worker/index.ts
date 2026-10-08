@@ -1,5 +1,4 @@
 import { Hono } from 'hono'
-import { handle } from 'hono/cloudflare-pages'
 import { cors } from 'hono/cors'
 import { getCookie } from 'hono/cookie'
 
@@ -7,7 +6,7 @@ import { getCookie } from 'hono/cookie'
 type Env = {
   Bindings: {
     DB: D1Database
-    // 管理员 Bearer 密钥（经 wrangler secret / Pages 环境变量注入，绝不写入代码）
+    // 管理员 Bearer 密钥（经 wrangler secret 注入，绝不写入代码）
     ADMIN_SECRET_KEY?: string
     // Cloudflare Zero Trust 团队名（即 <team>.cloudflareaccess.com 的 <team> 部分）。
     // 与 ACCESS_AUD_TAG 成对配置后，管理端将额外校验 Cloudflare Access 签发的 JWT。
@@ -26,7 +25,7 @@ const app = new Hono<Env>().basePath('/api')
 
 // ==========================================
 // 0. 全局安全响应头
-// Pages 的 _headers 文件仅作用于静态资源，不覆盖 Functions 响应，
+// 静态资产的 _headers 不覆盖 Worker 响应，
 // 因此在此统一为 /api 响应补齐基础防护头。
 // ==========================================
 app.use('*', async (c, next) => {
@@ -159,7 +158,7 @@ app.get('/projects/:id', async (c) => {
 //   防线 2（可选）：校验 Cloudflare Access 签发的 JWT（RS256 签名 + iss/aud/exp 核验）。
 //
 // 安全红线：Cf-Access-Authenticated-User-Email 等明文身份头可被客户端伪造，
-// 在未被 Zero Trust 应用覆盖的入口（pages.dev / preview 域名等）完全不可信，
+// 在未被 Zero Trust 应用覆盖的入口（workers.dev / preview 域名等）完全不可信，
 // 一律不作为鉴权凭据；身份只能来自经过签名验证的 Cf-Access-Jwt-Assertion
 // 或 CF_Authorization Cookie 中的 JWT。
 const adminApp = new Hono<Env>()
@@ -555,7 +554,7 @@ function base64UrlDecode(input: string): Uint8Array {
 /**
  * 校验 Cloudflare Access 签发的 JWT：
  * RS256 签名 + iss / aud / exp / iat 核验，全部通过才视为有效。
- * （导出仅供本地单元测试使用，运行时仅通过 onRequest 暴露 HTTP 入口）
+ * （导出仅供本地单元测试使用，运行时通过默认导出的 app 暴露 HTTP 入口）
  */
 export async function verifyAccessJwt(
   jwt: string,
@@ -626,4 +625,4 @@ export async function verifyAccessJwt(
   return signatureValid ? { valid: true } : { valid: false, reason: 'bad_signature' }
 }
 
-export const onRequest = handle(app)
+export default app

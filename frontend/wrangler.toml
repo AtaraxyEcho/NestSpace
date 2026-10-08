@@ -1,9 +1,17 @@
 name = "nestspace"
+main = "worker/index.ts"
 compatibility_date = "2026-10-01"
-pages_build_output_dir = "./dist"
+
+# 静态资产配置（vite 构建产出 ./dist）：
+# - run_worker_first: /api/* 一律先进入 Worker 处理（取代 Pages 的 _routes.json）
+# - not_found_handling: 未知路径回退 index.html（SPA 哈希路由兜底）
+[assets]
+directory = "./dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
 
 # Cloudflare D1 边缘数据库绑定
 [[d1_databases]]
 binding = "DB"
 database_name = "nestspace-prod"
-database_id = "0a08af1f-782c-43b3-8db4-7db02c3e3023" # 上线时替换为 npx wrangler d1 create 生成的真实 ID
+database_id = "5e61e41e-0554-4ec4-8516-ee5f66a5f11d"

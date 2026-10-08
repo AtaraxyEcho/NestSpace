@@ -1,7 +1,7 @@
 # =============================================================================
 # NestSpace 本地开发环境变量模板（Cloudflare Pages Functions 专用）
 #
-# 使用方法：复制为 frontend/.dev.vars（wrangler pages dev 启动时自动加载）
+# 使用方法：复制为 frontend/.dev.vars（wrangler dev 启动时自动加载）
 #   cp .dev.vars.example .dev.vars
 #
 # 安全说明：

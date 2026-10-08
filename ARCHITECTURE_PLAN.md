@@ -24,7 +24,7 @@
              |                                                                             | (验证通过放行)
              v                                                                             v
 +-----------------------------+                                             +-------------------------------+
-|  Cloudflare Pages 静态托管  |                                             |   Admin SPA 独立管理界面      |
+|  Cloudflare Workers 静态资产托管 |                                             |   Admin SPA 独立管理界面      |
 |  (访客端 React 19 + Vite)   |                                             |   (独立打包/无敏感信息混入公开端)|
 +-----------------------------+                                             +-------------------------------+
              |                                                                             |
@@ -34,7 +34,7 @@
                                                     |
                                                     v
                              +----------------------------------------------+
-                             | Cloudflare Pages Functions (底层 Workers)    |
+                             | Cloudflare Worker — Hono (TypeScript)       |
                              | 框架: Hono (极轻量、高性能 TypeScript 原生)    |
                              +----------------------------------------------+
                                                     |
@@ -59,7 +59,7 @@
 
 ## 2. 项目工程目录重构规划
 
-推荐采用 **轻量 Monorepo / 单仓库标准 Pages 架构**，既能享有单仓库 Git 维护的便利，又能保持代码物理隔离。
+推荐采用 **轻量 Monorepo / 单仓库标准 Workers 架构**，既能享有单仓库 Git 维护的便利，又能保持代码物理隔离。
 
 ```text
 NestSpace/
@@ -75,13 +75,13 @@ NestSpace/
 │   ├── index.html
 │   └── vite.config.ts
 │
-├── admin/                        # [可选独立工程] 管理后台纯净 SPA（或放在 pages/admin 下）
+├── admin/                        # [可选独立工程] 管理后台纯净 SPA（或以 #admin 哈希路由内嵌）
 │   ├── src/                      # 独立的管理仪表盘，拥有独立的编译入口
 │   │   ├── App.tsx               # 项目 CRUD 表单、草稿发布控制台
 │   │   └── main.tsx
 │   └── vite.config.ts
 │
-├── functions/                    # Cloudflare Pages Functions (后端 API 核心)
+├── worker/                       # Cloudflare Worker (后端 API 核心)
 │   ├── api/
 │   │   ├── [[route]].ts          # Hono 入口网关与路由挂载
 │   │   ├── routes/
@@ -98,9 +98,9 @@ NestSpace/
 └── package.json                  # 全局构建与脚本调度
 ```
 
-> **落地差异说明**：实际工程将 `functions/` 与 `public/` 嵌套在 `frontend/` 目录下
-> （以 `DEPLOYMENT_GUIDE.md` 的目录树为准）；管理端暂以公开 SPA 内的 `#admin`
-> 路由实现而非独立工程，其安全边界完全由管理 API 层承担。
+> **落地差异说明**：实际工程将 Worker 入口（`worker/index.ts`，`export default app`）
+> 与 `public/` 嵌套在 `frontend/` 目录下（以 `DEPLOYMENT_GUIDE.md` 的目录树为准）；
+> 管理端暂以公开 SPA 内的 `#admin` 路由实现而非独立工程，其安全边界完全由管理 API 层承担。
 
 ---
 
@@ -152,11 +152,10 @@ CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
 
 后端采用 **[Hono](https://hono.dev/)**，体积仅十几 KB，冷启动 0ms。
 
-### `functions/api/[[route]].ts`
+### `worker/index.ts`
 
 ```typescript
 import { Hono } from 'hono'
-import { handle } from 'hono/cloudflare-pages'
 import { getCookie } from 'hono/cookie'
 
 type Bindings = {
@@ -216,7 +215,7 @@ admin.use('*', async (c, next) => {
 
   // 防线 2：Cloudflare Access JWT（RS256 签名 + iss/aud/exp 核验）。
   // 安全红线：Cf-Access-Authenticated-User-Email 等明文身份头可被客户端伪造
-  // （在 pages.dev / preview 等未被 Zero Trust 覆盖的入口尤其如此），
+  // （在 workers.dev / preview 等未被 Zero Trust 覆盖的入口尤其如此），
   // 绝不作为鉴权凭据；身份只能来自通过签名验证的 JWT。
   const teamName = c.env.ACCESS_TEAM_NAME
   const audTag = c.env.ACCESS_AUD_TAG
@@ -280,11 +279,11 @@ admin.delete('/projects/:id', async (c) => {
 
 app.route('/admin', admin)
 
-export const onRequest = handle(app)
+export default app
 ```
 
 > 上图为设计示意精简版（省略 `timingSafeEqual` / `verifyAccessJwt` 等辅助函数实现），
-> 以 `frontend/functions/api/[[route]].ts` 的实际代码为准。
+> 以 `frontend/worker/index.ts` 的实际代码为准。
 
 ---
 
@@ -370,25 +369,30 @@ export default function App() {
    - Action：`Allow`。
    - Rule type：`Include`。
    - Selector：**Emails** -> 输入**你的私人邮箱**（如 `you@example.com`）。
-4. 在 Pages 环境变量中配置 `ACCESS_TEAM_NAME` 与 `ACCESS_AUD_TAG`，
+4. 在 Worker 环境变量中配置 `ACCESS_TEAM_NAME` 与 `ACCESS_AUD_TAG`，
    使代码层的 JWT 签名校验防线生效。
 5. **效果**：
    - 任何人未登录调用 `/api/admin/*`，在 Cloudflare CDN 边缘层直接截停，弹出验证码输入框；
    - 只有你的邮箱能收到 6 位验证码，验证后浏览器获得 `CF_Authorization` Cookie，
      后端校验其 JWT 签名后放行管理操作；
-   - 即使攻击者从未受保护的入口（`*.pages.dev` 默认域名、preview 部署）绕过边缘，
+   - 即使攻击者从未受保护的入口（`nestspace.<子域>.workers.dev` 默认域名、preview 部署）绕过边缘，
      仍需通过代码层的 Bearer 密钥或有效 JWT 签名，伪造明文身份头完全无效。
-     （配套要求：关闭 pages.dev 与 preview 的公开访问，见部署手册。）
+     （配套要求：关闭 workers.dev 与 preview 的公开访问，见部署手册。）
 
 ---
 
 ## 7. 部署与上线命令规范（Wrangler）
 
-### 7.1 配置文件 `frontend/wrangler.toml`（全仓库唯一，Git 构建与本地开发共用）
+### 7.1 配置文件 `frontend/wrangler.toml`（全仓库唯一，Workers 形态）
 ```toml
 name = "nestspace"
+main = "worker/index.ts"
 compatibility_date = "2026-10-01"
-pages_build_output_dir = "./dist"
+
+[assets]
+directory = "./dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
 
 [[d1_databases]]
 binding = "DB"
@@ -407,12 +411,12 @@ npx wrangler d1 execute nestspace-prod --local --file=./migrations/0001_create_p
 npx wrangler d1 execute nestspace-prod --local --file=./migrations/0002_seed_initial_data.sql
 
 # 3. 本地全真模拟调试 (前端 + 后端 Functions + 本地 D1 数据库)
-npx wrangler pages dev frontend/dist --d1=DB
+npx wrangler dev
 
 # 4. 发布上线执行远程数据库迁移
 npx wrangler d1 execute nestspace-prod --remote --file=./migrations/0001_create_projects.sql
 npx wrangler d1 execute nestspace-prod --remote --file=./migrations/0002_seed_initial_data.sql
 
-# 5. 注入管理端密钥（不保存在任何 Git 代码中；Pages 项目用 pages secret 子命令）
-npx wrangler pages secret put ADMIN_SECRET_KEY --project-name=nestspace
+# 5. 注入管理端密钥（不保存在任何 Git 代码中）
+npx wrangler secret put ADMIN_SECRET_KEY
 ```

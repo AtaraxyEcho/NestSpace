@@ -1,5 +1,4 @@
 // verifyAccessJwt 单元测试（Node 22+ 直接运行：node frontend/jwt_verify.test.mjs）
-// 注意：本文件必须位于 functions/ 目录之外，否则会被 Cloudflare Pages 当作函数路由模块。
 // 通过本地生成 RSA 密钥对 + 伪造证书端点，验证 JWT 校验的各个分支。
 // 该测试不发起任何真实网络请求（fetch 被替换为本地桩）。
 import { strict as assert } from 'node:assert'
@@ -7,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROUTE_URL = pathToFileURL(
-  join(dirname(fileURLToPath(import.meta.url)), 'functions', 'api', '[[route]].ts'),
+  join(dirname(fileURLToPath(import.meta.url)), 'worker', 'index.ts'),
 ).href
 
 // 通过追加查询参数导入全新模块实例，隔离各用例的模块级证书缓存状态
