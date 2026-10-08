@@ -2,6 +2,7 @@ import type { SiteSettings, NavItemConfig } from '../types/siteSettings'
 
 export const DEFAULT_NAV_ITEMS: NavItemConfig[] = [
   { id: 'cabinet', labelEn: 'Cabinet', labelZh: '标本陈列', visible: true },
+  { id: 'catalogue', labelEn: 'Catalogue', labelZh: '馆藏统计', visible: true },
   { id: 'curator', labelEn: 'Curator', labelZh: '馆长手记', visible: true },
   { id: 'index', labelEn: 'Index', labelZh: '馆藏目录', visible: true },
 ]
@@ -61,7 +62,26 @@ export function mergeSiteSettings(data: Partial<SiteSettings> | null | undefined
 
     if (key === 'navItems') {
       if (Array.isArray(value) && value.length > 0) {
-        target[key] = value
+        const list = value as NavItemConfig[]
+        const hasCatalogue = list.some((item) => item.id === 'catalogue')
+        if (!hasCatalogue) {
+          const catalogueItem: NavItemConfig = {
+            id: 'catalogue',
+            labelEn: 'Catalogue',
+            labelZh: '馆藏统计',
+            visible: true,
+          }
+          const copy = [...list]
+          const cabinetIdx = copy.findIndex((i) => i.id === 'cabinet')
+          if (cabinetIdx !== -1) {
+            copy.splice(cabinetIdx + 1, 0, catalogueItem)
+          } else {
+            copy.unshift(catalogueItem)
+          }
+          target[key] = copy
+        } else {
+          target[key] = value
+        }
       }
     } else if (key === 'customActivityLog') {
       if (Array.isArray(value)) {

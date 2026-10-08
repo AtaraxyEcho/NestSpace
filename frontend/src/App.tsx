@@ -180,8 +180,8 @@ function SpecimenCard({
   )
 }
 
-// 站内章节锚点：默认已调换 Curator 与 Index 的位置（Cabinet → Curator → Index）
-const SECTION_ANCHORS = ["cabinet", "curator", "index", "colophon"]
+// 站内章节锚点：Cabinet → Catalogue → Curator → Index
+const SECTION_ANCHORS = ["cabinet", "catalogue", "curator", "index", "colophon"]
 
 export function isAdminHost(): boolean {
   if (typeof window === "undefined") return false
@@ -192,6 +192,15 @@ export function isAdminHost(): boolean {
 function routeFromHash(hash: string) {
   if (isAdminHost()) return "admin"
   const clean = hash.replace(/^#/, "")
+  // 若在生产公开站点直接访问 #admin，同步且立即跳转至 Zero Trust 保护的 admin 子域名
+  if (
+    clean === "admin" &&
+    typeof window !== "undefined" &&
+    !["localhost", "127.0.0.1"].includes(window.location.hostname)
+  ) {
+    window.location.replace("https://admin.nestspace.online")
+    return "home"
+  }
   if (!clean || SECTION_ANCHORS.includes(clean)) return "home"
   return clean
 }
@@ -203,7 +212,17 @@ function LogoWordmark({ settings }: { settings: SiteSettings }) {
   const logoImageUrl = settings.logoImageUrl
 
   return (
-    <a className="wordmark" href="#cabinet">
+    <a
+      className="wordmark"
+      href="#cabinet"
+      onClick={(e) => {
+        e.preventDefault()
+        window.scrollTo({ top: 0, behavior: "smooth" })
+        if (window.location.hash) {
+          window.history.replaceState(null, "", window.location.pathname)
+        }
+      }}
+    >
       {logoType !== "text" && logoImageUrl ? (
         <img src={logoImageUrl} alt={logoText} className="wordmark-logo-img" />
       ) : null}
@@ -283,6 +302,16 @@ function Header({
               key={item.id}
               className={activeSection === item.id ? "active" : ""}
               href={`#${item.id}`}
+              onClick={(e) => {
+                e.preventDefault()
+                const el = document.getElementById(item.id)
+                if (el) {
+                  el.scrollIntoView({ behavior: "smooth" })
+                  if (window.location.hash) {
+                    window.history.replaceState(null, "", window.location.pathname)
+                  }
+                }
+              }}
             >
               {label}
             </a>
@@ -492,7 +521,7 @@ function CatalogueStats({
   ]
 
   return (
-    <section className="section stats-section reveal-section">
+    <section className="section stats-section reveal-section" id="catalogue">
       <div className="section-heading">
         <div>
           <span className="eyebrow">CABINET RECORD / 02</span>
@@ -719,10 +748,66 @@ function SiteFooter({
         </div>
         <div>
           <b>COLLECTION</b>
-          <a href="#cabinet">Cabinet</a>
-          <a href="#curator">Curator</a>
-          <a href="#index">Index</a>
-          <a href="#colophon">Colophon</a>
+          <a
+            href="#cabinet"
+            onClick={(e) => {
+              e.preventDefault()
+              window.scrollTo({ top: 0, behavior: "smooth" })
+              if (window.location.hash) {
+                window.history.replaceState(null, "", window.location.pathname)
+              }
+            }}
+          >
+            Cabinet
+          </a>
+          <a
+            href="#catalogue"
+            onClick={(e) => {
+              e.preventDefault()
+              document.getElementById("catalogue")?.scrollIntoView({ behavior: "smooth" })
+              if (window.location.hash) {
+                window.history.replaceState(null, "", window.location.pathname)
+              }
+            }}
+          >
+            Catalogue
+          </a>
+          <a
+            href="#curator"
+            onClick={(e) => {
+              e.preventDefault()
+              document.getElementById("curator")?.scrollIntoView({ behavior: "smooth" })
+              if (window.location.hash) {
+                window.history.replaceState(null, "", window.location.pathname)
+              }
+            }}
+          >
+            Curator
+          </a>
+          <a
+            href="#index"
+            onClick={(e) => {
+              e.preventDefault()
+              document.getElementById("index")?.scrollIntoView({ behavior: "smooth" })
+              if (window.location.hash) {
+                window.history.replaceState(null, "", window.location.pathname)
+              }
+            }}
+          >
+            Index
+          </a>
+          <a
+            href="#colophon"
+            onClick={(e) => {
+              e.preventDefault()
+              document.getElementById("colophon")?.scrollIntoView({ behavior: "smooth" })
+              if (window.location.hash) {
+                window.history.replaceState(null, "", window.location.pathname)
+              }
+            }}
+          >
+            Colophon
+          </a>
         </div>
         <div>
           <b>FIELD NOTES</b>
@@ -2767,7 +2852,11 @@ export default function App() {
       }
     }
     window.addEventListener("hashchange", onHashChange)
-    return () => window.removeEventListener("hashchange", onHashChange)
+    window.addEventListener("popstate", onHashChange)
+    return () => {
+      window.removeEventListener("hashchange", onHashChange)
+      window.removeEventListener("popstate", onHashChange)
+    }
   }, [])
 
 
@@ -2792,7 +2881,15 @@ export default function App() {
   }, [route])
 
   const navigate = (next: string) => {
-    window.location.hash = next
+    if (next === "home") {
+      if (window.location.hash) {
+        window.history.pushState(null, "", window.location.pathname)
+      }
+      setRoute("home")
+      window.scrollTo({ top: 0 })
+    } else {
+      window.location.hash = next
+    }
   }
 
   const openProject = (project: Project) => navigate(`project/${project.id}`)
