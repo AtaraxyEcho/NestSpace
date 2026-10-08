@@ -6,4 +6,4 @@ pages_build_output_dir = "./dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "nestspace-prod"
-database_id = "nestspace-local-preview-id" # 上线时替换为 npx wrangler d1 create 生成的真实 ID
+database_id = "0a08af1f-782c-43b3-8db4-7db02c3e3023" # 上线时替换为 npx wrangler d1 create 生成的真实 ID
