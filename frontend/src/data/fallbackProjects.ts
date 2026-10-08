@@ -21,6 +21,8 @@ export const fallbackProjects: Project[] = [
     version: "v2.4.1",
     updated: "2024.10.18",
     repository: "github.com/nestspace/aperture",
+    demoUrl: "",
+    demoEnabled: false,
     challenge:
       "Creative teams were spending more time maintaining image tooling than shaping the work itself. Existing pipelines were powerful, but configuration-heavy and difficult to reproduce.",
     solution:
@@ -74,6 +76,8 @@ export const fallbackProjects: Project[] = [
     version: "v1.8.0",
     updated: "2024.09.26",
     repository: "github.com/nestspace/lumen",
+    demoUrl: "",
+    demoEnabled: false,
     challenge:
       "Edge applications needed useful traces without shipping a full observability stack or exposing customer data.",
     solution:
@@ -127,6 +131,8 @@ export const fallbackProjects: Project[] = [
     version: "v0.9.4",
     updated: "2024.08.11",
     repository: "github.com/nestspace/fjord",
+    demoUrl: "",
+    demoEnabled: false,
     challenge:
       "Small internal services inherited deployment complexity designed for systems many times their size.",
     solution:
@@ -180,6 +186,8 @@ export const fallbackProjects: Project[] = [
     version: "v3.2.2",
     updated: "2024.10.02",
     repository: "github.com/nestspace/meridian",
+    demoUrl: "",
+    demoEnabled: false,
     challenge:
       "Conventional search flattened rich visual collections into ranked lists and removed their sense of place.",
     solution:

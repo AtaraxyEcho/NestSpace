@@ -182,4 +182,42 @@ assert.deepStrictEqual(
 )
 
 globalThis.fetch = realFetch
+
+// ============================================
+// 第二组：Access JWT 身份白名单（未配置 = 放行，配置 = 只认名单）
+// ============================================
+const { isAccessIdentityAllowed } = await loadRoute()
+
+assert.equal(
+  isAccessIdentityAllowed({ email: 'anyone@example.com' }, undefined),
+  true,
+  'allowlist case 1: 未配置白名单时放行（依赖 Access 应用策略）',
+)
+assert.equal(
+  isAccessIdentityAllowed({ email: 'anyone@example.com' }, '   '),
+  true,
+  'allowlist case 2: 空白名单等同未配置',
+)
+assert.equal(
+  isAccessIdentityAllowed({ email: 'Curator@Example.com' }, 'curator@example.com'),
+  true,
+  'allowlist case 3: 邮箱大小写与空格不敏感',
+)
+assert.equal(
+  isAccessIdentityAllowed({ sub: 'user-uuid' }, 'other@example.com, user-uuid'),
+  true,
+  'allowlist case 4: 也支持按 sub 匹配',
+)
+assert.equal(
+  isAccessIdentityAllowed({ email: 'intruder@example.com' }, 'curator@example.com'),
+  false,
+  'allowlist case 5: 名单外身份拒绝',
+)
+assert.equal(
+  isAccessIdentityAllowed(null, 'curator@example.com'),
+  false,
+  'allowlist case 6: 载荷缺失时拒绝',
+)
+
 console.log('All 13 JWT verification cases passed (incl. array-format certs & key rotation) ✓')
+console.log('All 6 Access identity allowlist cases passed ✓')

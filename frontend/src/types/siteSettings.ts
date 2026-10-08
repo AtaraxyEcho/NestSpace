@@ -39,6 +39,10 @@ export interface FooterCopy {
   footerCopyrightZh: string
 }
 
+// 展示偏好取值
+export type DefaultLanguagePreference = 'auto' | 'zh' | 'en'
+export type DefaultThemePreference = 'auto' | 'light' | 'dark'
+
 // 站点文案、导航与合规配置（存储于 D1 site_settings 表）
 export interface SiteSettings extends FooterCopy {
   heroEn: string
@@ -70,4 +74,11 @@ export interface SiteSettings extends FooterCopy {
   customCitations: string // 自定义总引用量，空表示自动累加所有项目 stars
   activityLogMode: 'auto' | 'custom' // "auto" 为按项目历史聚合，"custom" 为手动设置
   customActivityLog: ActivityLogItem[]
+
+  // 展示偏好（管理端「07 站点设置」，公开站点真实消费）
+  defaultLanguage: DefaultLanguagePreference // 无手动切换时前台初始语言
+  defaultTheme: DefaultThemePreference // 无手动切换时前台初始主题
+  homeStatsVisible: boolean // 是否展示首页 Catalogue 统计区块
+  themeToggleEnabled: boolean // 是否展示前台深浅色切换按钮
+  languageToggleEnabled: boolean // 是否展示前台语言切换按钮
 }

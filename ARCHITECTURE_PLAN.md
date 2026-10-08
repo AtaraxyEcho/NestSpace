@@ -146,6 +146,23 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
 ```
 
+### `migrations/0008_add_demo_fields.sql`
+
+```sql
+-- 项目演示入口（管理端「项目管理 → 编辑」维护演示地址与开关）
+ALTER TABLE projects ADD COLUMN demo_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE projects ADD COLUMN demo_enabled INTEGER NOT NULL DEFAULT 0;
+```
+
+`demo_url` 为空或 `demo_enabled = 0` 时前台不渲染演示入口；开关关闭时公开接口把 `demoUrl`
+置为空串，不下发未上线的演示地址。地址在写入侧规范化（无协议按 https 补全，仅放行 http/https），
+因此不会出现 `javascript:` 之类协议进入公开页面 `href` 的情况。
+**迁移必须先于引用这两列的 Worker 代码执行**（见 `DEPLOYMENT_GUIDE.md` 第二节的顺序要求）。
+
+> 本节只覆盖已列出的迁移文件：`0006`（展示偏好）与 `0007`（标本文档）由各自的功能批次维护。
+> 另注：上面 `0001` 的字段清单与本仓库实际表结构已有漂移——示例中的 `is_featured`
+> 并未在 `0001_create_projects.sql` 中创建。本节保留原样，漂移单独立项处理。
+
 ---
 
 ## 4. 后端 API 设计与安全防御（Hono on Functions）
@@ -181,6 +198,7 @@ app.get('/projects', async (c) => {
     SELECT 
       id, date, status, name, cn, latin, habitat, type, 
       language, stars, year, shape, version, updated, repository,
+      demo_url, demo_enabled,
       challenge, solution, description_json, features_json, metrics_json, timeline_json
     FROM projects 
     WHERE status IN ('LIVE', 'BETA')
@@ -198,6 +216,9 @@ app.get('/projects', async (c) => {
 
   return c.json(formatted)
 })
+
+// 注：以上为示意片段，与实际实现存在漂移——公开接口必须逐字段显式列出（不能用 `...row`
+// 展开整行），且演示入口需把 `demo_enabled` 转成布尔、开关关闭时把 `demoUrl` 置空后再下发。
 
 /* -------------------------------------------------------------
  * 2. 安全中间件：管理端身份严密核验（默认 fail-closed）

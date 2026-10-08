@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "format": "oxfmt",
-    "test": "node jwt_verify.test.mjs",
+    "test": "node jwt_verify.test.mjs && node demo_url.test.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p worker/tsconfig.json"
   },
   "dependencies": {

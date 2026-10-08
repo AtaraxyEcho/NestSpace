@@ -64,6 +64,13 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   customCitations: '',
   activityLogMode: 'auto',
   customActivityLog: [],
+
+  // 展示偏好：默认值等于既有行为（跟随浏览器/系统，统计与两个切换按钮全部开启）
+  defaultLanguage: 'auto',
+  defaultTheme: 'auto',
+  homeStatsVisible: true,
+  themeToggleEnabled: true,
+  languageToggleEnabled: true,
 }
 
 /** 将服务端返回的设置与默认值合并：字符串空值回退默认，布尔值及数组直接生效 */

@@ -146,8 +146,12 @@ export type RemoteGithubRepo = {
 
 /**
  * 管理端触发 GitHub 指标同步：按各项目仓库地址拉取最新 stars / 推送时间 / Release 版本
+ * fetchDocs 为真时同时抓取 README 与 Compose 文档（仅填充空白字段）
  */
-export async function syncGithubRepos(token?: string): Promise<{
+export async function syncGithubRepos(
+  token?: string,
+  fetchDocs = false,
+): Promise<{
   success: boolean
   results?: Array<Record<string, unknown>>
   error?: string
@@ -158,7 +162,7 @@ export async function syncGithubRepos(token?: string): Promise<{
     const res = await fetch('/api/admin/github-sync', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, fetchDocs }),
     })
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}))
@@ -181,12 +185,14 @@ export async function fetchGithubUserRepos(
   success: boolean
   username?: string
   repos?: RemoteGithubRepo[]
+  /** 仓库数量超过分页上限（3 页 300 个）时为真 */
+  truncated?: boolean
   error?: string
 }> {
   try {
+    // Token 只走 X-GitHub-Token 头，绝不放进 URL：查询串会留在浏览器历史与边缘访问日志
     const params = new URLSearchParams()
     if (username) params.set('username', username)
-    if (token) params.set('token', token)
     const headers = getAuthHeaders() as Record<string, string>
     if (token) headers['X-GitHub-Token'] = token
 
@@ -198,7 +204,12 @@ export async function fetchGithubUserRepos(
       return { success: false, error: (errJson as any).error || `扫描失败: HTTP ${res.status}` }
     }
     const data = await res.json()
-    return { success: true, username: data.username, repos: data.repos }
+    return {
+      success: true,
+      username: data.username,
+      repos: data.repos,
+      truncated: Boolean(data.truncated),
+    }
   } catch (err: any) {
     return { success: false, error: `网络异常: ${err.message}` }
   }

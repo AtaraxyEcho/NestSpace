@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react"
-import type { Language, Project, ProjectShape, ProjectStatus } from "./types/project"
+import { useEffect, useMemo, useRef, useState } from "react"
+import type { Language, Project, ProjectStatus } from "./types/project"
 import { fallbackProjects as projects } from "./data/fallbackProjects"
 import { DEFAULT_SITE_SETTINGS, DEFAULT_NAV_ITEMS } from "./data/defaultSiteSettings"
-import { fetchPublicProjects, fetchSiteSettings } from "./api/client"
+import { fetchPublicProjects, fetchSiteSettings, fetchPublicProjectById } from "./api/client"
 import {
   verifyAndFetchAdminProjects,
   saveAdminProject,
@@ -17,6 +17,7 @@ import {
 } from "./api/adminClient"
 import type { SiteSettings, NavItemConfig } from "./types/siteSettings"
 import { computeCatalogueStats, computeActivityTimeline } from "./utils/stats"
+import { renderMarkdown } from "./utils/markdown"
 
 
 function SpecimenSvg({ shape }: { shape: Project["shape"] }) {
@@ -113,6 +114,7 @@ function SpecimenCard({
   language: Language
   onOpen: (project: Project) => void
 }) {
+  const demoUrl = demoHref(project)
   return (
     <article className="specimen-card">
       <CropMarks />
@@ -164,6 +166,16 @@ function SpecimenCard({
             >
               View specimen <span>↗</span>
             </button>
+            {demoUrl ? (
+              <a
+                className="button secondary"
+                href={demoUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Live demo <span>↗</span>
+              </a>
+            ) : null}
             <a
               href={formatRepositoryUrl(project.repository)}
               className="button secondary"
@@ -196,15 +208,33 @@ export function formatRepositoryUrl(repo: string | null | undefined): string {
     .replace(/^https?:\/\/?/i, "")
     .replace(/^https?\/\//i, "")
     .replace(/^\/+/, "")
-  // 如果是纯 owner/repo 形式（不带 github.com）
+  // 带点的主机名（gitlab.com/a/b、www.github.com/a/b）原样补协议，
+  // 不要一律当成 owner/repo 拼到 github.com 上
+  if (/^[^/\s]+\.[^/\s]+\//.test(trimmed)) {
+    return `https://${trimmed}`
+  }
+  // 剩下的纯 owner/repo 形式才补 github.com
   if (!/^github\.com/i.test(trimmed) && /^[^/\s#?]+\/[^/\s#?]+/.test(trimmed)) {
     return `https://github.com/${trimmed}`
   }
   return `https://${trimmed}`
 }
 
+/**
+ * 演示入口地址（全部副本的唯一判据）：开关开启、地址非空、协议为 http/https 三者同时成立才返回，
+ * 否则 null。写入侧已在 Worker 规范化，这里再校验一次协议，防止绕过 Worker 直接写库的值直接落进 href。
+ */
+function demoHref(project: Project): string | null {
+  if (!project.demoEnabled) return null
+  const url = (project.demoUrl || "").trim()
+  return /^https?:\/\//i.test(url) ? url : null
+}
+
 // 站内章节锚点：Cabinet → Catalogue → Curator → Index
 const SECTION_ANCHORS = ["cabinet", "catalogue", "curator", "index", "colophon"]
+
+// 详情页页签顺序：role=tab 的 aria-controls/id 与左右方向键导航都以此为准
+const DETAIL_TABS = ["overview", "readme", "deployment"] as const
 
 export function isAdminHost(): boolean {
   if (typeof window === "undefined") return false
@@ -272,11 +302,16 @@ function Header({
   setDark: (value: boolean) => void
   settings: SiteSettings
 }) {
-  const navList = (
+  // navList 用 useMemo 固定引用：否则每次渲染都生成新数组，
+  // 会让下面的 scroll-spy effect 反复解绑/重绑 scroll 监听
+  const navSource =
     settings.navItems && settings.navItems.length > 0
       ? settings.navItems
       : DEFAULT_NAV_ITEMS
-  ).filter((item) => item.visible !== false)
+  const navList = useMemo(
+    () => navSource.filter((item) => item.visible !== false),
+    [navSource],
+  )
 
   // 导航选中态：按当前滚动位置高亮对应章节（scroll-spy）
   const [activeSection, setActiveSection] = useState<string>("cabinet")
@@ -343,20 +378,24 @@ function Header({
       </nav>
       <div className="header-tools">
         <span className="volume">VOL. 01 · {new Date().getFullYear()}</span>
-        <button
-          type="button"
-          onClick={() => setLanguage(language === "en" ? "zh" : "en")}
-          aria-label="Switch language"
-        >
-          {language === "en" ? "中" : "EN"}
-        </button>
-        <button
-          type="button"
-          onClick={() => setDark(!dark)}
-          aria-label="Switch theme"
-        >
-          {dark ? "LIGHT" : "DARK"}
-        </button>
+        {settings.languageToggleEnabled !== false && (
+          <button
+            type="button"
+            onClick={() => setLanguage(language === "en" ? "zh" : "en")}
+            aria-label="Switch language"
+          >
+            {language === "en" ? "中" : "EN"}
+          </button>
+        )}
+        {settings.themeToggleEnabled !== false && (
+          <button
+            type="button"
+            onClick={() => setDark(!dark)}
+            aria-label="Switch theme"
+          >
+            {dark ? "LIGHT" : "DARK"}
+          </button>
+        )}
       </div>
       <i className="page-progress" />
     </header>
@@ -382,6 +421,8 @@ function SpiralGallery({
 
   useEffect(() => {
     let frame = 0
+    let running = false
+    let isInView = true
     const onScroll = () => {
       if (!sectionRef.current) return
       const rect = sectionRef.current.getBoundingClientRect()
@@ -389,6 +430,7 @@ function SpiralGallery({
       targetRef.current = Math.max(0, Math.min(1, -rect.top / range))
     }
     const animate = () => {
+      if (!running) return
       progressRef.current += (targetRef.current - progressRef.current) * 0.16
       const p = progressRef.current
       const step = Math.PI / 2
@@ -436,14 +478,44 @@ function SpiralGallery({
       document.documentElement.style.setProperty("--page-progress", `${p}`)
       frame = requestAnimationFrame(animate)
     }
+
+    const start = () => {
+      if (running || !sectionRef.current) return
+      running = true
+      frame = requestAnimationFrame(animate)
+    }
+    const stop = () => {
+      running = false
+      if (frame) cancelAnimationFrame(frame)
+      frame = 0
+    }
+    // 画廊滚出视口或标签页转入后台时停掉逐帧循环：
+    // 否则它会一直为全部卡片写 transform/opacity/filter（标本越多开销越大）
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        isInView = entry.isIntersecting
+        if (isInView && !document.hidden) start()
+        else stop()
+      },
+      { threshold: 0 },
+    )
+    if (sectionRef.current) observer.observe(sectionRef.current)
+    const onVisibility = () => {
+      if (document.hidden) stop()
+      else if (isInView) start()
+    }
+
     onScroll()
     window.addEventListener("scroll", onScroll, { passive: true })
     window.addEventListener("resize", onScroll)
-    frame = requestAnimationFrame(animate)
+    document.addEventListener("visibilitychange", onVisibility)
+    start()
     return () => {
       window.removeEventListener("scroll", onScroll)
       window.removeEventListener("resize", onScroll)
-      cancelAnimationFrame(frame)
+      document.removeEventListener("visibilitychange", onVisibility)
+      observer.disconnect()
+      stop()
     }
   }, [items.length])
 
@@ -576,9 +648,11 @@ function CatalogueStats({
       </div>
       <div
         className="timeline"
-        style={{
-          gridTemplateColumns: `2fr repeat(${timelineData.length}, 1fr)`,
-        }}
+        style={
+          {
+            "--timeline-cols": timelineData.length,
+          } as React.CSSProperties
+        }
       >
         <div className="timeline-copy">
           <span className="eyebrow">ACTIVITY LOG</span>
@@ -791,15 +865,25 @@ function SiteFooter({
     ])
 
   const goToSection = (id: string) => {
-    // 顶栏 Logo 与 Cabinet 一致回到页面顶部，其余章节定位到自身锚点
+    // 顶栏 Logo 与 Cabinet 一致回到页面顶部
     if (id === "cabinet") {
       window.scrollTo({ top: 0, behavior: "smooth" })
-    } else {
-      document.getElementById(id)?.scrollIntoView({ behavior: "smooth" })
+      if (window.location.hash) {
+        window.history.replaceState(null, "", window.location.pathname)
+      }
+      return
     }
-    if (window.location.hash) {
-      window.history.replaceState(null, "", window.location.pathname)
+    const target = document.getElementById(id)
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth" })
+      if (window.location.hash) {
+        window.history.replaceState(null, "", window.location.pathname)
+      }
+      return
     }
+    // 当前页面没有这个章节（例如站在标本详情页点页脚章节链接）：
+    // 通过设置 hash 回到首页对应章节；旧实现会清掉 hash 却什么都不做，URL 与视图就此脱钩
+    window.location.hash = id
   }
 
   return (
@@ -810,7 +894,7 @@ function SiteFooter({
             {copy(settings.footerKickerEn, settings.footerKickerZh)}
           </span>
           <strong>{settings.logoText || "NestSpace"}</strong>
-          <em>{settings.logoSubtext || "巢空间"}</em>
+          <em>{settings.logoSubtext || "ATARAXYECHO"}</em>
           <p>{fill(copy(settings.footerBlurbEn, settings.footerBlurbZh))}</p>
         </div>
         <div>
@@ -900,8 +984,33 @@ function DetailPage({
   onOpen: (project: Project) => void
 }) {
   const related = items.filter((item) => item.id !== project.id).slice(0, 2)
+  const demoUrl = demoHref(project)
   const [detailTab, setDetailTab] =
     useState<"overview" | "readme" | "deployment">("overview")
+
+  // README：优先当前语言，缺失时回退另一种语言并给出提示
+  const readmeZh = (project.readmeZh ?? "").trim()
+  const readmeEn = (project.readmeEn ?? "").trim()
+  const preferredReadme = language === "zh" ? readmeZh : readmeEn
+  const fallbackReadme = language === "zh" ? readmeEn : readmeZh
+  const readmeText = preferredReadme || fallbackReadme
+  const readmeFromFallback = !preferredReadme && Boolean(fallbackReadme)
+  const readmeDoc = useMemo(() => renderMarkdown(readmeText), [readmeText])
+
+  const composeEntries = [
+    {
+      id: "compose-dev",
+      label: "DEV / 本地编排",
+      path: "deploy/dev/docker-compose.yml",
+      content: (project.composeDev ?? "").trim(),
+    },
+    {
+      id: "compose-prod",
+      label: "PROD / 生产编排",
+      path: "deploy/prod/docker-compose.yml",
+      content: (project.composeProd ?? "").trim(),
+    },
+  ].filter((entry) => entry.content !== "")
 
   return (
     <main className="detail-page">
@@ -918,12 +1027,16 @@ function DetailPage({
         </button>
         <span className="detail-location">CABINET / SPEC—{project.id}</span>
         <div className="header-tools">
-          <button type="button" onClick={onLanguage}>
-            {language === "en" ? "中" : "EN"}
-          </button>
-          <button type="button" onClick={onTheme}>
-            {dark ? "LIGHT" : "DARK"}
-          </button>
+          {settings.languageToggleEnabled !== false && (
+            <button type="button" onClick={onLanguage} aria-label="Switch language">
+              {language === "en" ? "中" : "EN"}
+            </button>
+          )}
+          {settings.themeToggleEnabled !== false && (
+            <button type="button" onClick={onTheme} aria-label="Switch theme">
+              {dark ? "LIGHT" : "DARK"}
+            </button>
+          )}
         </div>
       </header>
 
@@ -947,9 +1060,27 @@ function DetailPage({
               >
                 VIEW SOURCE <span>↗</span>
               </a>
-              <a className="button secondary" href="#field-notes">
+              {demoUrl ? (
+                <a
+                  className="button secondary"
+                  href={demoUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  LIVE DEMO <span>↗</span>
+                </a>
+              ) : null}
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() =>
+                  document
+                    .getElementById("field-notes")
+                    ?.scrollIntoView({ behavior: "smooth" })
+                }
+              >
                 READ FIELD NOTES <span>↓</span>
-              </a>
+              </button>
             </div>
           </div>
           <div className="detail-plate">
@@ -984,11 +1115,30 @@ function DetailPage({
             <dd>{project.stars}</dd>
           </div>
         </dl>
-        <nav className="detail-tabs" aria-label="Project documentation">
-          {(["overview", "readme", "deployment"] as const).map((tab) => (
+        <nav
+          className="detail-tabs"
+          aria-label="Project documentation"
+          role="tablist"
+          onKeyDown={(event) => {
+            // 符合 WAI-ARIA 的 tab 键盘约定：左右方向键在页签间移动并聚焦
+            const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0
+            if (step === 0) return
+            event.preventDefault()
+            const current = DETAIL_TABS.indexOf(detailTab)
+            const next = DETAIL_TABS[(current + step + DETAIL_TABS.length) % DETAIL_TABS.length]
+            setDetailTab(next)
+            document.getElementById(`detail-tab-${next}`)?.focus()
+          }}
+        >
+          {DETAIL_TABS.map((tab) => (
             <button
               type="button"
               key={tab}
+              id={`detail-tab-${tab}`}
+              role="tab"
+              aria-selected={detailTab === tab}
+              aria-controls={`detail-panel-${tab}`}
+              tabIndex={detailTab === tab ? 0 : -1}
               className={detailTab === tab ? "active" : ""}
               onClick={() => setDetailTab(tab)}
             >
@@ -998,7 +1148,13 @@ function DetailPage({
         </nav>
       </section>
 
-      <div className={detailTab === "overview" ? "" : "document-hidden"}>
+      <div
+        id="detail-panel-overview"
+        role="tabpanel"
+        aria-labelledby="detail-tab-overview"
+        tabIndex={0}
+        className={detailTab === "overview" ? "" : "document-hidden"}
+      >
         <section className="detail-section" id="field-notes">
           <div className="detail-section-label">
             <span className="eyebrow">FIELD NOTES / 01</span>
@@ -1071,80 +1227,158 @@ function DetailPage({
       </div>
 
       {detailTab === "readme" && (
-        <section className="detail-section document-section">
+        <section
+          className="detail-section document-section"
+          id="detail-panel-readme"
+          role="tabpanel"
+          aria-labelledby="detail-tab-readme"
+          tabIndex={0}
+        >
           <aside>
             <span className="eyebrow">ON THIS PAGE</span>
-            <a href="#introduction">Introduction</a>
-            <a href="#installation">Installation</a>
-            <a href="#features">Features</a>
-            <a href="#license">License</a>
+            {readmeDoc.headings.length > 0 ? (
+              readmeDoc.headings
+                .filter((heading) => heading.level <= 3)
+                .slice(0, 14)
+                .map((heading) => (
+                  <button
+                    type="button"
+                    key={heading.id}
+                    className="doc-toc-item"
+                    onClick={() =>
+                      document
+                        .getElementById(heading.id)
+                        ?.scrollIntoView({ behavior: "smooth" })
+                    }
+                  >
+                    {heading.text}
+                  </button>
+                ))
+            ) : (
+              <span className="doc-toc-empty">暂无目录</span>
+            )}
           </aside>
           <article className="markdown-body">
-            <span className="eyebrow">README.MD / LATEST</span>
-            <h2 id="introduction">{project.name}</h2>
-            <blockquote>{project.description.en}</blockquote>
-            <p>{project.solution}</p>
-            <h3 id="installation">Installation</h3>
-            <div className="code-block">
-              <span>TERMINAL</span>
-              <button
-                type="button"
-                onClick={() =>
-                  navigator.clipboard?.writeText(
-                    `npm install @nestspace/${project.name.toLowerCase()}`,
-                  )
-                }
-              >
-                COPY
-              </button>
-              <code>npm install @nestspace/{project.name.toLowerCase()}</code>
-            </div>
-            <h3 id="features">What it includes</h3>
-            <ul>
-              {project.features.map((feature) => (
-                <li key={feature}>{feature}</li>
-              ))}
-            </ul>
-            <h3 id="license">License</h3>
-            <p>MIT licensed. Made to be studied, adapted, and shared.</p>
+            {readmeText ? (
+              <div className="readme-doc">
+                <span className="eyebrow">
+                  README.md /{" "}
+                  {readmeFromFallback
+                    ? language === "zh"
+                      ? "ENGLISH 原文"
+                      : "中文原文"
+                    : language === "zh"
+                      ? "中文"
+                      : "ENGLISH"}
+                  {project.docsSyncedAt ? ` · SYNCED ${project.docsSyncedAt}` : ""}
+                </span>
+                {readmeFromFallback ? (
+                  <p className="doc-notice">
+                    该标本暂无
+                    {language === "zh" ? "中文" : "英文"} README，以下为另一种语言的原文。
+                  </p>
+                ) : null}
+                {readmeDoc.nodes}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <strong>该标本暂无 README 文档</strong>
+                <span>
+                  可在管理端「项目管理 → 编辑」粘贴 Markdown，或在「GitHub 同步」勾选
+                  「同时抓取 README / Compose 文档」后同步。
+                </span>
+              </div>
+            )}
           </article>
         </section>
       )}
 
       {detailTab === "deployment" && (
-        <section className="detail-section document-section">
+        <section
+          className="detail-section document-section"
+          id="detail-panel-deployment"
+          role="tabpanel"
+          aria-labelledby="detail-tab-deployment"
+          tabIndex={0}
+        >
           <aside>
             <span className="eyebrow">DEPLOYMENT</span>
-            <a href="#requirements">Requirements</a>
-            <a href="#cloudflare">Cloudflare Pages</a>
-            <a href="#environment">Environment</a>
+            {composeEntries.length > 0 ? (
+              composeEntries.map((entry) => (
+                <button
+                  type="button"
+                  key={entry.id}
+                  className="doc-toc-item"
+                  onClick={() =>
+                    document
+                      .getElementById(entry.id)
+                      ?.scrollIntoView({ behavior: "smooth" })
+                  }
+                >
+                  {entry.label}
+                </button>
+              ))
+            ) : (
+              <span className="doc-toc-empty">暂无编排文件</span>
+            )}
           </aside>
           <article className="markdown-body">
-            <span className="eyebrow">DEPLOYMENT.MD / VERIFIED</span>
-            <h2 id="requirements">Field deployment</h2>
-            <p>
-              This specimen ships as a static, reproducible build. Use Node 22
-              or later and keep the lockfile committed.
-            </p>
-            <h3 id="cloudflare">Cloudflare Pages</h3>
-            <div className="deployment-table">
-              <div>
-                <span>BUILD COMMAND</span>
-                <strong>pnpm build</strong>
+            <span className="eyebrow">
+              COMPOSE / DOCKER
+              {project.docsSyncedAt ? ` · SYNCED ${project.docsSyncedAt}` : ""}
+            </span>
+            {composeEntries.length === 0 ? (
+              <div className="empty-state">
+                <strong>该标本暂无 Docker Compose 编排</strong>
+                <span>
+                  仓库中未发现 deploy/dev/docker-compose.yml 或 deploy/prod/docker-compose.yml，
+                  可在管理端手工粘贴。
+                </span>
               </div>
-              <div>
-                <span>OUTPUT DIRECTORY</span>
-                <strong>dist</strong>
-              </div>
-              <div>
-                <span>RUNTIME</span>
-                <strong>Node.js 22</strong>
-              </div>
-            </div>
-            <h3 id="environment">Environment variables</h3>
+            ) : (
+              composeEntries.map((entry) => (
+                <div className="compose-doc" id={entry.id} key={entry.id}>
+                  <h3>{entry.label}</h3>
+                  <div className="code-block">
+                    <span>{entry.path}</span>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard?.writeText(entry.content)}
+                    >
+                      COPY
+                    </button>
+                    <pre>
+                      <code>{entry.content}</code>
+                    </pre>
+                  </div>
+                </div>
+              ))
+            )}
+            <h3 id="env-vars">环境变量</h3>
             <div className="code-block">
               <span>.ENV.PRODUCTION</span>
-              <code>PUBLIC_REPOSITORY={project.repository}</code>
+              <button
+                type="button"
+                onClick={() =>
+                  navigator.clipboard?.writeText(
+                    `PUBLIC_REPOSITORY=${project.repository}${
+                      demoUrl
+                        ? `\nPUBLIC_DEMO_URL=${demoUrl}`
+                        : ""
+                    }`,
+                  )
+                }
+              >
+                COPY
+              </button>
+              <pre>
+                <code>
+                  PUBLIC_REPOSITORY={project.repository}
+                  {demoUrl
+                    ? `\nPUBLIC_DEMO_URL=${demoUrl}`
+                    : ""}
+                </code>
+              </pre>
             </div>
           </article>
         </section>
@@ -1588,6 +1822,38 @@ function AdminGateway({
 }
 
 
+// 抽屉里的数组字段用逐行文本编辑，避免为 4 个数组各造一套结构化控件。
+// 约定：features 每行一条；metrics 每行「标签 | 数值」；timeline 每行「日期 | 标题 | 说明」。
+function textToFeatures(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function textToMetrics(text: string): Project["metrics"] {
+  return text
+    .split("\n")
+    .map((line) => line.split("|"))
+    .filter((parts) => parts.length >= 2 && parts[0].trim() !== "")
+    .map((parts) => ({
+      label: parts[0].trim(),
+      value: parts.slice(1).join("|").trim(),
+    }))
+}
+
+function textToTimeline(text: string): Project["timeline"] {
+  return text
+    .split("\n")
+    .map((line) => line.split("|"))
+    .filter((parts) => parts.length >= 2 && parts[0].trim() !== "")
+    .map((parts) => ({
+      date: parts[0].trim(),
+      title: (parts[1] ?? "").trim(),
+      note: parts.slice(2).join("|").trim(),
+    }))
+}
+
 function AdminPage({
   items,
   onChange,
@@ -1603,6 +1869,10 @@ function AdminPage({
     "ALL",
   )
   const [editing, setEditing] = useState<Project | null>(null)
+  // 三个数组字段在抽屉里以原始文本暂存：保存时才解析，避免边输入边被重新格式化导致光标跳动
+  const [featuresText, setFeaturesText] = useState("")
+  const [metricsText, setMetricsText] = useState("")
+  const [timelineText, setTimelineText] = useState("")
   const [notice, setNotice] = useState("")
   const [contentLanguage, setContentLanguage] = useState<Language>("zh")
   // 站点文案与合规设置：初始为内置默认值，挂载后从 D1 拉取覆盖
@@ -1610,6 +1880,11 @@ function AdminPage({
     ...DEFAULT_SITE_SETTINGS,
   })
   const [syncing, setSyncing] = useState(false)
+  // 是否在同步指标的同时抓取 README / Compose 文档
+  const [syncDocs, setSyncDocs] = useState(false)
+  // 站点文案是否已成功从 D1 载入；未载入时禁止保存，防止默认文案覆盖线上配置
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
+  const [settingsLoadError, setSettingsLoadError] = useState("")
   const [syncResults, setSyncResults] = useState<GithubSyncResult[] | null>(null)
   const [githubUser, setGithubUser] = useState("AtaraxyEcho")
   const [githubToken, setGithubToken] = useState(() => sessionStorage.getItem("nestspace_gh_token") || "")
@@ -1627,20 +1902,33 @@ function AdminPage({
     sync: "GitHub 同步",
     settings: "站点设置",
   }
-  // 从 D1 拉取站点文案设置（拉取失败时保持内置默认值，仍可编辑保存）
+  // 从 D1 拉取站点文案设置。未加载成功前一律禁止保存：
+  // 否则初值（内置默认文案）会被整份写回，抹掉线上已配置的文案。
+  const loadSiteSettings = async () => {
+    setSettingsLoadError("")
+    const res = await fetchAdminSiteSettings()
+    if (!res.success || !res.data) {
+      setSettingsLoaded(false)
+      setSettingsLoadError(res.error || "未知错误")
+      return
+    }
+    setSiteContent(res.data)
+    setSettingsLoaded(true)
+    if (res.data.githubUrl) {
+      const match = /github\.com\/([^/\s#?]+)/i.exec(res.data.githubUrl)
+      if (match) setGithubUser(match[1])
+    }
+  }
+
   useEffect(() => {
-    fetchAdminSiteSettings().then((res) => {
-      if (res.success && res.data) {
-        setSiteContent(res.data)
-        if (res.data.githubUrl) {
-          const match = /github\.com\/([^/\s#?]+)/i.exec(res.data.githubUrl)
-          if (match) setGithubUser(match[1])
-        }
-      }
-    })
+    loadSiteSettings()
   }, [])
 
   const saveSettings = async () => {
+    if (!settingsLoaded) {
+      setNotice("站点文案尚未从 D1 加载成功，已阻止保存以避免覆盖线上配置。请先点上方「重新加载」。")
+      return
+    }
     setNotice("正在保存站点设置到 Cloudflare D1...")
     const res = await saveAdminSiteSettings(siteContent)
     setNotice(
@@ -1676,7 +1964,11 @@ function AdminPage({
       return
     }
     setDiscoveredRepos(res.repos)
-    setNotice(`扫描完成：发现 ${res.repos.length} 个公开仓库。`)
+    setNotice(
+      res.truncated
+        ? `扫描完成：仓库数量超过上限，仅列出最近更新的 ${res.repos.length} 个（最多 3 页 300 个）。`
+        : `扫描完成：发现 ${res.repos.length} 个公开仓库。`,
+    )
   }
 
   const handleImportRepo = async (repoFullName: string) => {
@@ -1705,8 +1997,12 @@ function AdminPage({
 
   const runGithubSync = async () => {
     setSyncing(true)
-    setNotice("正在从 GitHub 采集已有标本的最新指标…")
-    const res = await syncGithubRepos(githubToken.trim() || undefined)
+    setNotice(
+      syncDocs
+        ? "正在从 GitHub 采集指标并抓取 README / Compose 文档…"
+        : "正在从 GitHub 采集已有标本的最新指标…",
+    )
+    const res = await syncGithubRepos(githubToken.trim() || undefined, syncDocs)
     setSyncing(false)
     if (!res.success || !res.results) {
       setNotice(`同步失败: ${res.error || "未知错误"}`)
@@ -1731,17 +2027,48 @@ function AdminPage({
     )
   })
 
+  // 抽屉打开时支持 Esc 关闭（键盘可达性；抽屉本身已是 role=dialog + aria-modal）
+  useEffect(() => {
+    if (!editing) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setEditing(null)
+    }
+    document.addEventListener("keydown", onKeyDown)
+    return () => document.removeEventListener("keydown", onKeyDown)
+  }, [editing])
+
+  // 每次打开抽屉（切换项目或新建）时，把数组字段摊平成可编辑文本
+  useEffect(() => {
+    if (!editing) return
+    setFeaturesText(editing.features.join("\n"))
+    setMetricsText(
+      editing.metrics.map((metric) => `${metric.label} | ${metric.value}`).join("\n"),
+    )
+    setTimelineText(
+      editing.timeline
+        .map((event) => `${event.date} | ${event.title} | ${event.note}`)
+        .join("\n"),
+    )
+  }, [editing?.id])
+
   const saveProject = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!editing) return
-    const isNew = !items.some((item) => item.id === editing.id)
+    // 数组字段以逐行文本编辑，保存前统一解析回结构化数据
+    const payload: Project = {
+      ...editing,
+      features: textToFeatures(featuresText),
+      metrics: textToMetrics(metricsText),
+      timeline: textToTimeline(timelineText),
+    }
+    const isNew = !items.some((item) => item.id === payload.id)
     setNotice("正在持久化到 Cloudflare D1 边缘数据库...")
-    const res = await saveAdminProject(editing, isNew)
+    const res = await saveAdminProject(payload, isNew)
     if (res.success) {
       onChange(
-        items.some((item) => item.id === editing.id)
-          ? items.map((item) => (item.id === editing.id ? editing : item))
-          : [editing, ...items],
+        items.some((item) => item.id === payload.id)
+          ? items.map((item) => (item.id === payload.id ? payload : item))
+          : [payload, ...items],
       )
       setEditing(null)
       setNotice("项目资料已成功保存并同步到 Cloudflare D1 数据库。")
@@ -1751,20 +2078,43 @@ function AdminPage({
   }
 
   const createProject = () => {
-    const id = String(
-      Math.max(0, ...items.map((item) => Number(item.id))) + 1,
-    ).padStart(3, "0")
+    // 只用纯数字 id 参与推算：列表里一旦出现非数字 id，
+    // 原来的 Math.max(...Number) 会算出 "NaN" 并导致保存主键异常
+    const numericIds = items
+      .map((item) => Number(item.id))
+      .filter((value) => Number.isFinite(value))
+    let nextNumber = numericIds.length > 0 ? Math.max(...numericIds) + 1 : 1
+    let id = String(nextNumber).padStart(3, "0")
+    while (items.some((item) => item.id === id)) {
+      nextNumber += 1
+      id = String(nextNumber).padStart(3, "0")
+    }
+    // 新建项目用空白模板起步：此前是直接展开 projects[0]，
+    // 会把标本 001 的简介/挑战/方案/特性/指标/时间线整套复制过来，容易误存成重复内容
     setEditing({
-      ...projects[0],
       id,
+      date: new Date().toISOString().slice(0, 7).replace("-", "."),
+      status: "BETA",
       name: "Untitled specimen",
       cn: "未命名标本",
       latin: "Specimen Novum",
-      status: "BETA",
+      habitat: "Standard",
+      type: "App",
+      language: "TypeScript",
       stars: "0",
-      date: new Date().toISOString().slice(0, 7).replace("-", "."),
+      year: new Date().getFullYear().toString(),
+      shape: "aperture",
+      version: "v1.0.0",
       updated: new Date().toISOString().slice(0, 10).replace(/-/g, "."),
-      repository: "github.com/AtaraxyEcho/new-project",
+      repository: "",
+      challenge: "",
+      solution: "",
+      description: { en: "", zh: "" },
+      features: [],
+      metrics: [],
+      timeline: [],
+      demoUrl: "",
+      demoEnabled: false,
     })
   }
 
@@ -1772,6 +2122,13 @@ function AdminPage({
     const target = items.find((item) => item.id === id)
     if (!target) return
     const nextStatus: ProjectStatus = target.status === "LIVE" ? "BETA" : "LIVE"
+    // DRAFT / ARCHIVED 目前对公众不可见，一键"公开"前必须确认，避免草稿被误发布
+    if (target.status === "DRAFT" || target.status === "ARCHIVED") {
+      const confirmed = window.confirm(
+        `「${target.name}」当前为 ${target.status}（前台不可见），切换后将变为 ${nextStatus} 并立即出现在公开站点。确定继续吗？`,
+      )
+      if (!confirmed) return
+    }
     const updated: Project = { ...target, status: nextStatus }
     setNotice("正在更新状态...")
     const res = await saveAdminProject(updated, false)
@@ -1889,6 +2246,18 @@ function AdminPage({
             </div>
           </div>
         </header>
+
+        {settingsLoadError && !settingsLoaded && (
+          <div className="admin-banner" role="alert">
+            <span>
+              站点文案未能从 D1 载入（{settingsLoadError}）。为避免用内置默认值覆盖线上配置，
+              所有保存操作已禁用。
+            </span>
+            <button type="button" onClick={loadSiteSettings}>
+              重新加载
+            </button>
+          </div>
+        )}
 
         {notice && (
           <div className="admin-notice" role="status">
@@ -2648,6 +3017,17 @@ function AdminPage({
           </div>
         )}
 
+        {view === "footer" && (
+          <AdminFooterView
+            items={items}
+            settings={siteContent}
+            contentLanguage={contentLanguage}
+            onLanguage={setContentLanguage}
+            onPatch={patchFooterPair}
+            onSave={saveSettings}
+          />
+        )}
+
         {view === "projects" && (
           <div className="admin-content">
             <div className="admin-page-title compact">
@@ -2683,6 +3063,8 @@ function AdminPage({
                 <option value="ALL">全部状态</option>
                 <option value="LIVE">已发布</option>
                 <option value="BETA">测试中</option>
+                <option value="DRAFT">私密草稿</option>
+                <option value="ARCHIVED">归档下线</option>
               </select>
               <span>{filtered.length} 个结果</span>
             </div>
@@ -2828,6 +3210,20 @@ function AdminPage({
                     {syncing ? "正在采集…" : "⚡ 同步已有标本指标"}
                   </button>
                 </div>
+                <label className="toggle-row" style={{ marginTop: "14px" }}>
+                  <span>
+                    <strong>同时抓取 README / Compose 文档</strong>
+                    <small>
+                      按仓库 README.md（含 README.en.md / README.zh*.md）与
+                      deploy/dev|prod/docker-compose.yml 抓取；只填充空白字段，不覆盖手工整理的内容
+                    </small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={syncDocs}
+                    onChange={(event) => setSyncDocs(event.target.checked)}
+                  />
+                </label>
               </div>
             </div>
 
@@ -2960,7 +3356,7 @@ function AdminPage({
                       <strong>{result.name}</strong>
                       <small>
                         {result.status === "synced"
-                          ? `★ ${result.stars} · ${result.version || "无 Release"} · ${result.updated}${result.language ? ` · ${result.language}` : ""}`
+                          ? `★ ${result.stars} · ${result.version || "无 Release"} · ${result.updated}${result.language ? ` · ${result.language}` : ""}${result.note ? ` · ${result.note}` : ""}`
                           : result.note || result.status}
                       </small>
                     </p>
@@ -3037,41 +3433,93 @@ function AdminPage({
                 <h2>展示偏好</h2>
                 <label>
                   默认语言
-                  <select defaultValue="auto">
+                  <select
+                    value={siteContent.defaultLanguage || "auto"}
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        defaultLanguage: event.target
+                          .value as SiteSettings["defaultLanguage"],
+                      })
+                    }
+                  >
                     <option value="auto">跟随浏览器</option>
                     <option value="zh">中文</option>
                     <option value="en">English</option>
                   </select>
+                  <small>决定访客首次进入时的初始语言，之后以访客自己的切换为准</small>
                 </label>
                 <label>
                   默认主题
-                  <select defaultValue="auto">
+                  <select
+                    value={siteContent.defaultTheme || "auto"}
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        defaultTheme: event.target
+                          .value as SiteSettings["defaultTheme"],
+                      })
+                    }
+                  >
                     <option value="auto">跟随系统</option>
                     <option value="light">白日标本室</option>
                     <option value="dark">夜间标本室</option>
                   </select>
+                  <small>决定访客首次进入时的深浅色，之后以访客自己的切换为准</small>
                 </label>
                 <label className="toggle-row">
                   <span>
                     <strong>公开项目统计</strong>
-                    <small>在首页显示馆藏数据</small>
+                    <small>
+                      关闭后首页隐藏 Catalogue 统计区块，并同步移除导航中的「馆藏统计」
+                    </small>
                   </span>
-                  <input type="checkbox" defaultChecked />
+                  <input
+                    type="checkbox"
+                    checked={siteContent.homeStatsVisible !== false}
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        homeStatsVisible: event.target.checked,
+                      })
+                    }
+                  />
                 </label>
                 <label className="toggle-row">
                   <span>
-                    <strong>深色模式</strong>
-                    <small>允许访客切换主题</small>
+                    <strong>深色模式切换</strong>
+                    <small>关闭后前台隐藏深浅色按钮，访客只能使用默认主题</small>
                   </span>
-                  <input type="checkbox" defaultChecked />
+                  <input
+                    type="checkbox"
+                    checked={siteContent.themeToggleEnabled !== false}
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        themeToggleEnabled: event.target.checked,
+                      })
+                    }
+                  />
                 </label>
                 <label className="toggle-row">
                   <span>
-                    <strong>中英双语</strong>
-                    <small>显示语言切换入口</small>
+                    <strong>中英双语切换</strong>
+                    <small>关闭后前台隐藏语言按钮，只按默认语言展示</small>
                   </span>
-                  <input type="checkbox" defaultChecked />
+                  <input
+                    type="checkbox"
+                    checked={siteContent.languageToggleEnabled !== false}
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        languageToggleEnabled: event.target.checked,
+                      })
+                    }
+                  />
                 </label>
+                <button type="button" className="admin-primary" onClick={saveSettings}>
+                  保存展示偏好
+                </button>
               </section>
               <section className="settings-card">
                 <span className="eyebrow">SEO & SHARING</span>
@@ -3100,10 +3548,14 @@ function AdminPage({
                     }
                   />
                 </label>
-                <label>
-                  社交分享图
-                  <input defaultValue="/images/nestspace-og.jpg" />
-                </label>
+                <div className="settings-card-note">
+                  社交分享图：当前未配置（站点没有 og:image）。要添加：把图片放进 frontend/public/，
+                  并在 .figma/make/site.json 里声明 openGraph.image，重新构建部署后生效。
+                </div>
+                <p className="settings-card-note">
+                  标题与 Meta 描述保存后即时生效：浏览器内直接改写文档标题，同时由边缘 Worker 注入到首页
+                  HTML（缓存 60 秒），因此不执行 JS 的爬虫与社交平台也能读到最新值。
+                </p>
               </section>
               <section className="settings-card">
                 <span className="eyebrow">COMPLIANCE / 合规</span>
@@ -3160,24 +3612,33 @@ function AdminPage({
               </section>
               <section className="settings-card">
                 <span className="eyebrow">DOMAIN & DEPLOYMENT</span>
-                <h2>域名与部署</h2>
+                <h2>域名与部署（只读）</h2>
+                <p className="settings-card-note" style={{ borderTop: 0, paddingTop: 0, marginTop: 0 }}>
+                  主域名、DNS 记录与管理端子域由 Cloudflare 部署配置和代码中的跳转规则决定，
+                  后台不提供修改，避免与真实部署状态不一致。
+                </p>
                 <label>
-                  主域名
-                  <input defaultValue="nestspace.dev" />
+                  当前访问域名
+                  <input
+                    readOnly
+                    value={typeof window === "undefined" ? "" : window.location.hostname}
+                  />
                 </label>
-                <div className="domain-status">
-                  <span>
-                    <b /> DNS 已连接
-                  </span>
-                  <small>Cloudflare Pages · 自动部署开启</small>
+                <label>
+                  公开站点入口
+                  <input
+                    readOnly
+                    value={
+                      isAdminHost() || typeof window === "undefined"
+                        ? "https://nestspace.online"
+                        : window.location.origin
+                    }
+                  />
+                </label>
+                <div className="settings-card-note">
+                  发布形态：Worker 静态资产（dist）+ D1；文案与展示偏好保存后即时生效，
+                  只有改动代码或新增迁移才需要重新部署。
                 </div>
-                <button
-                  type="button"
-                  className="admin-primary"
-                  onClick={() => setNotice("站点设置已保存。")}
-                >
-                  保存全部设置
-                </button>
               </section>
             </div>
           </div>
@@ -3192,11 +3653,17 @@ function AdminPage({
             event.target === event.currentTarget && setEditing(null)
           }
         >
-          <form className="editor-drawer" onSubmit={saveProject}>
+          <form
+            className="editor-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="editor-drawer-title"
+            onSubmit={saveProject}
+          >
             <header>
               <div>
                 <span className="eyebrow">SPECIMEN EDITOR</span>
-                <h2>
+                <h2 id="editor-drawer-title">
                   {items.some((item) => item.id === editing.id)
                     ? "编辑项目"
                     : "新建项目"}
@@ -3216,6 +3683,7 @@ function AdminPage({
                   英文名称
                   <input
                     required
+                    autoFocus
                     value={editing.name}
                     onChange={(event) =>
                       setEditing({ ...editing, name: event.target.value })
@@ -3283,9 +3751,82 @@ function AdminPage({
                       })
                     }
                   >
-                    <option value="LIVE">LIVE</option>
-                    <option value="BETA">BETA</option>
+                    <option value="LIVE">LIVE · 正式公开</option>
+                    <option value="BETA">BETA · 公开展示</option>
+                    <option value="DRAFT">DRAFT · 私密草稿（前台不可见）</option>
+                    <option value="ARCHIVED">ARCHIVED · 归档下线（前台不可见）</option>
                   </select>
+                  <small>仅 LIVE / BETA 会出现在公开站点；DRAFT 与 ARCHIVED 仅后台可见</small>
+                </label>
+              </div>
+              <div className="field-row">
+                <label>
+                  栖息地
+                  <input
+                    value={editing.habitat}
+                    onChange={(event) =>
+                      setEditing({ ...editing, habitat: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  几何形态
+                  <select
+                    value={editing.shape}
+                    onChange={(event) =>
+                      setEditing({
+                        ...editing,
+                        shape: event.target.value as Project["shape"],
+                      })
+                    }
+                  >
+                    <option value="aperture">aperture</option>
+                    <option value="lumen">lumen</option>
+                    <option value="fjord">fjord</option>
+                    <option value="meridian">meridian</option>
+                  </select>
+                </label>
+              </div>
+              <div className="field-row">
+                <label>
+                  Stars 展示值
+                  <input
+                    value={editing.stars}
+                    onChange={(event) =>
+                      setEditing({ ...editing, stars: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  年份
+                  <input
+                    value={editing.year}
+                    onChange={(event) =>
+                      setEditing({ ...editing, year: event.target.value })
+                    }
+                  />
+                </label>
+              </div>
+              <div className="field-row">
+                <label>
+                  采集月份
+                  <input
+                    value={editing.date}
+                    onChange={(event) =>
+                      setEditing({ ...editing, date: event.target.value })
+                    }
+                    placeholder="2026.05"
+                  />
+                </label>
+                <label>
+                  最近更新
+                  <input
+                    value={editing.updated}
+                    onChange={(event) =>
+                      setEditing({ ...editing, updated: event.target.value })
+                    }
+                    placeholder="2026.05.18"
+                  />
                 </label>
               </div>
               <label>
@@ -3297,6 +3838,148 @@ function AdminPage({
                   }
                 />
               </label>
+              <label>
+                演示地址
+                <input
+                  value={editing.demoUrl}
+                  onChange={(event) =>
+                    setEditing({ ...editing, demoUrl: event.target.value })
+                  }
+                  placeholder="https://demo.example.com（可省略协议）"
+                />
+                <small style={{ display: "block", marginTop: "5px", color: "#7c8076", fontSize: "10px" }}>
+                  仅支持 http/https；选「已上线」前必须先填地址。演示机未配 HTTPS 时，浏览器会提示不安全。
+                </small>
+              </label>
+              <label>
+                演示入口
+                <select
+                  value={editing.demoEnabled ? "1" : "0"}
+                  onChange={(event) =>
+                    setEditing({
+                      ...editing,
+                      demoEnabled: event.target.value === "1",
+                    })
+                  }
+                >
+                  <option value="0">未上线 · 前台不显示入口</option>
+                  <option value="1">已上线 · 前台显示入口</option>
+                </select>
+              </label>
+              <label>
+                挑战 / 背景
+                <textarea
+                  value={editing.challenge}
+                  onChange={(event) =>
+                    setEditing({ ...editing, challenge: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                解决方案
+                <textarea
+                  value={editing.solution}
+                  onChange={(event) =>
+                    setEditing({ ...editing, solution: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                特性列表
+                <textarea
+                  value={featuresText}
+                  onChange={(event) => setFeaturesText(event.target.value)}
+                />
+                <small>每行一条</small>
+              </label>
+              <label>
+                指标
+                <textarea
+                  value={metricsText}
+                  onChange={(event) => setMetricsText(event.target.value)}
+                />
+                <small>每行一条，格式「标签 | 数值」，如「BUILD TIME | −63%」</small>
+              </label>
+              <label>
+                时间线
+                <textarea
+                  value={timelineText}
+                  onChange={(event) => setTimelineText(event.target.value)}
+                />
+                <small>每行一条，格式「日期 | 标题 | 说明」</small>
+              </label>
+              <div className="field-row">
+                <label>
+                  排序权重
+                  <input
+                    type="number"
+                    value={editing.sort_order ?? 0}
+                    onChange={(event) =>
+                      setEditing({
+                        ...editing,
+                        sort_order: Number(event.target.value) || 0,
+                      })
+                    }
+                  />
+                  <small>数值越小越靠前</small>
+                </label>
+              </div>
+              <label>
+                内部笔记
+                <textarea
+                  value={editing.internal_notes ?? ""}
+                  onChange={(event) =>
+                    setEditing({ ...editing, internal_notes: event.target.value })
+                  }
+                />
+                <small>仅后台可见，公开接口一律不返回</small>
+              </label>
+              <label>
+                README · 中文 Markdown
+                <textarea
+                  className="doc-editor"
+                  value={editing.readme_zh ?? ""}
+                  onChange={(event) =>
+                    setEditing({ ...editing, readme_zh: event.target.value })
+                  }
+                />
+                <small>前台「README」tab 的中文原文；留空则回退到英文 README</small>
+              </label>
+              <label>
+                README · English Markdown
+                <textarea
+                  className="doc-editor"
+                  value={editing.readme_en ?? ""}
+                  onChange={(event) =>
+                    setEditing({ ...editing, readme_en: event.target.value })
+                  }
+                />
+                <small>前台「README」tab 的英文原文</small>
+              </label>
+              <label>
+                Compose · dev 编排（deploy/dev/docker-compose.yml）
+                <textarea
+                  className="doc-editor"
+                  value={editing.compose_dev ?? ""}
+                  onChange={(event) =>
+                    setEditing({ ...editing, compose_dev: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                Compose · prod 编排（deploy/prod/docker-compose.yml）
+                <textarea
+                  className="doc-editor"
+                  value={editing.compose_prod ?? ""}
+                  onChange={(event) =>
+                    setEditing({ ...editing, compose_prod: event.target.value })
+                  }
+                />
+              </label>
+              <p className="settings-card-note">
+                文档最近抓取：{editing.docs_synced_at || "未记录"}。GitHub 同步只填充空白字段，
+                不会覆盖这里手工整理的内容；单份文档超过 100000 字符会被截断。
+              </p>
               <label>
                 中文简介
                 <textarea
@@ -3345,18 +4028,154 @@ function AdminPage({
   )
 }
 
+// 展示偏好兜底：defaultLanguage/defaultTheme 为 'auto' 时跟随浏览器语言与系统深浅色
+function detectBrowserLanguage(): Language {
+  if (typeof navigator === "undefined") return "en"
+  const candidates = [navigator.language, ...(navigator.languages ?? [])]
+  return candidates.some((code) => code?.toLowerCase().startsWith("zh")) ? "zh" : "en"
+}
+
+function detectSystemTheme(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+}
+
+function DetailLoading({
+  settings,
+  onBack,
+}: {
+  settings: SiteSettings
+  onBack: () => void
+}) {
+  return (
+    <main className="detail-page">
+      <header className="detail-header">
+        <button type="button" className="wordmark" onClick={onBack}>
+          {settings.logoText || "NESTSPACE"}{" "}
+          <span>— {settings.logoSubtext || "ATARAXYECHO"}</span>
+        </button>
+        <span className="detail-location">CABINET / RETRIEVING</span>
+      </header>
+      <section className="detail-hero">
+        <div className="detail-placeholder" role="status" aria-live="polite">
+          <span className="eyebrow">RETRIEVING SPECIMEN</span>
+          <div className="skeleton-line" />
+          <div className="skeleton-line short" />
+          <p>正在从边缘数据库调取该标本的完整记录…</p>
+        </div>
+      </section>
+    </main>
+  )
+}
+
+function ProjectNotFound({ id, onBack }: { id: string; onBack: () => void }) {
+  return (
+    <main className="detail-page">
+      <section className="detail-hero">
+        <div className="detail-placeholder">
+          <span className="eyebrow">SPECIMEN NOT FOUND</span>
+          <h1>未找到标本 SPEC—{id}</h1>
+          <p>该标本可能尚未公开、已归档，或编号有误。</p>
+          <button type="button" className="button primary" onClick={onBack}>
+            ← 返回馆藏
+          </button>
+        </div>
+      </section>
+    </main>
+  )
+}
+
+// 详情路由：按 id 拉取完整记录（含 README / Compose），
+// 深链或刷新时先显示骨架而不是闪回首页；查不到则给出明确的未找到页面
+function ProjectRoute({
+  id,
+  listed,
+  items,
+  language,
+  dark,
+  settings,
+  onBack,
+  onLanguage,
+  onTheme,
+  onOpen,
+}: {
+  id: string
+  listed?: Project
+  items: Project[]
+  language: Language
+  dark: boolean
+  settings: SiteSettings
+  onBack: () => void
+  onLanguage: () => void
+  onTheme: () => void
+  onOpen: (project: Project) => void
+}) {
+  const [detail, setDetail] = useState<Project | null>(listed ?? null)
+  const [state, setState] = useState<"loading" | "ready" | "missing">(
+    listed ? "ready" : "loading",
+  )
+
+  // 列表里已有该标本时先用列表数据渲染，再补详情（含 README/Compose）；
+  // 依赖里带上 listed：避免"详情请求失败 + 列表稍后才到"时错误地停在未找到页且不自愈
+  useEffect(() => {
+    let alive = true
+    if (listed) {
+      setDetail(listed)
+      setState("ready")
+    } else {
+      setState("loading")
+    }
+    fetchPublicProjectById(id)
+      .then((data) => {
+        if (!alive) return
+        if (data) {
+          setDetail(data)
+          setState("ready")
+        } else if (!listed) {
+          setState("missing")
+        }
+      })
+      .catch(() => {
+        if (!alive) return
+        if (!listed) setState("missing")
+      })
+    return () => {
+      alive = false
+    }
+  }, [id, listed])
+
+  if (state === "loading") return <DetailLoading settings={settings} onBack={onBack} />
+  if (state === "missing" || !detail) return <ProjectNotFound id={id} onBack={onBack} />
+
+  return (
+    <DetailPage
+      project={detail}
+      items={items}
+      language={language}
+      dark={dark}
+      settings={settings}
+      onBack={onBack}
+      onLanguage={onLanguage}
+      onTheme={onTheme}
+      onOpen={onOpen}
+    />
+  )
+}
+
 export default function App() {
-  const [language, setLanguage] = useState<Language>("en")
-  const [dark, setDark] = useState(false)
+  const [language, setLanguage] = useState<Language>(detectBrowserLanguage)
+  const [dark, setDark] = useState(detectSystemTheme)
   const [route, setRoute] = useState(routeFromHash(window.location.hash))
   const [items, setItems] = useState<Project[]>(projects)
-  const [loading, setLoading] = useState(false)
   const [siteSettings, setSiteSettings] = useState<SiteSettings>(DEFAULT_SITE_SETTINGS)
+  // 站点设置是否已从接口返回（无论成功失败），用于决定何时套用展示偏好
+  const [settingsResolved, setSettingsResolved] = useState(false)
+  // 展示偏好只套用一次，之后不覆盖访客手动切换的语言与主题
+  const preferenceApplied = useRef(false)
 
   // 挂载时从 Cloudflare 边缘 API 异步同步最新的公开项目数据与站点文案
   useEffect(() => {
     let isMounted = true
-    setLoading(true)
     fetchPublicProjects()
       .then((data) => {
         if (isMounted && data && data.length > 0) {
@@ -3366,9 +4185,6 @@ export default function App() {
       .catch((err) => {
         console.warn("Public API fetch note (fallback in use):", err)
       })
-      .finally(() => {
-        if (isMounted) setLoading(false)
-      })
     fetchSiteSettings()
       .then((settings) => {
         if (isMounted) setSiteSettings(settings)
@@ -3376,10 +4192,35 @@ export default function App() {
       .catch(() => {
         // 接口异常时保持内置默认文案
       })
+      .finally(() => {
+        if (isMounted) setSettingsResolved(true)
+      })
     return () => {
       isMounted = false
     }
   }, [])
+
+  // 套用管理端配置的展示偏好（仅一次）：显式指定语言/主题时覆盖初始值
+  useEffect(() => {
+    if (!settingsResolved || preferenceApplied.current) return
+    preferenceApplied.current = true
+    if (siteSettings.defaultLanguage === "zh" || siteSettings.defaultLanguage === "en") {
+      setLanguage(siteSettings.defaultLanguage)
+    }
+    if (siteSettings.defaultTheme === "light" || siteSettings.defaultTheme === "dark") {
+      setDark(siteSettings.defaultTheme === "dark")
+    }
+  }, [settingsResolved, siteSettings.defaultLanguage, siteSettings.defaultTheme])
+
+  // 关闭首页统计时同时摘掉对应导航项，避免留下点不到的入口（顶栏与页脚都读 navItems）
+  const effectiveSettings = useMemo(() => {
+    if (siteSettings.homeStatsVisible !== false) return siteSettings
+    const list = siteSettings.navItems?.length ? siteSettings.navItems : DEFAULT_NAV_ITEMS
+    return {
+      ...siteSettings,
+      navItems: list.filter((item) => item.id !== "catalogue"),
+    }
+  }, [siteSettings])
 
   // 管理端修改 SEO 标题/描述后即时应用到文档（初始值仍来自构建产物）
   useEffect(() => {
@@ -3396,6 +4237,12 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light"
   }, [dark])
+
+  // 语言切换同步到 <html lang>：读屏软件与搜索引擎按此判定页面语言。
+  // 构建产物里的初始 lang 来自 .figma/make/site.json，这里负责运行时跟随切换。
+  useEffect(() => {
+    document.documentElement.lang = language === "zh" ? "zh-CN" : "en"
+  }, [language])
 
   useEffect(() => {
     // 生产环境中，若在公开主站通过 #admin 访问后台，平滑跳转到受 Zero Trust 保护的专属子域名
@@ -3434,6 +4281,17 @@ export default function App() {
 
   useEffect(() => {
     if (route !== "home") return
+    const id = window.location.hash.replace(/^#/, "")
+    if (!SECTION_ANCHORS.includes(id) || id === "cabinet") return
+    // 从详情页页脚章节链接、或直接带 #index 之类的 URL 进入时，等首页渲染完再定位
+    const frame = requestAnimationFrame(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth" })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [route])
+
+  useEffect(() => {
+    if (route !== "home") return
     const observer = new IntersectionObserver(
       (entries) =>
         entries.forEach((entry) => {
@@ -3465,9 +4323,6 @@ export default function App() {
   }
 
   const openProject = (project: Project) => navigate(`project/${project.id}`)
-  const activeProject = route.startsWith("project/")
-    ? items.find((item) => item.id === route.split("/")[1])
-    : undefined
 
   if (route === "admin") {
     return (
@@ -3485,14 +4340,19 @@ export default function App() {
     )
   }
 
-  if (activeProject) {
+  // 详情路由由 ProjectRoute 自行按 id 拉取完整记录：
+  // 深链/刷新时不再因列表尚未返回而渲染首页，同时拿到 README / Compose 文档
+  if (route.startsWith("project/")) {
+    const projectId = route.split("/")[1]
     return (
-      <DetailPage
-        project={activeProject}
+      <ProjectRoute
+        key={projectId}
+        id={projectId}
+        listed={items.find((item) => item.id === projectId)}
         items={items}
         language={language}
         dark={dark}
-        settings={siteSettings}
+        settings={effectiveSettings}
         onBack={() => navigate("home")}
         onLanguage={() => setLanguage(language === "en" ? "zh" : "en")}
         onTheme={() => setDark(!dark)}
@@ -3508,15 +4368,17 @@ export default function App() {
         setLanguage={setLanguage}
         dark={dark}
         setDark={setDark}
-        settings={siteSettings}
+        settings={effectiveSettings}
       />
-      <SpiralGallery language={language} items={items} settings={siteSettings} onOpen={openProject} />
-      <CatalogueStats language={language} items={items} settings={siteSettings} />
-      <Curator language={language} settings={siteSettings} />
+      <SpiralGallery language={language} items={items} settings={effectiveSettings} onOpen={openProject} />
+      {siteSettings.homeStatsVisible !== false && (
+        <CatalogueStats language={language} items={items} settings={effectiveSettings} />
+      )}
+      <Curator language={language} settings={effectiveSettings} />
       <SpecimenIndex items={items} onOpen={openProject} />
       <SiteFooter
         items={items}
-        settings={siteSettings}
+        settings={effectiveSettings}
         language={language}
         onOpen={openProject}
       />

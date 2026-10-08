@@ -30,7 +30,14 @@ NestSpace/
 │   ├── 0001_create_projects.sql  # 表结构定义（字段脱敏、草稿状态、版本时间戳）
 │   ├── 0002_seed_initial_data.sql# 初始 4 个标本数据（Aperture, Lumen, Fjord, Meridian）
 │   ├── 0003_create_site_settings.sql # 站点文案与备案号配置表（管理端可编辑）
-│   └── 0004_add_nav_and_logo_settings.sql # 顶部导航顺序、Logo 与统计指标扩展表结构
+│   ├── 0004_add_nav_and_logo_settings.sql # 顶部导航顺序、Logo 与统计指标扩展表结构
+│   ├── 0005_add_footer_settings.sql # 公开站点底部栏中英文案（管理端「底部栏」视图）
+│   ├── 0006_add_display_preferences.sql # 展示偏好：默认语言/主题、首页统计与两个切换开关
+│   ├── 0007_add_project_docs.sql # 标本文档：README 中英文与 dev/prod Compose 编排内容
+│   └── 0008_add_demo_fields.sql  # 项目演示入口：演示地址与演示开关
+│
+├── scripts/                      # 运维脚本
+│   └── d1-migrate.sh             # 一键按序执行全部 D1 迁移（local / remote，可反复执行）
 │
 └── ARCHITECTURE_PLAN.md          # 详细架构与审查设计文档
 ```
@@ -40,7 +47,10 @@ NestSpace/
 ## 二、 部署到 Cloudflare Workers（步骤指引）
 
 本项目为 **Workers 形态**：单一 Worker（`worker/index.ts`，Hono）+ 静态资产（`dist/`）+ D1。
-`/api/*` 由配置中的 `run_worker_first` 优先进入 Worker，其余路径走静态资产（未知路径回退 index.html）。
+`/api/*`、`/` 与 `/index.html` 由配置中的 `run_worker_first` 优先进入 Worker，其余路径走静态资产
+（未知路径回退 index.html）。`[assets]` 里的 `binding = "ASSETS"` **不可删除**——Worker 依赖它取回首页
+HTML 做 SEO 注入（见第六节）；删掉会导致首页 503。注意：只有 `/` 会被改写头部，深链（如 `/some/path`
+由 SPA 兜底）仍返回构建产物原文。
 
 ### 1. 创建 Cloudflare D1 数据库（免费）
 在终端运行：
@@ -63,14 +73,22 @@ database_id = "xxxx-xxxx-xxxx-xxxx"
 ### 2. 执行数据库初始化迁移
 将建表语句与初始数据推送到远程 D1 数据库：
 ```bash
-# 1. 创建表结构
-npx wrangler d1 execute nestspace-prod --remote --file=../migrations/0001_create_projects.sql
-
-# 2. 注入 4 个初始项目标本 + 创建站点文案配置表与扩展表结构
-npx wrangler d1 execute nestspace-prod --remote --file=../migrations/0002_seed_initial_data.sql
-npx wrangler d1 execute nestspace-prod --remote --file=../migrations/0003_create_site_settings.sql
-npx wrangler d1 execute nestspace-prod --remote --file=../migrations/0004_add_nav_and_logo_settings.sql
+# 在仓库根目录一次性按序执行 migrations/ 下的全部迁移（生产）
+bash scripts/d1-migrate.sh remote
 ```
+
+脚本会按 `0001 → 0008` 的文件名顺序逐条执行、打印每条的 `✓ 已执行 / · 已应用过，跳过 / ✗ 失败`，
+并在结尾给出汇总；**已经应用过的迁移（重复的 ADD COLUMN、已存在的表）会被识别为跳过而不是报错，
+因此可以反复执行**。只有真正的错误（SQL 语法、约束冲突等）才会以非 0 退出并点名失败文件。
+需要指定库名时：`bash scripts/d1-migrate.sh remote nestspace-prod`。
+
+**顺序要求**：迁移必须先于 Worker 代码生效。新版 Worker 引用了这三批新列，任何一批没先落到生产库就部署代码，都会 500：
+
+| 缺哪批 | 引用的代码位置 | 表现 |
+|---|---|---|
+| `0006` 展示偏好 | `site_settings` 读写白名单 | 「站点设置」保存报 500 |
+| `0007` 标本文档 | 公开详情路由的 SELECT（`readme_zh` 等） | `GET /api/projects/:id` 每条都 500，详情页文档区退化为空 |
+| `0008` 演示入口 | 项目的读路径与写路径 | 管理端保存**任何**项目报 500（写路径引用不存在的列） |
 
 ---
 
@@ -113,6 +131,7 @@ npx wrangler secret put GITHUB_TOKEN
 | Bearer `ADMIN_SECRET_KEY`（常量时间比较） | 代码层 | 一切未持密钥的调用，含 workers.dev / preview 等任意入口 |
 | Access JWT 签名校验（`Cf-Access-Jwt-Assertion` 头或 `CF_Authorization` Cookie） | 代码层 | 伪造身份头——明文头一律不信任，只认通过 RS256 签名验证的 JWT |
 | Zero Trust Access 边缘拦截 | 边缘层 | 让未认证请求根本到不了 Functions |
+| 鉴权失败限流 | 代码层 | 同一来源（按 `CF-Connecting-IP`）连续 10 次鉴权失败后返回 `429` 并带 `Retry-After: 600`，抑制在线口令爆破。计数器存在于 Worker isolate 内存中，属尽力而为的抑制手段，**不能替代强口令**，建议在 Cloudflare 侧叠加 WAF / Rate limiting 规则 |
 
 ### 1. 配置独立管理子域名与 Access 应用（主流金标方案）
 
@@ -157,8 +176,11 @@ npx wrangler secret put GITHUB_TOKEN
 |---|---|---|
 | `ACCESS_TEAM_NAME` | 你的 Zero Trust 团队名 | 即 `<team>.cloudflareaccess.com` 中的 `<team>`，在 Zero Trust 控制台 Settings ➔ Custom Pages 可见 |
 | `ACCESS_AUD_TAG` | 上一步记录的 AUD Tag | |
+| `ACCESS_ALLOWED_EMAILS` | 可选，允许进入管理端的邮箱或 sub（逗号分隔） | 配置后**即使 Access 政策放行了某身份、但其不在名单内也会被拒**；不配置则只依赖 Access 应用自身策略。适合 Access 政策同时覆盖多个应用的场景 |
+| `ALLOWED_ORIGINS` | 可选，公开 API 跨域白名单 | 逗号分隔的完整 origin；不配置则不下发跨域头（同源请求不受影响） |
 
-配置后，后端会验证 Access 签发 JWT 的 RS256 签名及 `iss` / `aud` / `exp` 声明。
+配置后，后端会验证 Access 签发 JWT 的 RS256 签名及 `iss` / `aud` / `exp` 声明，
+并在配置了 `ACCESS_ALLOWED_EMAILS` 时把 JWT 载荷里的 `email` / `sub` 与名单比对。
 **安全红线：`Cf-Access-Authenticated-User-Email` 等明文身份头可在任何未被 Zero Trust
 覆盖的入口被客户端伪造，代码层一律不作为凭据。** 若这两个变量未配置，管理 API 仅接受
 Bearer 密钥——同样是安全的默认状态（fail-closed）。
@@ -198,11 +220,8 @@ cd frontend
 cp .dev.vars.example .dev.vars
 # 编辑 .dev.vars，将 openssl rand -base64 32 的输出填入 ADMIN_SECRET_KEY
 
-# 1. 本地执行本地 D1 迁移测试
-npx wrangler d1 execute nestspace-prod --local --file=../migrations/0001_create_projects.sql
-npx wrangler d1 execute nestspace-prod --local --file=../migrations/0002_seed_initial_data.sql
-npx wrangler d1 execute nestspace-prod --local --file=../migrations/0003_create_site_settings.sql
-npx wrangler d1 execute nestspace-prod --local --file=../migrations/0004_add_nav_and_logo_settings.sql
+# 1. 本地执行全部迁移（在仓库根目录，可与生产用同一条命令）
+bash scripts/d1-migrate.sh local
 
 # 2. 构建静态资产（Worker 的资产目录指向 dist，必须先构建）
 npm run build
@@ -253,13 +272,28 @@ pnpm typecheck
 
 ## 六、 站点文案与备案号管理（管理端）
 
-主标题、副标题、关于文案、GitHub/邮箱、SEO 标题描述与**页脚备案号**存储在 D1 的
-`site_settings` 表中（迁移 `0003`），通过 `#admin` 管理端编辑保存后即时生效，无需重新部署：
+主标题、副标题、关于文案、GitHub/邮箱、SEO 标题描述、**页脚备案号**与**底部栏文案**存储在 D1 的
+`site_settings` 表中（迁移 `0003`，页脚文案字段见迁移 `0005`），通过 `#admin` 管理端编辑保存后即时生效，无需重新部署：
 
 - **内容管理**：中英文主标题 / 副标题 / 关于文案、GitHub 主页、联系邮箱；
 - **站点设置 → 站点信息 / 搜索与分享**：SEO 标题与 Meta 描述（保存后动态应用到页面标题与描述）；
 - **站点设置 → 备案信息 (ICP)**：**默认关闭**。填写备案号并开启开关后，页脚展示
-  备案号并链接至工信部备案系统（默认 `https://beian.miit.gov.cn/`，可自定义）。
+  备案号并链接至工信部备案系统（默认 `https://beian.miit.gov.cn/`，可自定义）；
+- **底部栏**：中英文各一份，随访客语言切换。含品牌区小标与说明段落、三列标题、
+  GitHub / 联系链接文字、Colophon 入口文字与底行版权行；文案支持 `{name}`（Logo 副标题署名）、
+  `{since}`（馆藏起始年份）、`{year}`（当前年份）占位符；其中「章节导航列」的链接顺序、
+  名称与显示状态直接跟随**导航与标头**的配置，改导航即同步改页脚；
+- **站点设置 → 展示偏好**（迁移 `0006`）：默认语言（跟随浏览器 / 中文 / English）、默认主题
+  （跟随系统 / 白日标本室 / 夜间标本室）、是否展示首页 Catalogue 统计区块、是否展示前台深浅色与
+  语言切换按钮。**默认值等于既有行为**：语言与主题跟随访客浏览器与系统，统计与两个切换按钮全部开启；
+  关闭「公开项目统计」时会同步从导航与页脚中移除「馆藏统计」入口，避免留下点不到的链接；
+- **SEO 生效范围**：管理端保存的标题与 Meta 描述会即时改写浏览器内的文档标题，同时由边缘 Worker
+  注入到首页 HTML 的 `<title>` / `description` / `og:*`（**因此不执行 JS 的爬虫与社交平台也能读到**；
+  注入结果按 isolate 缓存 60 秒，保存后最多 1 分钟生效）。页面语言也会同步写入 `<html lang>`。
+  **社交分享图目前未配置**（站点没有 `og:image`）：要添加就把图片放进 `frontend/public/`，
+  并在 `.figma/make/site.json` 声明 `openGraph.image`，重新构建部署后生效；后台不提供修改。
+- **站点设置 → 域名与部署**：**只读信息卡**（当前访问域名、公开站点入口）。主域名、DNS 记录与
+  管理端子域由 Cloudflare 部署配置和代码中的跳转规则决定，后台不提供修改。
 
 数据库字段为空时，公开站自动回退到 `frontend/src/data/defaultSiteSettings.ts` 的内置默认文案，
 因此未做任何配置的部署也始终有完整可读的内容。
@@ -269,7 +303,25 @@ pnpm typecheck
 - **管理端入口**：公开界面（页头/详情页/页脚）不展示任何管理入口按钮，通过直接访问
   `https://你的域名/#admin` 进入（建议收藏）。这只是减少暴露面，真正的安全边界在
   管理 API 层（见第三节三层防线）。
-- **GitHub 同步**：管理端「04 GitHub 同步」按各项目的仓库地址调用 GitHub 公开 API，
+- **GitHub 同步**：管理端「06 GitHub 同步」按各项目的仓库地址调用 GitHub 公开 API，
   把最新 stars / 推送时间 / Release 版本写回 D1。公开仓库无需任何 Token；**私有仓库
-  在匿名 API 下不可见（会如实显示 404）**，如需同步请将项目仓库设为公开，或后续扩展
-  Token 支持。
+  在匿名 API 下不可见（会如实显示 404）**。如需同步私有仓库或提高速率限额，可配置
+  `GITHUB_TOKEN`（`npx wrangler secret put GITHUB_TOKEN`），或在管理端「GitHub 同步」里临时填入
+  Token（只走请求头，不进 URL）。
+  同步为**串行**执行（刻意不并发，避免对匿名 API 造成突发压力）；一旦某个仓库返回 `403`
+  （频率超限）**立即停止后续请求**，其余标本标记为"已跳过"而不是逐个白白重试；仓库列表接口
+  最多取 3 页（300 个），超出时管理端会明确提示"仅列出最近更新的 N 个"；所有列表类查询统一
+  带 `LIMIT 500` 安全阀（当前馆藏规模远低于该值）。
+- **标本文档抓取**（迁移 `0007`）：同步界面勾选「同时抓取 README / Compose 文档」后，按仓库
+  `README.md`（辅以 `README.en.md` / `README.zh*.md` / `README_en-US.md` 等具名文件）与
+  `deploy/dev|prod/docker-compose.yml`（辅以根目录 `docker-compose.yml`）抓取正文：
+  - 通用 `README.md` 按**正文是否含中文**决定写入 `readme_zh` 还是 `readme_en`，避免英文说明串进中文字段；
+  - 单份文档超过 100000 字符会被截断，避免单行过大触及 D1 单行上限；
+  - 与描述同步同一原则：**只填充空白字段，绝不覆盖后台手工整理过的文档**；一个文件都没抓到时如实提示
+    （仓库无对应文件或已达 GitHub 匿名 API 频率限制），不会假称"已存在"；
+  - 导入新标本时同样抓取一次；文档也可在「项目管理 → 编辑」的四个文档编辑框中手工维护。
+- **详情页文档展示**：仅 `GET /api/projects/:id` 返回文档内容（列表接口不携带，避免体积膨胀）。前台
+  README tab 用内置极简 Markdown 渲染器（`frontend/src/utils/markdown.tsx`）把 Markdown 转成 React
+  元素——**不解析也不透传原始 HTML**，链接只放行 http/https/mailto；当前语言缺 README 时回退另一种语言
+  并标注「原文」；DEPLOYMENT tab 展示 dev/prod Compose 原文并可复制。详情页由 `ProjectRoute` 按 id 自行
+  拉取，深链或刷新时先显示骨架、查不到则给出「未找到标本」页，不再闪回首页。
