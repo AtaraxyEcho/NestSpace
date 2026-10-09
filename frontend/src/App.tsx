@@ -4682,7 +4682,7 @@ function AdminPage({
               <label>
                 指标
                 <textarea
-                  className={`doc-editor${metricsIssues.length ? " is-invalid" : ""}`}
+                  className={metricsIssues.length ? "is-invalid" : undefined}
                   value={metricsText}
                   onChange={(event) => setMetricsText(event.target.value)}
                   aria-invalid={metricsIssues.length > 0}
@@ -4704,7 +4704,7 @@ function AdminPage({
               <label>
                 时间线
                 <textarea
-                  className={`doc-editor${timelineIssues.length ? " is-invalid" : ""}`}
+                  className={timelineIssues.length ? "is-invalid" : undefined}
                   value={timelineText}
                   onChange={(event) => setTimelineText(event.target.value)}
                   aria-invalid={timelineIssues.length > 0}

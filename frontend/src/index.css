@@ -670,7 +670,8 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .row-issues { margin: 8px 0 0; padding: 0 0 0 16px; list-style: none; }
 .row-issues li { position: relative; font: 11px/1.7 var(--font-mono); color: #8f3f2c; }
 .row-issues li::before { content: "—"; position: absolute; left: -14px; color: #b3543f; }
-.doc-editor.is-invalid { border-color: #b3543f; }
+/* 抽屉里任何带 is-invalid 的输入区都描红（相册、指标、时间线共用；不改变它们各自的字号与高度） */
+.editor-fields textarea.is-invalid { border-color: #b3543f; }
 .preview-dir-mode { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; }
 .preview-dir-mode input { width: 15px; height: 15px; accent-color: var(--accent); }
 /* 目录导入的就近结果：12px 等宽小字，贴在按钮组下面（顶部通知条被冲掉后这里还在） */
