@@ -184,19 +184,19 @@ assert.deepStrictEqual(
 globalThis.fetch = realFetch
 
 // ============================================
-// 第二组：Access JWT 身份白名单（未配置 = 放行，配置 = 只认名单）
+// 第二组：Access JWT 身份白名单（**未配置 = 拒绝**，配置 = 只认名单）
 // ============================================
 const { isAccessIdentityAllowed } = await loadRoute()
 
 assert.equal(
   isAccessIdentityAllowed({ email: 'anyone@example.com' }, undefined),
-  true,
-  'allowlist case 1: 未配置白名单时放行（依赖 Access 应用策略）',
+  false,
+  'allowlist case 1: 未配置白名单 → 拒绝（fail-closed；否则第二层对任何被 Access 放行的身份都失效）',
 )
 assert.equal(
   isAccessIdentityAllowed({ email: 'anyone@example.com' }, '   '),
-  true,
-  'allowlist case 2: 空白名单等同未配置',
+  false,
+  'allowlist case 2: 空白名单等同未配置 → 拒绝',
 )
 assert.equal(
   isAccessIdentityAllowed({ email: 'Curator@Example.com' }, 'curator@example.com'),

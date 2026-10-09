@@ -225,6 +225,8 @@ const IMG_UPSTREAM_TIMEOUT_MS = 15_000
 // 源图 URL 用的是分支（内容可能变），所以给有界 TTL 而不是 immutable。
 // 不写 stale-while-revalidate：Cache API 的 put/match 不支持它，写了也是空承诺。
 const IMG_CACHE_CONTROL = 'public, max-age=604800'
+/** 允许经代理**同源直出**的图片类型（栅格）。SVG 等矢量是活动内容，不能同源返回 */
+const RASTER_IMAGE_TYPE_RE = /^image\/(png|jpe?g|webp|gif|avif|bmp)$/i
 
 // 只代理真实的图源主机。**绝不要把转换服务自身（wsrv.nl）列进来**：
 // 那等于开放 `/api/img?src=https://wsrv.nl/?url=<任意地址>`，白名单会被绕开，
@@ -298,8 +300,10 @@ app.get('/img', async (c) => {
       signal: AbortSignal.timeout(IMG_UPSTREAM_TIMEOUT_MS),
     })
     const contentType = res.headers.get('Content-Type') ?? ''
-    if (!res.ok || !contentType.startsWith('image/')) {
-      // 转换服务抖动或限流：兜底回原图（此处目标已通过白名单校验，不是开放重定向）
+    // 只放行**栅格**类型：上游若回 image/svg+xml 而我们同源直出，那就是同源 XSS。
+    // 非栅格、或上游非 200，一律兜底回原图（跨源加载所以安全；目标已过白名单，不是开放重定向）。
+    const raster = RASTER_IMAGE_TYPE_RE.test(contentType.split(';')[0].trim())
+    if (!res.ok || !raster) {
       return c.redirect(target.toString(), 302)
     }
     const response = new Response(res.body, {
@@ -449,12 +453,13 @@ const AUTH_FAILURE_WINDOW_MS = 10 * 60 * 1000
 const AUTH_FAILURE_STORE_MAX = 500
 const authFailures = new Map<string, { count: number; firstAt: number }>()
 
+/**
+ * 鉴权失败限流的键。只用 CF 边缘写入的 `CF-Connecting-IP`：
+ * `X-Forwarded-For` 是客户端可伪造的，拿它当键 = 允许攻击者轮换键值绕过锁定、
+ * 或把失败计数怼到别人头上。取不到就统一落一个桶（宁可少限流，也不给人可控的键）。
+ */
 function clientKey(c: any): string {
-  return (
-    c.req.header('CF-Connecting-IP') ||
-    String(c.req.header('X-Forwarded-For') ?? '').split(',')[0]?.trim() ||
-    'unknown'
-  )
+  return c.req.header('CF-Connecting-IP') || 'unknown'
 }
 
 function isLockedOut(key: string, now: number): boolean {
@@ -503,7 +508,9 @@ export function isAccessIdentityAllowed(
     .split(',')
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean)
-  if (allowList.length === 0) return true
+  // 名单未配置时**拒绝**（fail-closed）：这条防线一旦"没配就放行"，凡被 Access 应用放行的身份
+  // 都能进管理端——多应用共用一份 Access 政策时，第二层就等于不存在。想用 JWT 免口令进入就必须显式填名单。
+  if (allowList.length === 0) return false
   const email = String(identity?.email ?? '').trim().toLowerCase()
   const sub = String(identity?.sub ?? '').trim().toLowerCase()
   return Boolean((email && allowList.includes(email)) || (sub && allowList.includes(sub)))
@@ -551,9 +558,18 @@ adminApp.use('*', async (c, next) => {
       if (verdict.valid) {
         const identity = readJwtIdentity(jwt)
         if (!isAccessIdentityAllowed(identity, c.env.ACCESS_ALLOWED_EMAILS)) {
+          // 名单没配时给出可操作的提示：这是"配置缺了"，不是"这个人不在名单里"
+          const allowListConfigured = String(c.env.ACCESS_ALLOWED_EMAILS ?? '').trim() !== ''
           console.warn('Admin auth rejected: identity not in allowlist:', identity?.email)
           noteAuthFailure(key, now)
-          return c.json({ error: '403 Forbidden: 该身份不在管理端允许名单内' }, 403)
+          return c.json(
+            {
+              error: allowListConfigured
+                ? '403 Forbidden: 该身份不在管理端允许名单内'
+                : '403 Forbidden: 未配置 ACCESS_ALLOWED_EMAILS（该白名单现在是必填项）；也可改用 Bearer 口令进入',
+            },
+            403,
+          )
         }
         authFailures.delete(key)
         await next()
@@ -604,6 +620,10 @@ adminApp.post('/projects', async (c) => {
     }
     if (!body.id || !body.name || !body.status) {
       return c.json({ error: 'Missing required fields: id, name, status' }, 400)
+    }
+    // id 是主键、也是公开详情的路径参数：只判"存在"不够，限定字符集与长度（与仓库名同等对待）
+    if (!/^[A-Za-z0-9._-]{1,32}$/.test(String(body.id))) {
+      return c.json({ error: 'id 只允许字母/数字/点/下划线/连字符，长度 1–32' }, 400)
     }
     if (!ALLOWED_STATUSES.includes(body.status)) {
       return c.json(
