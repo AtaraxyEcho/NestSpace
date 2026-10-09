@@ -6,5 +6,6 @@ ALTER TABLE projects ADD COLUMN readme_zh TEXT NOT NULL DEFAULT '';
 ALTER TABLE projects ADD COLUMN readme_en TEXT NOT NULL DEFAULT '';
 ALTER TABLE projects ADD COLUMN compose_dev TEXT NOT NULL DEFAULT '';
 ALTER TABLE projects ADD COLUMN compose_prod TEXT NOT NULL DEFAULT '';
--- 最近一次抓取文档的时间（仅供管理端展示，不参与前台渲染）
+-- 最近一次抓取文档的时间。**公开详情接口会下发、前台 Deployment 页会显示**（" · SYNCED <日期>"），
+-- 属有意公开的运营时间戳；不是管理端专享字段（早先注释写的"不参与前台渲染"与实现不符）。
 ALTER TABLE projects ADD COLUMN docs_synced_at TEXT NOT NULL DEFAULT '';

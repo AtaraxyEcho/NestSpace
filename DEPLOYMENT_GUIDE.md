@@ -219,11 +219,11 @@ npx wrangler secret put GITHUB_TOKEN
 |---|---|---|
 | `ACCESS_TEAM_NAME` | 你的 Zero Trust 团队名 | 即 `<team>.cloudflareaccess.com` 中的 `<team>`，在 Zero Trust 控制台 Settings ➔ Custom Pages 可见 |
 | `ACCESS_AUD_TAG` | 上一步记录的 AUD Tag | |
-| `ACCESS_ALLOWED_EMAILS` | 可选，允许进入管理端的邮箱或 sub（逗号分隔） | 配置后**即使 Access 政策放行了某身份、但其不在名单内也会被拒**；不配置则只依赖 Access 应用自身策略。适合 Access 政策同时覆盖多个应用的场景 |
+| `ACCESS_ALLOWED_EMAILS` | **启用 Access JWT 防线时必填**，允许进入管理端的邮箱或 sub（逗号分隔） | 现在是 **fail-closed**：不填则该防线**一律拒绝**（只报"未配置 ACCESS_ALLOWED_EMAILS"）。以前"不填就放行"，等于凡被 Access 应用放行的身份都能进管理端——多应用共用一份 Access 政策时第二层形同虚设。不想配名单就继续用 Bearer 口令进入 |
 | `ALLOWED_ORIGINS` | 可选，公开 API 跨域白名单 | 逗号分隔的完整 origin；不配置则不下发跨域头（同源请求不受影响） |
 
 配置后，后端会验证 Access 签发 JWT 的 RS256 签名及 `iss` / `aud` / `exp` 声明，
-并在配置了 `ACCESS_ALLOWED_EMAILS` 时把 JWT 载荷里的 `email` / `sub` 与名单比对。
+并把 JWT 载荷里的 `email` / `sub` 与 `ACCESS_ALLOWED_EMAILS` 名单比对（**名单为空 = 拒绝**，fail-closed）。
 **安全红线：`Cf-Access-Authenticated-User-Email` 等明文身份头可在任何未被 Zero Trust
 覆盖的入口被客户端伪造，代码层一律不作为凭据。** 若这两个变量未配置，管理 API 仅接受
 Bearer 密钥——同样是安全的默认状态（fail-closed）。

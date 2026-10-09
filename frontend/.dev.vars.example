@@ -21,7 +21,8 @@ ADMIN_SECRET_KEY=
 # Zero Trust Access 应用的 AUD Tag（配置后启用本地 JWT 签名校验）
 # ACCESS_AUD_TAG=
 
-# 可选：允许经 Access JWT 进入管理端的身份白名单（逗号分隔的邮箱或 sub）
+# 启用 Access JWT 防线时**必填**：允许经 JWT 进入管理端的身份白名单（逗号分隔的邮箱或 sub）。
+# fail-closed：不填则该防线一律拒绝（不影响 Bearer 口令进入）。
 # ACCESS_ALLOWED_EMAILS=
 
 # 可选：公开 API 跨域白名单（逗号分隔完整 origin，留空 = 仅同源）
