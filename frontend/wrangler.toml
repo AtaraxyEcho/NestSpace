@@ -17,3 +17,10 @@ run_worker_first = ["/api/*", "/", "/index.html"]
 binding = "DB"
 database_name = "nestspace-prod"
 database_id = "5e61e41e-0554-4ec4-8516-ee5f66a5f11d"
+
+# 匿名使用度量（POST /api/usage 写入；事件白名单见 worker 的 USAGE_EVENTS）
+# 用 Analytics Engine 而不是新开 D1 表：免费额度内、无需迁移、不存个人数据。
+# 查询：npx wrangler analytics query nestspace_usage --since 7d
+[[analytics_engine_datasets]]
+binding = "METRICS"
+dataset = "nestspace_usage"

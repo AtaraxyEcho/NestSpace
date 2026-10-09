@@ -27,5 +27,6 @@ ADMIN_SECRET_KEY=
 # 可选：公开 API 跨域白名单（逗号分隔完整 origin，留空 = 仅同源）
 # ALLOWED_ORIGINS=
 
-# 可选：GitHub Token（提高匿名 API 的速率限额，也让私有仓库可同步）
+# 建议配置：GitHub Token。提高 API 速率限额（匿名共享出口只有 60 次/小时），也让私有仓库可同步。
+# 「预览图按目录批量导入」没有它时只能用匿名配额，很容易 429；管理端同步栏里临时填的 token 也可以顶替。
 # GITHUB_TOKEN=

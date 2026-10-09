@@ -127,8 +127,8 @@ CREATE TABLE IF NOT EXISTS projects (
     version TEXT NOT NULL,                     -- "v2.4.1"
     updated TEXT NOT NULL,                     -- "2024.10.18"
     repository TEXT,                           -- "github.com/nestspace/aperture"
-    challenge TEXT,
-    solution TEXT,
+    challenge TEXT,                            -- 最初是单列纯文本；0011 起以 challenge_json 为准，本列只读兜底
+    solution TEXT,                             -- 同上（solution_json）
     
     -- 复杂嵌套对象使用标准 JSON 存储
     description_json TEXT NOT NULL,            -- {"en": "...", "zh": "..."}

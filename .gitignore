@@ -69,3 +69,5 @@ desktop.ini
 
 
 PASSWORD.*
+# 设计链路产物（product-design skill 的上下文与面板，非站点源码）
+spark-output/
