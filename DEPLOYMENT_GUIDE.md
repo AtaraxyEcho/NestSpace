@@ -219,11 +219,12 @@ npx wrangler secret put GITHUB_TOKEN
 |---|---|---|
 | `ACCESS_TEAM_NAME` | 你的 Zero Trust 团队名 | 即 `<team>.cloudflareaccess.com` 中的 `<team>`，在 Zero Trust 控制台 Settings ➔ Custom Pages 可见 |
 | `ACCESS_AUD_TAG` | 上一步记录的 AUD Tag | |
-| `ACCESS_ALLOWED_EMAILS` | **启用 Access JWT 防线时必填**，允许进入管理端的邮箱或 sub（逗号分隔） | 现在是 **fail-closed**：不填则该防线**一律拒绝**（只报"未配置 ACCESS_ALLOWED_EMAILS"）。以前"不填就放行"，等于凡被 Access 应用放行的身份都能进管理端——多应用共用一份 Access 政策时第二层形同虚设。不想配名单就继续用 Bearer 口令进入 |
+| `ACCESS_ALLOWED_EMAILS` | 可选：允许进入管理端的邮箱或 sub（逗号分隔） | **未配置 = 放行**——它是可选的"收紧"，不是主闸门（主闸门是 Access 应用策略，且 JWT 的 RS256 签名 + `aud` 已保证身份来自本应用，伪造不了）。**只有两种情况才需要填**：① 该 Access 应用比管理端更宽（一份政策盖多个应用 ⇒ 同一 `aud` 下还有非管理员）；② 担心日后有人无意放宽策略 |
 | `ALLOWED_ORIGINS` | 可选，公开 API 跨域白名单 | 逗号分隔的完整 origin；不配置则不下发跨域头（同源请求不受影响） |
 
 配置后，后端会验证 Access 签发 JWT 的 RS256 签名及 `iss` / `aud` / `exp` 声明，
-并把 JWT 载荷里的 `email` / `sub` 与 `ACCESS_ALLOWED_EMAILS` 名单比对（**名单为空 = 拒绝**，fail-closed）。
+并在配置了 `ACCESS_ALLOWED_EMAILS` 时把 JWT 载荷里的 `email` / `sub` 与该名单比对（未配置则不比对，
+因为此时"谁能拿到本应用的 JWT"已经由 Access 策略决定）。
 **安全红线：`Cf-Access-Authenticated-User-Email` 等明文身份头可在任何未被 Zero Trust
 覆盖的入口被客户端伪造，代码层一律不作为凭据。** 若这两个变量未配置，管理 API 仅接受
 Bearer 密钥——同样是安全的默认状态（fail-closed）。
@@ -673,7 +674,9 @@ bash scripts/usage-probe.sh
   头发与背景糊成一片、头像看着是破的。**换标或改名时不要退回按底色命名的老习惯。**
   派生图**从四边泛洪抠背景**而不是全局阈值——浅色版的头发/皮肤本身就接近底色，全局阈值会在人脸上打出洞。
   整标不进标头的原因：图框只有 40px 高，里面的字会被压到读不出，还会和站点自己的 `NESTSPACE` 文字重复。
-  浏览器图标**自带不透明底**（标签栏底色不定，透明底在浅色/深色标签栏里总有一边看不见）。
+  浏览器图标：`favicon.ico` **透明**，用深墨那版素材并**居中裁成正方形**再铺满（素材是竖构图，
+  直接按高度贴合进方形图框会显得小）；代价是深色标签栏上偏暗。`apple-touch-icon.png` 反过来
+  **自带不透明底**——iOS 把透明区域按黑色渲染，不留底会变黑块。
   - 渲染收在一个组件里：`LogoContent`（内容）+ `LogoWordmark`（首页的 `<a>` 外壳）；
     详情页返回入口是 `<button>`，所以那里用 `LogoContent` 而不是把 `<a>` 套进 `<button>`（非法 HTML）。
   - 管理端「导航与标头」的 Logo 地址**留空 = 用内置深浅两版**，填了 = 两个主题共用它（这就是替换入口）。
