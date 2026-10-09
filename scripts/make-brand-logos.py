@@ -149,15 +149,15 @@ for src_theme, dest, _bg in VARIANTS:
     )
 
 # ---- 浏览器图标 -------------------------------------------------------------
-# favicon 做成**透明**：带不透明底会显出一个方块，而且主体在方形图框里显得小。
-# 用深墨那版（logo-mark-on-light.png）——浅色标签栏上清楚，深色标签栏上仍可辨；
-# 浅墨那版在浅色标签栏上几乎看不见，不适合当唯一图标。
+# favicon **带回底**，但底色做成**圆盘**而不是方块：素材本身就是圆形徽章，方形底在标签栏里
+# 会显出一个突兀的方块（被明确否过），圆盘贴合同形状，浅色/深色标签栏上都能看清。
+# 用深墨那版素材（logo-mark-on-light.png）——浅墨那版在浅色标签栏上几乎看不见。
 # 素材是竖构图（圆盘上下还有装饰尖），只按高度贴合进正方形会显得小，
-# 所以**居中取正方形**（保留圆盘、裁掉上下尖）再铺满，主体才真正占满图标。
-# apple-touch-icon 反过来必须**不透明**：iOS 把透明区域按黑色渲染，自带底才好看。
+# 所以**居中取正方形**（保留圆盘、裁掉上下尖）再尽量铺满，主体才真正占满图标。
+# apple-touch-icon 同样**不透明**（iOS 把透明区域按黑色渲染），满铺方形交给系统加圆角遮罩。
 ICON_ART = "logo-mark-on-light.png"
-ICON_INSET = 0.98
-ICON_TOUCH_BG = (232, 224, 203)   # 与站点浅底一致
+ICON_GROUND = (232, 224, 203)   # 与站点浅底一致
+ICON_ART_INSET = 0.94           # 圆盘底上主体占画布的比例（留一圈底边）
 
 
 def _icon_art() -> Image.Image:
@@ -169,8 +169,10 @@ def _icon_art() -> Image.Image:
 
 
 def build_icon(size: int) -> Image.Image:
+    """带底 favicon：圆盘底 + 居中放大的徽章"""
     canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    inner = max(1, round(size * ICON_INSET))
+    ImageDraw.Draw(canvas).ellipse((0, 0, size - 1, size - 1), fill=ICON_GROUND + (255,))
+    inner = max(1, round(size * ICON_ART_INSET))
     art = _icon_art().resize((inner, inner), Image.LANCZOS)
     off = (size - inner) // 2
     canvas.paste(art, (off, off), art)
@@ -179,7 +181,7 @@ def build_icon(size: int) -> Image.Image:
 
 build_icon(48).save(OUT / "favicon.ico", sizes=[(16, 16), (32, 32), (48, 48)])
 _touch_art = _icon_art().resize((180, 180), Image.LANCZOS)
-_touch = Image.new("RGB", (180, 180), ICON_TOUCH_BG)
+_touch = Image.new("RGB", (180, 180), ICON_GROUND)
 _touch.paste(_touch_art, (0, 0), _touch_art)
 _touch.save(OUT / "apple-touch-icon.png", "PNG", optimize=True)
 
