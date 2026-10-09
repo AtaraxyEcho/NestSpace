@@ -1,6 +1,10 @@
 name = "nestspace"
 main = "worker/index.ts"
 compatibility_date = "2026-10-01"
+# 关掉默认的 workers.dev 端点与 preview URL：不该存在一条绕过自定义域名边缘策略的备用入口。
+# （代码层鉴权仍然生效，这是纵深；关掉后只能从绑定的域名访问。）
+workers_dev = false
+preview_urls = false
 
 # 静态资产配置（vite 构建产出 ./dist）：
 # - binding: 暴露 ASSETS，Worker 才能取到首页 HTML 做 SEO 注入（删掉会导致首页 503！）

@@ -346,13 +346,15 @@ function LogoContent({ settings, dark }: { settings: SiteSettings; dark: boolean
   const logoSubtext = settings.logoSubtext || "ATARAXYECHO"
   const logoType = settings.logoType || "both"
   const logoImageUrl = (settings.logoImageUrl || "").trim()
-  // 管理端填了地址 = 两个主题都用它（替换）；留空才回到内置的深浅两版
-  const builtIn = !logoImageUrl
+  // 管理端填了地址 = 两个主题都用它（替换）；留空**或填了非法协议**才回到内置的两版。
+  // 走 settingsHref 而不是直接用：库里的值可能不是 http(s)，那是把未校验的值塞进 <img src>。
+  const customLogo = settingsHref(logoImageUrl)
+  const builtIn = !customLogo
   const logoSrc = builtIn
     ? dark
       ? BRAND_LOGO.mark.onDark
       : BRAND_LOGO.mark.onLight
-    : logoImageUrl
+    : customLogo
 
   return (
     <>
@@ -995,6 +997,11 @@ function SiteFooter({
   // 外链只渲染通过协议校验的地址；ICP 号非法时退回工信部官网（否则链接不可点）
   const githubHref = settingsHref(settings.githubUrl)
   const icpHref = settingsHref(settings.icpUrl) ?? "https://beian.miit.gov.cn/"
+  // 邮箱只用于拼 mailto:：形态不对就不渲染链接（否则能把 ?body=/参数头塞进 mailto）
+  const contactEmail = (settings.contactEmail || "").trim()
+  const contactMailto = /^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(contactEmail)
+    ? `mailto:${contactEmail}`
+    : null
 
   // COLLECTION 列跟随「导航与标头」的顺序、名称与显示状态，末尾固定 Colophon 入口
   const navList =
@@ -1088,9 +1095,11 @@ function SiteFooter({
               {copy(settings.footerGithubLabelEn, settings.footerGithubLabelZh)}
             </a>
           ) : null}
-          <a href={`mailto:${settings.contactEmail}`}>
-            {copy(settings.footerContactLabelEn, settings.footerContactLabelZh)}
-          </a>
+          {contactMailto ? (
+            <a href={contactMailto}>
+              {copy(settings.footerContactLabelEn, settings.footerContactLabelZh)}
+            </a>
+          ) : null}
         </div>
       </div>
       <div className="footer-bottom" id="colophon">

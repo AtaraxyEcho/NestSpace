@@ -275,7 +275,7 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
       const caption = label || rawUrl
       nodes.push(
         href ? (
-          <a key={key} href={href} target="_blank" rel="noreferrer">
+          <a key={key} href={href} target="_blank" rel="noopener noreferrer">
             {isImage ? `[图片] ${caption}` : caption}
           </a>
         ) : (
