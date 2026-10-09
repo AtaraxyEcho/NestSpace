@@ -34,6 +34,14 @@ react(),
       host: process.env.FIGMA_DEV_SERVER_HOST || '0.0.0.0',
       port: parseInt(process.env.PORT || '8443'),
       strictPort: true,
+      // 裸 `npm run dev` 只有 Vite、没有 Worker，/api 会 404。把 /api 代理到并行起的 wrangler dev，
+      // 这样"前端热更 + 本地 D1"也能在 8443 上跑通（默认目标 8787，可用 WRANGLER_DEV_URL 覆盖）。
+      proxy: {
+        '/api': {
+          target: process.env.WRANGLER_DEV_URL || 'http://127.0.0.1:8787',
+          changeOrigin: true,
+        },
+      },
       watch: {
         ignored: [
           '**/.figma/**',

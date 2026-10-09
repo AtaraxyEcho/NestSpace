@@ -193,6 +193,7 @@ export async function syncGithubRepos(
       headers,
       body: JSON.stringify(payload),
     })
+    clearTokenIfUnauthorized(res.status)
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}))
       return { success: false, error: (errJson as any).error || `同步失败: HTTP ${res.status}` }
@@ -234,6 +235,7 @@ export async function fetchGithubUserRepos(
     const res = await fetch(`/api/admin/github-repos?${params.toString()}`, {
       headers,
     })
+    clearTokenIfUnauthorized(res.status)
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}))
       return { success: false, error: (errJson as any).error || `扫描失败: HTTP ${res.status}` }
@@ -281,6 +283,7 @@ export async function fetchPreviewImagesFromDir(
       headers,
       body: JSON.stringify({ dir }),
     })
+    clearTokenIfUnauthorized(res.status)
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}))
       return { success: false, error: (errJson as any).error || `读取失败: HTTP ${res.status}` }
@@ -309,6 +312,7 @@ export async function importGithubRepo(
       headers,
       body: JSON.stringify({ repoFullName, token }),
     })
+    clearTokenIfUnauthorized(res.status)
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}))
       return { success: false, error: (errJson as any).error || `导入失败: HTTP ${res.status}` }

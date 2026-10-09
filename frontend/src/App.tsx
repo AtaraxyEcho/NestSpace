@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { Language, Project, ProjectStatus } from "./types/project"
-import { fallbackProjects as projects } from "./data/fallbackProjects"
 import { DEFAULT_SITE_SETTINGS, DEFAULT_NAV_ITEMS } from "./data/defaultSiteSettings"
 import { fetchPublicProjects, fetchSiteSettings, fetchPublicProjectById } from "./api/client"
 import {
@@ -307,16 +306,13 @@ export function isAdminHost(): boolean {
 
 function routeFromHash(hash: string) {
   if (isAdminHost()) return "admin"
+  // 这里只做**纯解析**、不做跳转：本函数会在 useState 初始化（render 期间）被调用，
+  // 在其中改 location 属于渲染期副作用。生产公开站点上的 #admin 跳到 admin 子域由路由 effect 负责；
+  // 这里仍返回 home，免得登录页在公开域名上闪一下。
   const clean = hash.replace(/^#/, "")
-  // 若在生产公开站点直接访问 #admin，同步且立即跳转至 Zero Trust 保护的 admin 子域名
-  if (
-    clean === "admin" &&
-    typeof window !== "undefined" &&
-    !["localhost", "127.0.0.1"].includes(window.location.hostname)
-  ) {
-    window.location.replace("https://admin.nestspace.online")
-    return "home"
-  }
+  const isLocalHost =
+    typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname)
+  if (clean === "admin" && !isAdminHost() && !isLocalHost) return "home"
   if (!clean || SECTION_ANCHORS.includes(clean)) return "home"
   // 只有 admin 与 project/<id> 是真路由；其余（比如导航里一个手工写进库的未知锚点）
   // 必须留在首页分支——否则首页虽然渲染，但进场动画与深链定位两个 effect 都因
@@ -965,10 +961,11 @@ function SpecimenIndex({
 
 // 页脚文案占位符：{name} 取 Logo 副标题署名，{since} 取馆藏起始年份，{year} 取当前年份
 function fillFooterTemplate(text: string, vars: { name: string; since: string; year: number }) {
+  // 用替换函数而不是替换串：站名里出现 $& / $' / $1 时，替换串会把它当成"引用匹配到的内容"改写坏
   return text
-    .replace(/\{name\}/g, vars.name)
-    .replace(/\{since\}/g, vars.since)
-    .replace(/\{year\}/g, String(vars.year))
+    .replace(/\{name\}/g, () => vars.name)
+    .replace(/\{since\}/g, () => vars.since)
+    .replace(/\{year\}/g, () => String(vars.year))
 }
 
 function SiteFooter({
@@ -1149,6 +1146,30 @@ function DetailPage({
   const [plateRatio, setPlateRatio] = useState<number | null>(null)
   const [detailTab, setDetailTab] =
     useState<"overview" | "readme" | "deployment">("overview")
+
+  // 投影缺字段时不让整页崩（这些列历史上曾落成 null）：一律退化成空数组
+  const features = project.features ?? []
+  const metrics = project.metrics ?? []
+  const timeline = project.timeline ?? []
+
+  // 复制反馈：成功/失败都给按钮一个 1.8s 的状态，否则点了没有任何反应（剪贴板不可用时也一样）
+  const [copied, setCopied] = useState<{ key: string; ok: boolean } | null>(null)
+  const copyToClipboard = (key: string, text: string) => {
+    const report = (ok: boolean) => {
+      setCopied({ key, ok })
+      window.setTimeout(
+        () => setCopied((prev) => (prev && prev.key === key ? null : prev)),
+        1800,
+      )
+    }
+    if (!navigator.clipboard?.writeText) {
+      report(false)
+      return
+    }
+    navigator.clipboard.writeText(text).then(() => report(true), () => report(false))
+  }
+  const copyLabel = (key: string) =>
+    copied && copied.key === key ? (copied.ok ? "COPIED" : "COPY FAILED") : "COPY"
 
   // README：优先当前语言，缺失时回退另一种语言并给出提示
   const readmeZh = (project.readmeZh ?? "").trim()
@@ -1410,12 +1431,12 @@ function DetailPage({
               </h2>
             </div>
             <span className="as-of">
-              {String(project.features.length).padStart(2, "0")} TRAITS
+              {String(features.length).padStart(2, "0")} TRAITS
             </span>
           </div>
-          {project.features.length > 0 ? (
+          {features.length > 0 ? (
             <div className="capability-grid">
-              {project.features.map((feature, index) => (
+              {features.map((feature, index) => (
                 <article key={feature}>
                   <span>0{index + 1}</span>
                   <h3>{feature}</h3>
@@ -1425,9 +1446,9 @@ function DetailPage({
           ) : (
             <p className="section-empty">暂无特征标签</p>
           )}
-          {project.metrics.length > 0 ? (
+          {metrics.length > 0 ? (
             <div className="metric-strip">
-              {project.metrics.map((metric) => (
+              {metrics.map((metric) => (
                 <div key={metric.label}>
                   <span>{metric.label}</span>
                   <strong>{metric.value}</strong>
@@ -1444,9 +1465,9 @@ function DetailPage({
             <span className="eyebrow">EVOLUTION / 04</span>
             <span>A LIVING SPECIMEN</span>
           </div>
-          {project.timeline.length > 0 ? (
+          {timeline.length > 0 ? (
             <div className="evolution-list">
-              {project.timeline.map((event, index) => (
+              {timeline.map((event, index) => (
                 <article key={`${event.date}-${event.title}-${index}`}>
                   <span className="event-index">0{index + 1}</span>
                   <time>{event.date}</time>
@@ -1579,9 +1600,9 @@ function DetailPage({
                       <span>{entry.path}</span>
                       <button
                         type="button"
-                        onClick={() => navigator.clipboard?.writeText(entry.content)}
+                        onClick={() => copyToClipboard(entry.id, entry.content)}
                       >
-                        COPY
+                        {copyLabel(entry.id)}
                       </button>
                     </div>
                     <pre>
@@ -1598,7 +1619,8 @@ function DetailPage({
                 <button
                   type="button"
                   onClick={() =>
-                    navigator.clipboard?.writeText(
+                    copyToClipboard(
+                      "env-vars",
                       `PUBLIC_REPOSITORY=${project.repository}${
                         demoUrl
                           ? `\nPUBLIC_DEMO_URL=${demoUrl}`
@@ -1607,7 +1629,7 @@ function DetailPage({
                     )
                   }
                 >
-                  COPY
+                  {copyLabel("env-vars")}
                 </button>
               </div>
               <pre>
@@ -2181,6 +2203,8 @@ function AdminPage({
   const [replaceGallery, setReplaceGallery] = useState(false)
   // 新建项目的空白模板快照：作为"未保存改动"的比对基线（列表里还没有这一行）
   const [newDraftBase, setNewDraftBase] = useState<Project | null>(null)
+  // 保存/删除等在途操作的互斥锁：按钮禁用 + 处理函数入口重入判断，避免双击发两次写请求
+  const [savingProject, setSavingProject] = useState(false)
   // 关闭抽屉时如果有未保存改动，这里存改动列数（>0 表示确认条展开）
   const [confirmClose, setConfirmClose] = useState(0)
   // 后台只有一条通知位（.admin-notice）。三种状态各有归宿：
@@ -2539,7 +2563,7 @@ function AdminPage({
 
   const saveProject = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!editing) return
+    if (!editing || savingProject) return
     // 指标/时间线有坏行时拒绝保存：这些行解析不进结构化字段，静默丢弃再报"没改动"是假状态
     if (metricsIssues.length || timelineIssues.length) {
       setNoticeError("指标或时间线有格式不正确的行（已在对应输入框下逐行标出），修正后再保存。")
@@ -2566,35 +2590,40 @@ function AdminPage({
         payload = { id: draft.id, ...changed } as unknown as Project
       }
     }
-    setNoticeBusy("正在保存到线上库...")
-    const res = await saveAdminProject(payload, isNew)
-    if (!res.success) {
-      setNoticeError(`保存失败: ${res.error || "请检查网络或口令权限"}`)
-      return
-    }
-    // 写入成功 ≠ 列表就是对的：保存后重取管理端列表，以库里的行做回显，
-    // 而不是把本地 payload 拼回列表——后者让服务端的规范化结果（演示地址、相册校验）看不见，
-    // 于是出现"保存后与刷新后不一样"。同一文件里的「保存展示顺序」已经是这个模式。
-    const refresh = await verifyAndFetchAdminProjects()
-    if (refresh.success && refresh.data) {
-      onChange(refresh.data)
-      setNewDraftBase(null)
+    setSavingProject(true)
+    try {
+      setNoticeBusy("正在保存到线上库...")
+      const res = await saveAdminProject(payload, isNew)
+      if (!res.success) {
+        setNoticeError(`保存失败: ${res.error || "请检查网络或口令权限"}`)
+        return
+      }
+      // 写入成功 ≠ 列表就是对的：保存后重取管理端列表，以库里的行做回显，
+      // 而不是把本地 payload 拼回列表——后者让服务端的规范化结果（演示地址、相册校验）看不见，
+      // 于是出现"保存后与刷新后不一样"。同一文件里的「保存展示顺序」已经是这个模式。
+      const refresh = await verifyAndFetchAdminProjects()
+      if (refresh.success && refresh.data) {
+        onChange(refresh.data)
+        setNewDraftBase(null)
+        closeDrawer()
+        setNotice(`「${draft.name}」已保存到线上库。`)
+        return
+      }
+      // 库已写入但回读失败（口令失效/网络抖动）：退化为本地合成，并把状态说清楚，不假装对齐了库。
+      // 必须**并入**原有行：payload 是"只含改动列"的部分对象，整行替换会把没提交的列一起抹掉，
+      // 于是下一次保存的基线就是残缺的（表现为"改了 A 却把 B 也提交了一遍"）。
+      onChange(
+        items.some((item) => item.id === payload.id)
+          ? items.map((item) => (item.id === payload.id ? { ...item, ...payload } : item))
+          : [payload, ...items],
+      )
       closeDrawer()
-      setNotice(`「${draft.name}」已保存到线上库。`)
-      return
+      setNoticeError(
+        "资料已写入线上库，但列表回读失败（口令失效或网络抖动）。当前显示的是本次提交的内容，刷新页面可与库对齐。",
+      )
+    } finally {
+      setSavingProject(false)
     }
-    // 库已写入但回读失败（口令失效/网络抖动）：退化为本地合成，并把状态说清楚，不假装对齐了库。
-    // 必须**并入**原有行：payload 是"只含改动列"的部分对象，整行替换会把没提交的列一起抹掉，
-    // 于是下一次保存的基线就是残缺的（表现为"改了 A 却把 B 也提交了一遍"）。
-    onChange(
-      items.some((item) => item.id === payload.id)
-        ? items.map((item) => (item.id === payload.id ? { ...item, ...payload } : item))
-        : [payload, ...items],
-    )
-    closeDrawer()
-    setNoticeError(
-      "资料已写入线上库，但列表回读失败（口令失效或网络抖动）。当前显示的是本次提交的内容，刷新页面可与库对齐。",
-    )
   }
 
   // 相册上限来自 src/utils/previewRules.ts —— 与 Worker 写侧、400 文案同一份判据（不是本地再抄一个 12）
@@ -4698,7 +4727,8 @@ function AdminPage({
                 ) : null}
                 <small>
                   每行一条，格式「标签 | 数值」；STARS / FORKS / OPEN ISSUES 会被同步覆盖。
-                  格式不对的行会被逐行标出并拒绝保存（不会偷偷丢掉那一行还提示成功）
+                  格式不对的行会被逐行标出并拒绝保存（不会偷偷丢掉那一行还提示成功）。
+                  标签/数值里不要再用半角竖线——它就是分隔符，用了往返时会被切开
                 </small>
               </label>
               <label>
@@ -4721,7 +4751,7 @@ function AdminPage({
                 <small>
                   每行一条，格式「日期 | 标题 | 说明」；勾选 GitHub 同步时会被按仓库事实
                   （建档 / Release / 最近推送）重新生成，手工补充的内容会被覆盖。
-                  格式不对的行会被逐行标出并拒绝保存
+                  格式不对的行会被逐行标出并拒绝保存。日期/标题里别用半角竖线——它就是分隔符
                 </small>
               </label>
               <div className="field-row">
@@ -4966,8 +4996,8 @@ function AdminPage({
               <button type="button" onClick={requestClose}>
                 取消
               </button>
-              <button type="submit" className="admin-primary">
-                保存项目
+              <button type="submit" className="admin-primary" disabled={savingProject}>
+                {savingProject ? "保存中..." : "保存项目"}
               </button>
             </footer>
           </form>
@@ -5034,13 +5064,15 @@ function PreviewGallery({
   // 放大看图层（存的是要看的那张的下标，null = 未打开）
   const [zoom, setZoom] = useState<number | null>(null)
   const stageRef = useRef<HTMLDivElement>(null)
+  const zoomRef = useRef<HTMLDivElement>(null)
   const dragX = useRef<number | null>(null)
   const dragged = useRef(false)
 
   // 依赖必须是相册内容而不是数组引用：标签页醒来会重拉公开数据（App 里的 refreshPublicData），
   // project 对象换了引用 → images 引用也换，用引用当依赖会把访客正在看的那一张硬打回第一张。
   // 相册真的变了（换标本 / 后台改图）才复位，并一起丢掉上一本相册的宽高比。
-  const albumKey = images.join("|")
+  // 用 JSON 而不是 join("|")：join 会把 ["a|b"] 和 ["a","b"] 压成同一个键（地址里带竖线时误判为"同一本相册"）
+  const albumKey = JSON.stringify(images)
   useEffect(() => {
     setActive(0)
     // 上一本相册的宽高比对新一本没有意义，但空对象就别再生成一个新空对象（省一轮无谓重渲染）
@@ -5062,6 +5094,8 @@ function PreviewGallery({
   useEffect(() => {
     if (zoom === null) return
     const previous = document.body.style.overflow
+    // 记下打开它的那张牌，关闭后把焦点还回去（键盘用户不会掉回页面顶部）
+    const opener = document.activeElement as HTMLElement | null
     document.body.style.overflow = "hidden"
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -5075,12 +5109,36 @@ function PreviewGallery({
         const count = images.length
         setZoom((value) => (value === null ? value : (value + delta + count) % count))
         trackUsage("deck", "key")
+        return
+      }
+      if (event.key === "Tab") {
+        // aria-modal 只是声明；不把焦点环起来，Tab 会走到被遮住的页面后面去
+        const root = zoomRef.current
+        if (!root) return
+        const focusables = Array.from(
+          root.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        )
+        if (focusables.length === 0) return
+        const first = focusables[0]
+        const last = focusables[focusables.length - 1]
+        const current = document.activeElement as HTMLElement | null
+        const inside = current ? root.contains(current) : false
+        if (event.shiftKey && (!inside || current === first)) {
+          event.preventDefault()
+          last.focus()
+        } else if (!event.shiftKey && (!inside || current === last)) {
+          event.preventDefault()
+          first.focus()
+        }
       }
     }
     document.addEventListener("keydown", onKeyDown)
     return () => {
       document.body.style.overflow = previous
       document.removeEventListener("keydown", onKeyDown)
+      opener?.focus?.()
     }
   }, [zoom, albumKey])
 
@@ -5401,6 +5459,7 @@ function PreviewGallery({
 
       {zoom !== null && images[zoom] ? (
         <div
+          ref={zoomRef}
           className="preview-zoom"
           role="dialog"
           aria-modal="true"
@@ -5582,7 +5641,9 @@ export default function App() {
   const [language, setLanguage] = useState<Language>(detectBrowserLanguage)
   const [dark, setDark] = useState(detectSystemTheme)
   const [route, setRoute] = useState(routeFromHash(window.location.hash))
-  const [items, setItems] = useState<Project[]>(projects)
+  // 公开列表**从空开始**：以前用内置的 4 条示例标本当初始值，首屏就先渲染假数据，
+  // 接口 500 或后台把项目全下架（合法的空结果）时那批假标本会一直留着。
+  const [items, setItems] = useState<Project[]>([])
   // 管理端单独一份行数据：**不能与公开站共用 items**。
   // /api/projects 是对外投影（camel、不含 readme_zh / compose_* / internal_notes / sort_order /
   // preview_images_json 这些抽屉要绑的原始列名），而 refreshPublicData 会在标签页重新聚焦时覆盖 items。
@@ -5610,10 +5671,12 @@ export default function App() {
         fetchPublicProjects(),
         fetchSiteSettings(),
       ])
-      if (projects && projects.length > 0) setItems(projects)
+      // 成功即采用（**包括空数组**）：空是"没有已发布标本"这个合法事实，
+      // 不能因为 length===0 就留着上一批/示例数据。失败时才保持当前内容不动。
+      if (Array.isArray(projects)) setItems(projects)
       setSiteSettings(settings)
     } catch (err) {
-      console.warn("Public API fetch note (fallback in use):", err)
+      console.warn("Public API fetch failed; keeping the last known collection:", err)
     } finally {
       setSettingsResolved(true)
     }
@@ -5824,6 +5887,14 @@ export default function App() {
     )
   }
 
+  const homeSections = orderHomeSections(effectiveSettings.navItems)
+  // 馆藏为空（后台把项目全下架 / 首次加载）时不再拿内置示例顶替：
+  // 只留下不依赖数据的「馆长手记」，并给一句明确的空状态说明。
+  const collectionEmpty = settingsResolved && items.length === 0
+  const shownSections = collectionEmpty
+    ? homeSections.filter((id) => id === "curator")
+    : homeSections
+
   return (
     <main>
       <Header
@@ -5833,11 +5904,20 @@ export default function App() {
         setDark={setDark}
         settings={effectiveSettings}
       />
+      {collectionEmpty ? (
+        <section className="section" id="empty-collection">
+          <p className="section-empty">
+            {language === "zh"
+              ? "馆藏尚未公开任何标本——请在管理端把项目状态设为 LIVE 或 BETA。"
+              : "No specimens are published yet — set a project to LIVE or BETA in the admin console."}
+          </p>
+        </section>
+      ) : null}
       {/* 段落顺序跟着管理端的导航顺序走（orderHomeSections 是纯函数、有闸门测试）。
           以前这四段写死在 JSX 里，导航条却可拖序——同一个设置只管到一半。
           馆藏统计的显隐仍由「展示偏好」的 homeStatsVisible 决定：导航项的 visible 只管导航条，
           两件事刻意不合并（合并后"隐藏一个链接"会顺手把整段内容从页面上弄丢）。 */}
-      {orderHomeSections(effectiveSettings.navItems).map((id) => {
+      {shownSections.map((id) => {
         switch (id) {
           case "cabinet":
             return (

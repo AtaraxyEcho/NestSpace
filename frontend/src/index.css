@@ -8,7 +8,7 @@
   --bg-elevated: #f5eed9;
   --ink-primary: #2a2620;
   --ink-secondary: #4a4239;
-  --ink-tertiary: #8b6f47;
+  --ink-tertiary: #755c3b; /* 承载 7–10px 小字标签，须 ≥4.5:1(AA)：对 bg-base 4.8、对 bg-elevated 5.4；原 #8b6f47 仅 3.58 */
   --ink-quaternary: #b8a888;
   --line-default: rgba(42, 38, 32, 0.24);
   --line-strong: rgba(42, 38, 32, 0.42);
@@ -37,7 +37,7 @@
   --bg-elevated: #2c2820;
   --ink-primary: #e8dfd0;
   --ink-secondary: #b8ab98;
-  --ink-tertiary: #8b7e68;
+  --ink-tertiary: #9f9279; /* 同上：对 bg-base 5.8、对 bg-elevated 4.8；原 #8b7e68 在 elevated 上只有 3.69 */
   --ink-quaternary: #6f6555;
   --line-default: rgba(232, 223, 208, 0.16);
   --line-strong: rgba(232, 223, 208, 0.3);
