@@ -202,13 +202,13 @@ app.get('/projects/:id', async (c) => {
 // 相册里的图都在站外（GitHub raw 等），原图常见几百 KB 的 PNG；而 Workers 运行时装不了
 // 图片解码器、Cloudflare 自带的 Image Resizing 又要付费。这里借免费的转换服务把图压成 webp
 // 再回给浏览器，并把结果留在边缘缓存：每个「源图 × 宽度」在每个边缘节点只真的转换一次。
-// 只代理白名单图源，其余一律 302 回原图——否则这里就成了开放代理（SSRF / 被拿去当图床）。
+// 只代理白名单图源，名单外一律 404（不是 302 转发——那等于多开一条开放重定向，也就会被拿去当图床）；
+// 白名单内的图若转换服务抖动/限流/超时，才 302 回原图作为兜底。
 const IMG_WIDTH_MIN = 64
 const IMG_WIDTH_MAX = 2000
 const IMG_WIDTH_DEFAULT = 1600
 const IMG_SRC_MAX_LENGTH = 2048
 const IMG_UPSTREAM_TIMEOUT_MS = 15_000
-// 源图 URL 用的是分支（内容可能变），所以给有界 TTL 而不是 immutable
 // 源图 URL 用的是分支（内容可能变），所以给有界 TTL 而不是 immutable。
 // 不写 stale-while-revalidate：Cache API 的 put/match 不支持它，写了也是空承诺。
 const IMG_CACHE_CONTROL = 'public, max-age=604800'

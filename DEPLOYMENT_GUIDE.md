@@ -20,12 +20,15 @@ NestSpace/
 │   │   ├── api/                  # 前端客户端 API (client.ts & adminClient.ts)
 │   │   ├── data/                 # 内置默认值与回退数据 (fallbackProjects / defaultSiteSettings)
 │   │   ├── types/                # 数据类型定义 (project.ts / siteSettings.ts)
+│   │   ├── utils/                # 可独立测试的纯逻辑：markdown.tsx 渲染、stats.ts 统计、
+│   │   │                         #   previewFrames.ts 观察台在场牌与牌面文字
 │   │   └── App.tsx               # 动态数据渲染与安全管理端
 │   ├── .dev.vars.example         # 本地开发环境变量模板（复制为 .dev.vars 使用，不入 Git）
-│   ├── jwt_verify.test.mjs       # JWT 校验与 Access 白名单单元测试（pnpm test 依次跑以下四个文件）
+│   ├── jwt_verify.test.mjs       # JWT 校验与 Access 白名单单元测试（pnpm test 依次跑以下五个文件）
 │   ├── demo_url.test.mjs         # 演示地址规范化单元测试
 │   ├── sync_update.test.mjs      # GitHub 同步字段归属 / 时间线生成单元测试
 │   ├── image_proxy.test.mjs      # 图片代理：宽度夹取 / 图源白名单 / 转换地址构造单元测试
+│   ├── preview_frames.test.mjs   # 观察台：在场张数 / 环形去重 / +N 口径 / URL 解析兜底单元测试
 │   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（本地与 Git 构建共用）
 │   └── package.json
 │
@@ -87,13 +90,15 @@ bash scripts/d1-migrate.sh remote
 因此可以反复执行**。只有真正的错误（SQL 语法、约束冲突等）才会以非 0 退出并点名失败文件。
 需要指定库名时：`bash scripts/d1-migrate.sh remote nestspace-prod`。
 
-**顺序要求**：迁移必须先于 Worker 代码生效。新版 Worker 引用了这四批新列，任何一批没先落到生产库就部署代码，都会 500：
+**顺序要求**：迁移必须先于 Worker 代码生效。新版 Worker 引用了这几批新列，任何一批没先落到生产库就部署代码，都会 500：
 
 | 缺哪批 | 引用的代码位置 | 表现 |
 |---|---|---|
+| `0005` 底部栏文案 | `site_settings` 写白名单（`footer_*`） | 「站点设置」保存报 500（读侧是 `SELECT *`，只会静默回退默认文案） |
 | `0006` 展示偏好 | `site_settings` 读写白名单 | 「站点设置」保存报 500 |
 | `0007` 标本文档 | 公开详情路由的 SELECT（`readme_zh` 等） | `GET /api/projects/:id` 每条都 500，详情页文档区退化为空 |
 | `0008` 演示入口 | 项目的读路径与写路径 | 管理端保存**任何**项目报 500（写路径引用不存在的列） |
+| `0009` 馆长手记 | `site_settings` 写白名单（`curator_*`，`worker/index.ts` 映射表） | 「站点设置」保存报 500（读侧同样静默回退，所以只有保存才暴露） |
 | `0010` 预览图 | 项目列表/详情的 SELECT 与同步写路径 | `GET /api/projects` 每条都 500（列表 SELECT 引用了不存在的列），首页与陈列整体空白 |
 
 ---
@@ -344,7 +349,7 @@ pnpm typecheck
   - 与描述同步同一原则：**只填充空白字段，绝不覆盖后台手工整理过的文档**；一个文件都没抓到时如实提示
     （仓库无对应文件或已达 GitHub 匿名 API 频率限制），不会假称"已存在"；
   - 导入新标本时同样抓取一次；文档也可在「项目管理 → 编辑」的四个文档编辑框中手工维护。
-- **详情页预览图**（迁移 `0010`）：详情页 OVERVIEW 上方有一块「PLATE / 预览」标本托板相册，展示项目截图。
+- **详情页预览图**（迁移 `0010`）：详情页 OVERVIEW 顶部有一块「PREVIEW / 01」观察台相册，展示项目截图。
   数据分两列：**封面** `preview_image_url`（卡片/Hero/分享图用，取值 = 相册第一张）与**相册**
   `preview_images_json`（详情页相册用，有序数组）。图片来源与管理端一致：编辑抽屉里的「预览图」多行文本框
   （每行一个 URL，第一行即封面）→ 同步时从 README 自动提取。
@@ -367,28 +372,64 @@ pnpm typecheck
     「空封面 + 本次带相册 → 取相册第一张」的补齐只在 `validatePreviewInput` 里实现一份，
     **POST 与 PUT 共用**——同一请求体在两条路径必须落库一致（本仓库为 `demoUrl` 踩过两条路径不一致的坑）。
     读取侧仍保持宽容：绕过 Worker 直接写库的脏值不会让接口 500，只会被过滤掉。
-  - **方向自适应**：每张图按自身宽高判断方向——横图走宽板（`cover`），竖图（手机截图）自动收窄成手机框
-    （`contain` 不裁切）。无需管理员声明「桌面端/移动端」，混排的相册也能各自框对。
-  - **相册交互**：牌堆只渲染当前图两侧各若干张（最多 5 张；2 张时不展开，否则两侧会绕回同一张）；
-    下方一排缩略图可直接跳转、并可横向滚动，配「‹ 3 / 12 ›」翻页（44px 触控目标），
-    支持 ←→ 方向键与触摸滑动；单张时不显示任何翻页控件。计数用了 `aria-live="polite"`，
-    缩略图是 `role="group"` + `aria-current`（不是 tab——它们没有对应的 tabpanel）。
-  - **堆叠卡片扇（B 方案）**：悬停或键盘聚焦时，当前图两侧的卡片以 Y 轴旋转 + 后退展开成扇形，
-    过渡 300ms；移开/失焦即合拢；点击邻卡即切到该张。**不加模糊、不做无限循环**。
-    两条必要门槛（都是实测踩出来的）：
-    - **只在 `(hover: hover) and (pointer: fine)` 下展开**——触屏点按会让牌堆获得焦点，
-      不设门槛会在手机上误展开；
-    - **展开距离按断点收窄**（150 / 112 / 88 / 64px）：`±fan + 半张邻卡`必须留在视口内，
-      否则最外侧两张会被 `html` 的 `overflow-x: clip` **无声裁掉**。
-    开启「减少动态效果」时**不展开也不旋转**（该 reset 必须排在所有 `.is-open` 断点规则之后，
-    否则同权重的后来者会把它盖掉——移动端断点就踩过这个）。
+  - **画框方向自适应**：整台观察台按**当前那张**的自身宽高换画框尺寸——横图用宽板（桌面 `min(720px, 80%)`，
+    ≤760px 收成 78%），竖图（手机截图）收窄成竖板（桌面 `min(230px, 36%)`，≤760px 为 50%），
+    画框高度固定（桌面 `min(72%, 420px)`、手机 `min(70%, 320px)`），一律 `contain` **不裁切截图**。
+    方向不写在数据库里，由 `<img>` 解码后的 `naturalWidth/naturalHeight` 得出并按张序缓存进 state；
+    命中缓存的图可能先于 `load` 监听器就绪，所以挂载时还查一次 `img.complete`，否则竖图首帧会先套横框。
+  - **相册交互**：只渲染**当前张 + 左邻 + 右邻**，总数 >3 时再多渲染一张代表「往后还有」的后牌
+    （编号牌上标 `+N`，N = 未显示的张数）——一张 12 图的相册不会同时解码 12 张大图。
+    2 张时左右邻会绕回同一张，`previewFrames()`（`src/utils/previewFrames.ts`，纯函数 + `preview_frames.test.mjs` 闸门）
+    去重只留一张侧牌；1 张时不渲染翻页控件，舞台 `tabindex="-1"`（不可 Tab 停留）。
+    下方是**编号条**（`01…12`，可换行，触控目标 ≥44px）而非缩略图条，配 ←/→ 两侧翻页。
+    舞台支持 ←→ 方向键、指针拖动、以及**鼠标悬停时的 3D 倾斜**：位移超过 8px 才算起拖并接管指针
+    （此时牌面自己的 click 会被重定向，不会「拖一下就顺手改了当前张」），再超过 45px 才真的翻页；
+    8–45px 之间什么都不发生（回弹）。鼠标点侧牌可直接切过去，**键盘**选张只走编号条与方向键。
+    可访问名 = **可见的编号牌文字 + 文件名**（`FRAME / 03 pipeline-console`、编号条是 `03 pipeline-console`）：
+    这样既满足 WCAG 2.5.3（名称包含可见标签文字），又不会把整条 URL 目录念给读屏——目录那行 `<small>`
+    是 `aria-hidden`，且**没有目录可显示时整行不渲染**（免得跟项目名重复一行）。
+    编号条整体是 `role="group"` + 组名，否则一排裸 `01…12` 对读屏没有上下文；文件名同时挂 `title`（只对鼠标有效）。
+    页码用 `aria-live="polite"`；后牌是 `aria-hidden` 的 `<div>`（纯版面，不进读屏顺序）。
+  - **3D 封面流（取代竖向牌堆）**：`perspective: 1800px` + `transform-style: preserve-3d`，
+    四张牌按 `data-position` 排成 active / next / previous / back，侧牌 `rotateY ±42deg` 向两侧摊开。
+    与上一版竖向牌堆的取舍：侧牌按**自身宽度**的 76% / 23% 位移，会把一部分牌面推到主牌轮廓之外。
+    实测（把舞台宽度钉成 360px / 838px、关掉过渡后读边界）两侧各露出 **110–150px**，
+    而横向扇形当年是位移量级不够导致后牌被主图整块压住。
+    > 诚实标注：这组数字是在 0×0 的浏览器面板里**钉宽度**测的，当时生效的是 ≤760 那组位移常量
+    > （±78%/±22%、scale .72/.74）；桌面那组（±76%/±23%、scale .76/.79）与它接近但**未在真实视口下复测**。
+    > 手机侧因为画框占 78%，被列宽裁掉后每侧只剩约 20–30px 的薄片，是这套版面目前最弱的一环。
+    过渡统一 ≤280ms、**不加 blur**、倾斜只在 `pointerType === 'mouse'` 时响应；
+    `prefers-reduced-motion` 由 CSS 把主牌变换写回 `translate(-50%, -50%)`（JS 设的 `--tilt-*` 因此不生效），
+    但**保留侧牌的 3D 排布**——那是版面不是动画。
+    `.preview-gallery` 上加 `overflow-x: clip`，把侧牌超出列宽的部分裁掉，免得蹭到左栏文案：
+    选 `clip` 而不选 `hidden`，是因为 `hidden` 在另一轴仍为 `visible` 时会被强算成 `auto`、凭空多出一个滚动容器；
+    而 `clip` 按规范**不算** grouping——`transform-style` 被压平的条件是 overflow "any value other than
+    visible **or clip**"。**早前一版这里写成「clip 放到 .preview-stage 上会按规范把 3D 压平」是错的**（引据方向反了），
+    代码本身没问题（裁的是列盒，与舞台同宽），错的只是理由，已更正。
+  - **文案栏的数据都是真的**：左栏页码 `0N / 0M` 与进度段宽度（`--preview-progress`）按相册实际张数与
+    当前序号计算；每张牌的标题与副标题取**图片 URL 自身的文件名与目录**（`frameLabel` 解 `pathname`，
+    百分号解码失败就原样显示），没有说明文字时退回项目名——**不写参照稿里那种虚构的界面描述与指标**。
+  - **访客看到的张数位置要经得起重拉**：标签页重新可见 / 重新获得焦点时 `refreshPublicData` 会重读公开接口，
+    `items` 换成一批新对象 → `ProjectRoute` 依赖 `listed` 重跑 → `project.previewImages` 换成新数组引用。
+    所以 `PreviewGallery` 的复位 effect 依赖的是 **`images.join("|")`**（相册内容），不是数组引用；
+    内容没变就不动，访客正看第 5 张不会因为切了一下标签页被硬打回第 1 张（换标本 / 后台改图才复位）。
   - **预览区留白**：用「密集档」间距（`--section-pad-dense`），而不是叙述段落的 loose 档，避免图被推到很下方。
+    区块级 eyebrow 重新编号为 `PREVIEW / 01 → FIELD NOTES / 02 → ANATOMY / 03 → EVOLUTION / 04 →
+    NEIGHBOURING SPECIMENS / 05`；预览区无相册时整段不渲染，编号按版面身份保留（不从 01 起排）。
 - **图片代理**（同源 `GET /api/img`）：详情页所有相册图都经它中转，**这是解决"图显示慢"的关键**。
   - **为什么需要**：图源是站外的 GitHub raw（原图常见几百 KB 的 PNG，且只缓存 5 分钟）；Workers 运行时装不了
     图片解码器、Cloudflare 自带的 Image Resizing 要付费。因此由 Worker 借免费的转换服务
-    （`wsrv.nl`）把图压成 **webp** 再回给浏览器：实测 446KB 的 PNG → 主图 31KB、缩略图 3.4KB。
-  - **接口**：`/api/img?w=<宽度>&src=<原图 URL>`。宽度夹到 `[64, 2000]`（默认 1600）；主图用 1600、
-    邻卡 900、缩略图 160。
+    （`wsrv.nl`）把图压成 **webp** 再回给浏览器：实测 446KB 的 PNG → 1600 档约 **31KB**
+    （上一版还有 160 档缩略图约 3.4KB；该档现在前台已无调用路径，数字只作为「转换后体量级」的历史实测留档）。
+  - **接口**：`/api/img?w=<宽度>&src=<原图 URL>`。宽度夹到 `[64, 2000]`（默认 1600）。
+    前台**只有 1600 一档**（`IMAGE_WIDTH.plate`）：观察台上同时存在的牌不超过 4 张，全部按主图清晰度取，
+    翻到邻牌时不必再请求一次更大的尺寸。**也别给侧牌/后牌单设小档**——后牌每次翻页会换成另一张，
+    相册里每张图迟早都会当一次后牌，分档会让同一张图产生两种转换变体（12 张全看完：12 次 → 24 次），
+    免费的第三方转换服务反而多承担一倍的真实转换。**按常量推算**：首屏转换请求由上一版（1 主图 + 4 邻卡 +
+    12 张 160 缩略图）的 ~17 降到 4，翻完 12 张由 ~36 降到 12，首屏字节基本持平；
+    代价是 4 张 1600×1000 同尺寸牌同时在场，解码内存比上一版多约十几 MB——
+    低配手机上是这套版面需要留意的一点（**未实测**）。
+    管理端抽屉的缩略图仍用原地址，便于直接核对填进去的链接本身是否可达。
   - **边缘缓存**：转换结果写入 `caches.default`，`Cache-Control: public, max-age=604800`
     （不写 `stale-while-revalidate`——Cache API 的 `put`/`match` 不支持，写了是空承诺）。
     **每个「源图 × 宽度」在每个边缘节点只真的转换一次**；实测命中约 7ms，回源约 1s。
@@ -409,23 +450,28 @@ pnpm typecheck
   - **依赖与隐私**：`wsrv.nl` 是免费的第三方公共服务（BSD-3-Clause 开源，文档未承诺配额或 SLA），
     图片会经过它的服务器。若将来开通 Cloudflare Image Resizing，只需改 `buildWeservUrl` 这一处即可切换。
 - **详情页布局约定**（`frontend/src/index.css` 的 `:root` token）：
-  - **统一栅格**：`--gutter`（`clamp(20px, 6vw, 96px)`）是 header / hero / 各 section / 文档区**共用的左右边缘**。
-    原先四处各自为政（header 固定 40px、hero 叠加 6vw+4vw、section 6vw、文档区居中），最宽处差到 100px 以上；
-    现在全部对齐，切页签也不会横向跳动。
+  - **统一栅格**：`--gutter`（`clamp(20px, 6vw, 96px)`）是 header / hero / 各 section **共用的左右边缘**。
+    原先三处各自为政（header 固定 40px、hero 叠加 6vw+4vw、section 6vw），最宽处差到 100px 以上。
+    **文档区（README / DEPLOYMENT）例外，保持居中**——它是阅读版面，与叙述区左边缘不一致是刻意选择。
   - **纵向两档**：`--section-pad-loose`（叙述段）与 `--section-pad-dense`（预览 / 统计等密集区块），
     取代原来所有区块一律 `128px`。
   - **锚点偏移**：`--sticky-offset`（72px 吸顶头 + 16px）作为 `scroll-margin-top`，
     用在各 section、compose 块与 README 的 h1–h4 上——原来「READ FIELD NOTES」与 README 目录跳转
     的落点会被吸顶头盖住。
-  - **文档列宽**：`minmax(0, 58ch)` 并在 760px 以下收成单列，中英文行长都落在可读区间。
-- **详情页排版约定**：详情页微标签统一到 **10px 下限**（原来是 7/8/9px 混用，最小 7px 出现在代码块的
-  COPY 按钮上）；`h1` 行距 `.76 → .9`（`.76` 会把中文行距压太紧）；README 标题只有**一套**字号——
+  - **文档列宽**：`220px`（目录）+ `minmax(0, 920px)`（正文），`justify-content: center`，间隙
+    `clamp(32px, 5vw, 96px)`；760px 以下收成单列。
+    曾经收窄到 `58ch` 想让行长更讲究，但实际太窄（尤其中英文混排与长 compose 行），已放宽。
+- **详情页排版约定**：**观察台自己**的微标签（`FRAME / 0N`、图注、编号条、页码）统一到 **10px**（参照稿是
+  7/8/9px 混用）；但详情页其余小字**没跟着抬**——共享的 `.eyebrow` 仍 9px、`.document-section > aside` 目录项
+  与 `.doc-toc-item` 仍 9px、NEIGHBOURING 区块的 `.related-grid span` 仍 8px（原来 7px 的 COPY 按钮已抬到 10px）。
+  `h1` 行距 `.76 → .9`（`.76` 会把中文行距压太紧）；README 标题只有**一套**字号——
   原 `.markdown-body h2` 的 `48–78px` 会被 `.markdown-body .readme-doc h2` 完全盖掉，
   且在 deployment 面板里是 52px 的隐患，已合并为 `clamp(26px, 2.6vw, 34px)`。
-  > 注意：全站其余位置的 8px 微标签（首页 / 页脚 / 管理端）**本轮未动**，若要一并抬到 10px 需单独确认。
+  > 注意：`.eyebrow`（9px）与首页 / 页脚 / 管理端的 8px 微标签**本轮仍未动**，全站抬到 10px 需单独确认。
 - **DEPLOYMENT 代码块**：头部（路径 + COPY）从绝对定位改为 **flex 行**，去掉 54px 占位内边距与
-  `min-height: 118px`，因此**短 compose 文件不再被撑高**；`pre` 改 `max-height: min(56vh, 520px)` +
-  `overscroll-behavior: contain`（矮屏不再出现双层滚动）；COPY 按钮 7px→10px、触控目标 ≥32px。
+  `min-height: 118px`，因此**短 compose 文件不再被撑高**；`pre` 用 `max-height: min(72vh, 760px)` +
+  `overscroll-behavior: contain`（既看得下较长的 compose，又不至于和整页抢滚动）；
+  宽度随上面的文档列一起放宽到 920px；COPY 按钮 7px→10px、触控目标 ≥32px。
   滚动条统一为一档**低对比细条**（`scrollbar-width: thin` + `::-webkit-scrollbar`，深色块内用浅色 thumb）——
   刻意**不隐藏**滚动条，避免丢掉「这里能滚」的可发现性。
 - **管理端写接口对请求体本身也是严格的**：`POST/PUT /api/admin/projects*`、`POST /api/admin/github-import`、

@@ -18,6 +18,7 @@ import {
 import type { SiteSettings, NavItemConfig } from "./types/siteSettings"
 import { computeCatalogueStats, computeActivityTimeline } from "./utils/stats"
 import { renderMarkdown } from "./utils/markdown"
+import { frameLabel, hiddenFrameCount, previewFrames } from "./utils/previewFrames"
 
 
 function SpecimenSvg({ shape }: { shape: Project["shape"] }) {
@@ -230,8 +231,11 @@ function demoHref(project: Project): string | null {
   return /^https?:\/\//i.test(url) ? url : null
 }
 
-// 图片宽度档位：主图要清晰，邻卡与缩略图按显示尺寸要小图（原图常是几百 KB 的 PNG）
-const IMAGE_WIDTH = { plate: 1600, card: 900, thumb: 160 } as const
+// 图片宽度档位：观察台上同时出现的卡片不超过 4 张，一律按主图清晰度取，
+// 这样翻到邻牌时不必再请求一次更大的尺寸（原图常是几百 KB 的 PNG）。
+// 也别给侧牌/后牌单独设小档：后牌每次翻页换一张，相册里的每张图迟早都会当一次后牌，
+// 分档会让同一张图产生两种转换变体（12 张全看完时 12 次 → 24 次），免费的第三方转换服务反而吃更多请求。
+const IMAGE_WIDTH = { plate: 1600 } as const
 
 // 可经代理压缩的图源主机。**必须与 worker 的 IMG_ALLOWED_HOSTS 保持一致（只允许是其子集）**：
 // Worker 对名单外的主机返回 404（不做开放重定向），所以这里名单外的地址直接原样使用，
@@ -1249,19 +1253,16 @@ function DetailPage({
         tabIndex={0}
         className={detailTab === "overview" ? "" : "document-hidden"}
       >
-        {previewImages.length > 0 ? (
-          <section className="detail-section preview-section">
-            <div className="detail-section-label">
-              <span className="eyebrow">PLATE / 预览</span>
-              <span>PROJECT PREVIEW</span>
-            </div>
-            <PreviewPlate images={previewImages} alt={project.name} />
-          </section>
-        ) : null}
+        {/* 相册为空时组件自己返回 null，不渲染空的观察台区块 */}
+        <PreviewGallery
+          images={previewImages}
+          name={project.name}
+          language={language}
+        />
 
         <section className="detail-section" id="field-notes">
           <div className="detail-section-label">
-            <span className="eyebrow">FIELD NOTES / 01</span>
+            <span className="eyebrow">FIELD NOTES / 02</span>
             <span>CONTEXT & RESPONSE</span>
           </div>
           <div className="detail-narrative">
@@ -1289,7 +1290,7 @@ function DetailPage({
         <section className="detail-section capability-section">
           <div className="section-heading">
             <div>
-              <span className="eyebrow">ANATOMY / 02</span>
+              <span className="eyebrow">ANATOMY / 03</span>
               <h2>
                 Core capabilities <em>/ 标本特征</em>
               </h2>
@@ -1326,7 +1327,7 @@ function DetailPage({
 
         <section className="detail-section evolution-section">
           <div className="detail-section-label">
-            <span className="eyebrow">EVOLUTION / 03</span>
+            <span className="eyebrow">EVOLUTION / 04</span>
             <span>A LIVING SPECIMEN</span>
           </div>
           {project.timeline.length > 0 ? (
@@ -1511,7 +1512,7 @@ function DetailPage({
       <section className="detail-section related-section">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">NEIGHBOURING SPECIMENS / 04</span>
+            <span className="eyebrow">NEIGHBOURING SPECIMENS / 05</span>
             <h2>Continue observing</h2>
           </div>
         </div>
@@ -4261,7 +4262,7 @@ function AdminPage({
                   placeholder={"https://…/shot-1.png\nhttps://…/shot-2.png"}
                 />
                 <small>
-                  详情页「PLATE / 预览」相册；每行必须是可以直接访问的 http/https 绝对地址。
+                  详情页「PREVIEW / 01」观察台的相册；每行必须是可以直接访问的 http/https 绝对地址。
                   任一行非法、重复或超过 12 张都会拒绝保存并指出第几行（不会偷偷丢掉坏行还提示成功）。
                   全部留空则下次同步从 README 自动提取。
                 </small>
@@ -4269,7 +4270,7 @@ function AdminPage({
               {textToFeatures(previewImagesText).length > 0 ? (
                 <div className="preview-thumbs preview-thumbs-admin">
                   {textToFeatures(previewImagesText)
-                    .slice(0, 8)
+                    .slice(0, 12)
                     .map((url, i) => (
                       <span key={`${url}-${i}`} className="preview-thumb-admin">
                         <img src={url} alt="" loading="lazy" />
@@ -4394,163 +4395,277 @@ function detectSystemTheme(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches
 }
 
-// 详情页预览图：可翻看的「堆叠卡片」相册（B 方案）。
-// 受限动效约定：不做模糊、不做无限循环；展开的位移与旋转都很克制（≤13°），过渡 300ms。
-// 触屏与 prefers-reduced-motion 下不展开也不旋转，退化为静态堆叠（仍可翻页）。
-// 每张图按自身宽高判断方向：横图走宽板 cover，竖图（手机截图）收窄成手机框 contain，避免被裁掉。
-function PreviewPlate({ images, alt }: { images: string[]; alt: string }) {
-  const [index, setIndex] = useState(0)
-  const [open, setOpen] = useState(false)
-  const [portrait, setPortrait] = useState(false)
-  const touchStartX = useRef<number | null>(null)
+// 详情页预览：左文案栏 + 右「观察台」3D 封面流。
+// 只渲染当前张、左右邻张，以及一张代表「后面还有 N 张」的后牌，避免一次解码十几张原图；
+// 后牌是纯版面，做成不可聚焦的 div，读屏只走下面的编号条。
+// 画框方向跟随当前图：竖图不该被塞进横框里裁掉，所以整台观察台按主图比例换尺寸。
+// 动效按站内约定收口：过渡 ≤280ms、后牌不加 blur；
+// prefers-reduced-motion 由 CSS 把主牌变换写回静态（JS 写的倾斜变量因此不再生效），
+// 但保留 3D 排布——那是版面不是动画，抹掉后侧牌就完全看不见了。
+function PreviewGallery({
+  images,
+  name,
+  language,
+}: {
+  images: string[]
+  name: string
+  language: Language
+}) {
+  const [active, setActive] = useState(0)
+  const [ratios, setRatios] = useState<Record<number, number>>({})
+  const stageRef = useRef<HTMLDivElement>(null)
+  const dragX = useRef<number | null>(null)
+  const dragged = useRef(false)
 
-  // 切换标本（相册来源变化）时回到第一张
+  // 依赖必须是相册内容而不是数组引用：标签页醒来会重拉公开数据（App 里的 refreshPublicData），
+  // project 对象换了引用 → images 引用也换，用引用当依赖会把访客正在看的那一张硬打回第一张。
+  // 相册真的变了（换标本 / 后台改图）才复位，并一起丢掉上一本相册的宽高比。
+  const albumKey = images.join("|")
   useEffect(() => {
-    setIndex(0)
-  }, [images])
+    setActive(0)
+    // 上一本相册的宽高比对新一本没有意义，但空对象就别再生成一个新空对象（省一轮无谓重渲染）
+    setRatios((prev) => (Object.keys(prev).length === 0 ? prev : {}))
+  }, [albumKey])
+
+  // 每张牌的可访问名与图注都要用文件名/目录；相册有 12 张时这是每帧十几次 new URL()，
+  // 按相册内容缓存一次。依赖同样是 albumKey 而不是数组引用（理由同上）
+  const labels = useMemo(
+    () => images.map((url) => frameLabel(url, name)),
+    [albumKey, name],
+  )
 
   const total = images.length
-  const safeIndex = total > 0 ? Math.min(index, total - 1) : 0
-  const current = images[safeIndex]
-  if (!current) return null
+  if (total === 0) return null
+
+  const isZh = language === "zh"
+  const safeActive = Math.min(active, total - 1)
+  const portrait = (ratios[safeActive] ?? 1.6) < 1
+
+  const rememberRatio = (index: number, el: HTMLImageElement) => {
+    if (!el.naturalWidth || !el.naturalHeight) return
+    const ratio = el.naturalWidth / el.naturalHeight
+    setRatios((prev) => (prev[index] === ratio ? prev : { ...prev, [index]: ratio }))
+  }
 
   const step = (delta: number) => {
     if (total <= 1) return
-    setIndex((value) => (value + delta + total) % total)
+    setActive((value) => (value + delta + total) % total)
   }
 
-  // 牌堆向两侧各取 reach 张（最多 2）。reach 上限是 (总数-1)/2，否则总数少时
-  // 环形取 index 会把同一张重复渲染成多张：2 张时两侧都落回同一张，所以不展开。
-  const reach = Math.min(2, Math.floor((total - 1) / 2))
-  const offsets: number[] = []
-  for (let offset = -reach; offset <= reach; offset += 1) offsets.push(offset)
+  // 哪几张牌、站在哪个位置、往后藏了几张，都在 previewFrames() 里（纯函数，已接进 npm test）
+  const frames = previewFrames(total, safeActive)
+  const hidden = hiddenFrameCount(total, safeActive)
+
+  const resetTilt = () => {
+    stageRef.current?.style.setProperty("--tilt-x", "0deg")
+    stageRef.current?.style.setProperty("--tilt-y", "0deg")
+    dragX.current = null
+    dragged.current = false
+  }
+
+  const hint =
+    total > 1
+      ? isZh
+        ? `${total} 张实机截图。拖动观察台可连续翻看，也可以点下方编号跳看某一张。`
+        : `${total} recorded screenshots. Drag the viewing table to flip through, or pick a number below.`
+      : isZh
+        ? "1 张实机截图。"
+        : "One recorded screenshot."
 
   return (
-    <div className="preview-gallery">
-      <div
-        className={`preview-deck ${portrait ? "is-portrait" : "is-landscape"}${
-          open ? " is-open" : ""
-        }`}
-        tabIndex={total > 1 ? 0 : -1}
-        role="group"
-        aria-label={
-          total > 1
-            ? `${alt} 预览图，共 ${total} 张，当前第 ${safeIndex + 1} 张`
-            : `${alt} 预览图`
-        }
-        onMouseEnter={() => setOpen(true)}
-        onMouseLeave={() => setOpen(false)}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowLeft") {
-            event.preventDefault()
-            step(-1)
-          } else if (event.key === "ArrowRight") {
-            event.preventDefault()
-            step(1)
-          }
-        }}
-        onTouchStart={(event) => {
-          touchStartX.current = event.touches[0]?.clientX ?? null
-        }}
-        onTouchEnd={(event) => {
-          const startX = touchStartX.current
-          const endX = event.changedTouches[0]?.clientX
-          touchStartX.current = null
-          if (startX === null || endX === undefined) return
-          if (Math.abs(endX - startX) > 40) step(endX < startX ? 1 : -1)
-        }}
-      >
-        {offsets.map((offset) => {
-          const target = (safeIndex + offset + total) % total
-          const isActive = offset === 0
-          return (
-            <button
-              type="button"
-              key={offset}
-              className={`deck-card${isActive ? " is-active" : " is-peek"}`}
-              aria-current={isActive ? "true" : undefined}
-              aria-label={
-                isActive ? `当前预览图，第 ${target + 1} 张` : `切换到第 ${target + 1} 张预览图`
-              }
-              tabIndex={-1}
-              style={
-                {
-                  "--offset": offset,
-                  "--abs": Math.abs(offset),
-                  zIndex: 10 - Math.abs(offset),
-                } as React.CSSProperties
-              }
-              onClick={() => {
-                if (!isActive) setIndex(target)
-              }}
-            >
-              <img
-                src={proxiedImage(images[target], isActive ? IMAGE_WIDTH.plate : IMAGE_WIDTH.card)}
-                alt={isActive ? `${alt} 预览 ${target + 1}` : ""}
-                loading={isActive ? "eager" : "lazy"}
-                decoding="async"
-                fetchPriority={isActive ? "high" : "auto"}
-                onLoad={(event) => {
-                  if (!isActive) return
-                  const el = event.currentTarget
-                  if (el.naturalWidth && el.naturalHeight) {
-                    setPortrait(el.naturalHeight > el.naturalWidth)
-                  }
-                }}
-              />
-            </button>
-          )
-        })}
+    <section className="detail-section preview-section" aria-labelledby="preview-heading">
+      <div className="preview-copy">
+        <span className="eyebrow">PREVIEW / 01</span>
+        <h2 id="preview-heading">
+          Inside the specimen <em>/ 项目预览</em>
+        </h2>
+        <p>{hint}</p>
+        <div className="preview-pagination" aria-live="polite">
+          <strong>{String(safeActive + 1).padStart(2, "0")}</strong>
+          <i
+            aria-hidden="true"
+            style={
+              {
+                "--preview-progress": `${Math.round(((safeActive + 1) / total) * 100)}%`,
+              } as React.CSSProperties
+            }
+          />
+          <span>{String(total).padStart(2, "0")}</span>
+        </div>
       </div>
-      {total > 1 ? (
-        <>
-          <div className="preview-nav-row">
-            <button
-              type="button"
-              className="preview-nav"
-              aria-label="上一张预览图"
-              onClick={() => step(-1)}
-            >
-              ‹
-            </button>
-            <span className="preview-counter" aria-live="polite">
-              {safeIndex + 1} / {total}
-            </span>
-            <button
-              type="button"
-              className="preview-nav"
-              aria-label="下一张预览图"
-              onClick={() => step(1)}
-            >
-              ›
-            </button>
-          </div>
-          {/* 缩略图是"选择当前张"的开关，不是 tab（没有对应的 tabpanel），
-              用 group + aria-current 才与实际行为一致 */}
-          <div className="preview-thumbs" role="group" aria-label="预览图列表">
-            {images.map((url, i) => (
-              <button
-                key={`${i}-${url}`}
-                type="button"
-                aria-current={i === safeIndex ? "true" : undefined}
-                aria-label={`第 ${i + 1} 张预览图`}
-                className={`preview-thumb${i === safeIndex ? " is-active" : ""}`}
-                onClick={() => setIndex(i)}
-              >
+
+      <div className="preview-gallery">
+        <div
+          className={`preview-stage${portrait ? " is-portrait" : ""}`}
+          ref={stageRef}
+          role="group"
+          tabIndex={total > 1 ? 0 : -1}
+          aria-label={
+            total > 1
+              ? isZh
+                ? `${name} 预览图，共 ${total} 张，当前第 ${safeActive + 1} 张`
+                : `${name} previews, ${total} in total, ${safeActive + 1} shown`
+              : `${name} preview`
+          }
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft") {
+              event.preventDefault()
+              step(-1)
+            } else if (event.key === "ArrowRight") {
+              event.preventDefault()
+              step(1)
+            }
+          }}
+          onPointerDown={(event) => {
+            dragX.current = event.clientX
+            dragged.current = false
+          }}
+          onPointerMove={(event) => {
+            // 真的拖动起来才接管指针：没接管成功就完全落回按钮自己的 click，
+            // 否则 pointerup 的翻页与 click 的选张会在同一次手势里各改一次
+            if (dragX.current !== null && !dragged.current && Math.abs(event.clientX - dragX.current) > 8) {
+              try {
+                event.currentTarget.setPointerCapture(event.pointerId)
+                dragged.current = true
+              } catch {
+                // 指针可能已在两次事件之间结束：放弃这次拖拽，让它退化成一次普通点击
+                dragX.current = null
+              }
+            }
+            if (dragged.current || event.pointerType !== "mouse") return
+            const bounds = event.currentTarget.getBoundingClientRect()
+            const x = ((event.clientX - bounds.left) / bounds.width - 0.5) * 2
+            const y = ((event.clientY - bounds.top) / bounds.height - 0.5) * 2
+            stageRef.current?.style.setProperty("--tilt-x", `${(-y * 3.5).toFixed(2)}deg`)
+            stageRef.current?.style.setProperty("--tilt-y", `${(x * 5).toFixed(2)}deg`)
+          }}
+          onPointerUp={(event) => {
+            const startX = dragX.current
+            const wasDrag = dragged.current
+            dragX.current = null
+            dragged.current = false
+            if (startX === null || !wasDrag) return
+            const distance = event.clientX - startX
+            if (Math.abs(distance) > 45) step(distance > 0 ? -1 : 1)
+          }}
+          onPointerCancel={resetTilt}
+          onPointerLeave={resetTilt}
+        >
+          <div className="preview-orbit" aria-hidden="true" />
+          {frames.map(({ index, position }) => {
+            const url = images[index]
+            const label = labels[index]
+            const frameTag = `FRAME / ${String(index + 1).padStart(2, "0")}`
+            const inner = (
+              <>
+                <span className="frame-index">
+                  {frameTag}
+                  {position === "back" && hidden > 0 ? ` +${hidden}` : ""}
+                </span>
                 <img
-                  src={proxiedImage(url, IMAGE_WIDTH.thumb)}
-                  alt=""
-                  loading="lazy"
+                  className="frame-shot"
+                  src={proxiedImage(url, IMAGE_WIDTH.plate)}
+                  // 命中缓存时 load 事件可能早于监听器挂载，complete 分支保证首帧就量对方向
+                  ref={(el) => {
+                    if (el?.complete) rememberRatio(index, el)
+                  }}
+                  alt={
+                    position === "active"
+                      ? isZh
+                        ? `${name} 预览图 ${index + 1}`
+                        : `${name} preview ${index + 1}`
+                      : ""
+                  }
+                  // 台上最多 4 张、全都在视口内，所以不写 loading="lazy"：
+                  // 侧牌先以 lazy 挂载、被选中时才改成 eager，属性翻转不一定重新触发加载，
+                  // 会出现「当前张空白 + 量不到方向」；交给浏览器自己按可见性加载
                   decoding="async"
+                  fetchPriority={position === "active" ? "high" : "auto"}
+                  onLoad={(event) => rememberRatio(index, event.currentTarget)}
                 />
+                <span className="frame-caption">
+                  <strong title={label.title}>{label.title}</strong>
+                  {/* 目录只是补充线索：没有目录时 frameLabel 已退回项目名，与页头重复，整行不渲染；
+                      读屏走按钮名（编号 + 文件名），不必听完整条 URL 路径 */}
+                  {label.path !== name ? (
+                    <small aria-hidden="true" title={label.path}>
+                      {label.path}
+                    </small>
+                  ) : null}
+                </span>
+              </>
+            )
+            if (position === "back") {
+              return (
+                <div
+                  className="preview-frame"
+                  data-position="back"
+                  aria-hidden="true"
+                  key={`${index}-${url}`}
+                >
+                  {inner}
+                </div>
+              )
+            }
+            return (
+              <button
+                type="button"
+                className="preview-frame"
+                data-position={position}
+                aria-current={position === "active" ? "true" : undefined}
+                // 名字以可见文字「FRAME / 0N」开头再补文件名：既满足 WCAG 2.5.3（名称含可见标签），
+                // 又不把整条 URL 目录塞给读屏（目录那行已 aria-hidden）
+                aria-label={`${frameTag} ${label.title}`}
+                tabIndex={-1}
+                onClick={() => setActive(index)}
+                key={`${index}-${url}`}
+              >
+                {inner}
               </button>
-            ))}
+            )
+          })}
+        </div>
+
+        {total > 1 ? (
+          <div className="preview-controls">
+            <button
+              type="button"
+              onClick={() => step(-1)}
+              aria-label={isZh ? "上一张预览图" : "Previous preview"}
+            >
+              ←
+            </button>
+            {/* 编号条是一组「选哪一张」的开关，给个组名，读屏才知道这一排 01…12 是什么 */}
+            <div role="group" aria-label={isZh ? "预览图编号" : "Preview numbers"}>
+              {images.map((url, index) => {
+                const num = String(index + 1).padStart(2, "0")
+                return (
+                  <button
+                    type="button"
+                    key={`${index}-${url}`}
+                    className={index === safeActive ? "active" : ""}
+                    aria-current={index === safeActive ? "true" : undefined}
+                    // 以可见的编号开头（WCAG 2.5.3），再补文件名；title 留给鼠标
+                    aria-label={`${num} ${labels[index].title}`}
+                    title={labels[index].title}
+                    onClick={() => setActive(index)}
+                  >
+                    {num}
+                  </button>
+                )
+              })}
+            </div>
+            <button
+              type="button"
+              onClick={() => step(1)}
+              aria-label={isZh ? "下一张预览图" : "Next preview"}
+            >
+              →
+            </button>
           </div>
-        </>
-      ) : null}
-    </div>
+        ) : null}
+      </div>
+    </section>
   )
 }
 

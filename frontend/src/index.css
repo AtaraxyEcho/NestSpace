@@ -480,84 +480,135 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .metric-strip div { min-height: 180px; padding: 34px; border-right: 1px solid rgba(232,223,208,.18); }
 .metric-strip span { display: block; font: 10px var(--font-mono); letter-spacing: .15em; color: #b8ab98; }
 .metric-strip strong { display: block; margin-top: 34px; font-size: clamp(48px, 5vw, 72px); line-height: .8; }
-/* 详情页预览图「堆叠卡片」相册：悬停/聚焦时展开成扇形；不加模糊、不做无限循环 */
-/* 预览区不套用叙述段落的 128px 大留白，否则图会被推到很低 */
-.preview-section { background: var(--bg-base); padding-top: var(--section-pad-dense); padding-bottom: var(--section-pad-dense); }
-.preview-gallery {
-  display: flex; flex-direction: column; align-items: center; gap: 18px;
-  width: 100%; margin: 8px auto 0;
+/* 详情页预览：左文案栏 + 右「观察台」3D 封面流（参照稿版面）。
+   与参照稿的三处收口：过渡 820/550ms → ≤280ms；后牌去掉 blur；微标签 ≥10px。
+   预览区不套用叙述段落的 128px 大留白，否则画框会被推到很低 */
+.preview-section {
+  position: relative; align-items: center;
+  display: grid; grid-template-columns: minmax(240px, .58fr) minmax(0, 1.42fr);
+  gap: clamp(36px, 6vw, 96px);
+  padding-top: var(--section-pad-dense); padding-bottom: var(--section-pad-dense);
+  background:
+    radial-gradient(circle at 70% 48%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 32%),
+    linear-gradient(115deg, color-mix(in srgb, var(--bg-surface) 55%, transparent), transparent 55%);
 }
-.preview-deck {
-  --fan: 12px;         /* 邻卡的横向展开距离（静止态几乎重合） */
-  --fan-rot: 2.5deg;   /* 邻卡的 Y 轴旋转 */
-  --fan-rise: 3px;     /* 越靠外越往上抬一点，形成扇形弧 */
-  position: relative; display: grid; place-items: center;
-  perspective: 1400px; touch-action: pan-y;
-  /* 主图解码前不占位会整块跳一下；先按横图常见的比例留出盒子 */
-  min-height: min(46vh, 380px);
+/* 坐标纸底纹只铺在中间，两侧淡出——铺满会和文案抢对比 */
+.preview-section::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .22;
+  background-image: linear-gradient(var(--line-hair) 1px, transparent 1px), linear-gradient(90deg, var(--line-hair) 1px, transparent 1px);
+  background-size: 84px 84px; mask-image: linear-gradient(90deg, transparent, #000 45%, transparent);
 }
-/* 展开只在有指针的设备上生效，并按断点收窄距离：
-   ① 触屏点按会让 deck 获得焦点，若无 hover 门槛会误展开（触屏也看不出扇形的意义）；
-   ② ±fan + 半张邻卡必须留在视口内，否则最外侧两张会被 html 的 overflow-x: clip 无声裁掉。
-   全部条件都带 hover 前缀，避免任一断点在触屏上生效。 */
-@media (hover: hover) and (pointer: fine) {
-  .preview-deck.is-open { --fan: 150px; --fan-rot: 13deg; --fan-rise: 7px; }
+.preview-copy { position: relative; z-index: 2; align-self: center; }
+.preview-copy h2 {
+  max-width: 500px; margin: 18px 0 26px;
+  font-size: clamp(42px, 4.5vw, 64px); line-height: .96; letter-spacing: -.035em;
 }
-@media (hover: hover) and (pointer: fine) and (max-width: 1300px) {
-  .preview-deck.is-open { --fan: 112px; --fan-rot: 12deg; --fan-rise: 6px; }
+.preview-copy h2 em { display: block; margin-top: 18px; color: var(--accent); font-size: .3em; font-weight: 400; letter-spacing: .03em; }
+.preview-copy > p { max-width: 390px; font-size: 16px; line-height: 1.75; color: var(--ink-secondary); }
+.preview-pagination { display: flex; align-items: center; gap: 14px; margin-top: 44px; font: 10px var(--font-mono); letter-spacing: .15em; }
+.preview-pagination strong { font-size: 20px; font-weight: 500; color: var(--accent); }
+.preview-pagination i { width: 70px; height: 1px; background: var(--line-strong); position: relative; }
+/* 进度条按真实张数分段（--preview-progress 由组件写入），不是装饰性定长 */
+.preview-pagination i::after {
+  content: ""; position: absolute; left: 0; top: -1px; height: 3px; background: var(--accent);
+  width: var(--preview-progress, 100%); transition: width 240ms var(--ease-hover, ease-out);
 }
-@media (hover: hover) and (pointer: fine) and (max-width: 1100px) {
-  .preview-deck.is-open { --fan: 88px; --fan-rot: 11deg; --fan-rise: 5px; }
+.preview-pagination span { color: var(--ink-tertiary); }
+/* 侧牌按自身宽度百分比横向外扩（±76%/±23% 再乘 scale），超出列间距的部分会蹭到左栏文案，
+   所以在列这一层裁掉。选 clip 而不是 hidden：规范里 clip 不算 grouping（transform-style 的
+   压平条件是 "any value other than visible or clip"），且另一轴保持 visible 时不会像 hidden
+   那样被强算成 auto 而多出一个滚动容器。 */
+.preview-gallery { min-width: 0; position: relative; z-index: 2; overflow-x: clip; display: flex; flex-direction: column; gap: 18px; }
+.preview-stage {
+  --tilt-x: 0deg; --tilt-y: 0deg;
+  height: clamp(420px, 62vh, 610px); position: relative;
+  perspective: 1800px; transform-style: preserve-3d;
+  cursor: grab; touch-action: pan-y; user-select: none;
 }
-@media (hover: hover) and (pointer: fine) and (max-width: 760px) {
-  .preview-deck.is-open { --fan: 64px; --fan-rot: 10deg; --fan-rise: 4px; }
+.preview-stage:active { cursor: grabbing; }
+.preview-stage:focus-visible { outline: 1px solid var(--accent); outline-offset: 10px; }
+/* 椭圆「轨道」只是版面深度，不给它交互 */
+.preview-orbit {
+  position: absolute; width: 88%; height: 44%; left: 6%; bottom: 1%;
+  border: 1px solid var(--line-default); border-radius: 50%;
+  transform: rotateX(74deg) translateZ(-130px);
+  box-shadow: inset 0 0 80px color-mix(in srgb, var(--accent) 8%, transparent);
 }
-.preview-deck:focus-visible { outline: 1px solid var(--accent); outline-offset: 8px; }
-.deck-card {
-  grid-area: 1 / 1;
-  padding: 10px; border: 1px solid var(--line-strong); background: var(--bg-elevated);
-  cursor: pointer;
-  transform:
-    translate3d(
-      calc(var(--offset) * var(--fan)),
-      calc(var(--abs) * var(--fan-rise) * -1),
-      calc(var(--abs) * -26px)
-    )
-    rotateY(calc(var(--offset) * var(--fan-rot)))
-    scale(calc(1 - var(--abs) * 0.05));
-  transition: transform 300ms var(--ease-hover, ease-out), box-shadow 300ms ease-out, opacity 200ms ease-out;
-  box-shadow: 10px 12px 0 color-mix(in srgb, var(--accent) 16%, transparent), 0 34px 60px -34px rgba(42,38,32,.32);
+.preview-orbit::before, .preview-orbit::after {
+  content: ""; position: absolute; inset: 16%; border: 1px dashed var(--line-default); border-radius: inherit;
 }
-.deck-card.is-peek { opacity: .78; }
-.deck-card img { display: block; }
-/* 横图走宽板；竖图（手机截图）收窄成手机框，contain 不裁 */
-.preview-deck.is-landscape .deck-card.is-active img { max-width: min(880px, 82vw); max-height: 62vh; object-fit: cover; }
-.preview-deck.is-portrait .deck-card.is-active img { max-width: min(420px, 72vw); max-height: 70vh; object-fit: contain; }
-/* 邻卡统一小尺寸，避免和主图抢视觉 */
-.deck-card.is-peek img { max-width: min(560px, 62vw); max-height: 42vh; object-fit: cover; }
-.preview-nav-row { display: flex; align-items: center; gap: 14px; }
-.preview-counter { font: 9px var(--font-mono); letter-spacing: .14em; color: var(--ink-tertiary); }
-/* 44px 触控目标（原来 34px 且贴边外扩，手机上难点也不合规） */
-.preview-nav {
-  width: 44px; height: 44px; display: grid; place-items: center;
-  font: 16px var(--font-mono); line-height: 1;
-  border: 1px solid var(--line-strong); background: var(--bg-elevated); color: var(--ink-primary);
-  cursor: pointer; transition: background 200ms var(--ease-hover, ease-out);
+.preview-orbit::after { inset: 33%; }
+/* 画框高度固定、宽度随主图方向变：竖图不该被塞进横框裁掉。
+   所有牌共用同一尺寸约束，侧牌的 translate 百分比才是同一个基准 */
+.preview-frame {
+  position: absolute; left: 50%; top: 45%; width: min(720px, 80%); height: min(72%, 420px);
+  display: flex; flex-direction: column; padding: 0; text-align: left; color: inherit;
+  border: 1px solid var(--line-strong); background: var(--bg-elevated); cursor: pointer;
+  transform-style: preserve-3d; backface-visibility: hidden;
+  box-shadow: 0 38px 80px -42px color-mix(in srgb, var(--ink-primary) 42%, transparent);
+  transition: transform 280ms var(--ease-enter), opacity 220ms ease,
+    width 280ms var(--ease-enter), box-shadow 280ms ease;
 }
-.preview-nav:hover { background: var(--bg-surface); }
-/* 十几张时横向滚动，而不是换行堆成一大块 */
-.preview-thumbs {
-  display: flex; flex-wrap: nowrap; gap: 8px; justify-content: flex-start;
-  max-width: min(880px, 88vw); overflow-x: auto; padding-bottom: 6px;
+.preview-stage.is-portrait .preview-frame { width: min(230px, 36%); }
+.preview-frame[data-position="active"] {
+  z-index: 4; opacity: 1; pointer-events: auto;
+  transform: translate(-50%, -50%) rotateX(var(--tilt-x)) rotateY(var(--tilt-y)) translateZ(80px);
+  box-shadow: 0 55px 95px -48px color-mix(in srgb, var(--ink-primary) 55%, transparent),
+    12px 14px 0 color-mix(in srgb, var(--accent) 12%, transparent);
 }
-.preview-thumb {
-  flex: 0 0 auto; width: 84px; height: 56px; padding: 0; overflow: hidden; cursor: pointer;
-  border: 1px solid var(--line-default); background: var(--bg-elevated);
+.preview-frame[data-position="previous"] {
+  z-index: 2; opacity: .43; filter: saturate(.6);
+  transform: translate(-76%, -44%) rotateY(42deg) rotateZ(-2deg) translateZ(-190px) scale(.76);
 }
-.preview-thumb img { width: 100%; height: 100%; display: block; object-fit: cover; }
-.preview-thumb.is-active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.preview-frame[data-position="next"] {
+  z-index: 3; opacity: .58; filter: saturate(.72);
+  transform: translate(-23%, -44%) rotateY(-42deg) rotateZ(2deg) translateZ(-160px) scale(.79);
+}
+/* 代表「后面还有 N 张」的后牌：只做压暗与后退，不加 blur（不做模糊动画） */
+.preview-frame[data-position="back"] {
+  z-index: 1; opacity: .18; pointer-events: none;
+  transform: translate(-50%, -36%) rotateX(8deg) translateZ(-380px) scale(.64);
+}
+/* 相框外的编号牌：frame-index 在画框上沿之外，所以画框本身不能 overflow:hidden */
+.frame-index {
+  position: absolute; z-index: 5; left: -1px; top: -29px; padding: 7px 10px;
+  border: 1px solid var(--line-strong); background: var(--bg-elevated);
+  font: 10px var(--font-mono); letter-spacing: .16em; color: var(--ink-tertiary);
+}
+.frame-shot { flex: 1; min-height: 0; width: 100%; display: block; object-fit: contain; }
+/* 舞台上整体禁选是为了拖动不选中图，但图注里的文件名/路径要能复制，单独放开 */
+/* 图注用 flex 而不是固定两列：没有目录可显示时（牌面只剩文件名一行），
+   标题要自然占满，而不是被 1fr/1.5fr 挤在半格里 */
+.frame-caption {
+  flex: 0 0 auto; min-height: 56px; padding: 10px 16px; display: flex;
+  align-items: center; gap: 12px;
+  border-top: 1px solid var(--line-default); background: var(--bg-elevated);
+  user-select: text;
+}
+/* 标题与路径都来自图片 URL，长文件名一律省略号，完整值放 title */
+.frame-caption strong { flex: 1 1 auto; min-width: 0; font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frame-caption small { flex: 0 1 auto; min-width: 0; font: 10px/1.5 var(--font-mono); letter-spacing: .06em; color: var(--ink-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-controls { min-height: 56px; display: grid; grid-template-columns: 52px 1fr 52px; border: 1px solid var(--line-strong); background: var(--bg-surface); }
+.preview-controls > button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 17px; }
+/* 悬停反馈：底色单提一档（浅 #f0e8d4→#f5eed9）几乎看不出来，必须同时把颜色抬到主墨色。
+   不用 color-mix——构建器会为不支持它降级成实心 var(--accent)，而箭头文字正是 accent，降级路径下会糊在底色里 */
+.preview-controls > button:hover { background: var(--bg-elevated); color: var(--ink-primary); }
+.preview-controls > button:first-child { border-right: 1px solid var(--line-default); }
+.preview-controls > button:last-child { border-left: 1px solid var(--line-default); }
+/* 编号条：十几张时换行而不是把格子压到 20px，触控目标保持 ≥44px */
+.preview-controls > div { display: flex; flex-wrap: wrap; }
+.preview-controls > div button {
+  flex: 0 0 auto; min-width: 52px; min-height: 44px; border: 0; border-right: 1px solid var(--line-hair);
+  background: transparent; color: var(--ink-tertiary); cursor: pointer;
+  font: 10px var(--font-mono); letter-spacing: .08em;
+}
+.preview-controls > div button:last-child { border-right: 0; }
+.preview-controls > div button.active { background: var(--accent-dark); color: #f5eed9; }
+/* 编号按钮也要有悬停反馈（原来只写在两侧箭头上，12 个编号零反馈）；当前张不反色 */
+.preview-controls > div button:hover:not(.active) { background: var(--bg-elevated); color: var(--ink-primary); }
 /* 管理端抽屉里的相册缩略图（首张标「封面」） */
-.preview-thumbs-admin { justify-content: flex-start; flex-wrap: wrap; max-width: 100%; margin-bottom: 19px; overflow: visible; }
+.preview-thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+.preview-thumbs-admin { margin-bottom: 19px; }
 .preview-thumb-admin { position: relative; width: 96px; height: 64px; overflow: hidden; border: 1px solid #c5c5bc; background: #ecebe5; }
 .preview-thumb-admin img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .preview-thumb-admin em {
@@ -566,9 +617,11 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   background: var(--accent); color: var(--bg-base);
 }
 @media (prefers-reduced-motion: reduce) {
-  /* 减少动态效果：不展开扇形，只留静态堆叠 */
-  .preview-deck.is-open { --fan: 12px; --fan-rot: 2.5deg; --fan-rise: 3px; }
-  .deck-card { transition: none; }
+  /* 主牌写回无倾斜的静态变换：JS 设的 --tilt-* 于是完全不生效，翻页只剩位置切换。
+     侧牌的 3D 排布保留——那是版面而不是动画，抹掉后就看不见邻牌了。 */
+  .preview-frame { transition: none; }
+  .preview-frame[data-position="active"] { transform: translate(-50%, -50%); }
+  .preview-pagination i::after { transition: none; }
 }
 .evolution-section { background: var(--bg-surface); }
 .evolution-list { border-top: 1px solid var(--line-strong); }
@@ -576,9 +629,9 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .evolution-list .event-index, .evolution-list time { font: 10px var(--font-mono); letter-spacing: .12em; color: var(--ink-tertiary); }
 .evolution-list h3 { margin: 0; font-size: 24px; }
 .evolution-list p { margin: 0; font-size: 15px; line-height: 1.6; color: var(--ink-secondary); }
-/* 文档区与叙述区共用同一左边缘（原来居中，切页签时内容会横向跳动）；内容列按 58ch 收窄，
-   中英文行长都落在可读区间 */
-.document-section { display: grid; grid-template-columns: 220px minmax(0, 58ch); justify-content: start; gap: var(--gutter); }
+/* 文档区保持居中排版（阅读版面），并给足内容宽度：
+   58ch 太窄——中英文行长都偏短，长 compose/YAML 行也只能在窄盒子里横向滚动 */
+.document-section { display: grid; grid-template-columns: 220px minmax(0, 920px); justify-content: center; gap: clamp(32px, 5vw, 96px); }
 .document-section > aside { position: sticky; top: calc(var(--sticky-offset) + 40px); align-self: start; display: flex; flex-direction: column; }
 .document-section > aside a { padding: 12px 0; border-bottom: 1px solid var(--line-hair); font: 9px var(--font-mono); color: var(--ink-tertiary); }
 /* 锚点跳转（READ FIELD NOTES / README 目录 / compose 定位）统一避开 72px 吸顶头 */
@@ -592,23 +645,23 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .markdown-body blockquote { margin: 0 0 34px; padding-left: 24px; border-left: 3px solid var(--accent); font-size: 21px; font-style: italic; line-height: 1.6; }
 /* 细滚动条：默认滚动条在深色代码块里非常跳，统一成一档低对比的细条。
    刻意不隐藏（display:none / scrollbar-width:none 会丢掉"这里能滚"的可发现性） */
-.preview-thumbs, .md-table-wrap, .project-table-wrap, .editor-fields,
+.md-table-wrap, .project-table-wrap, .editor-fields,
 .code-block pre, .readme-doc pre {
   scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent;
 }
-.preview-thumbs::-webkit-scrollbar, .md-table-wrap::-webkit-scrollbar,
+.md-table-wrap::-webkit-scrollbar,
 .project-table-wrap::-webkit-scrollbar, .editor-fields::-webkit-scrollbar,
 .code-block pre::-webkit-scrollbar, .readme-doc pre::-webkit-scrollbar { width: 10px; height: 10px; }
-.preview-thumbs::-webkit-scrollbar-track, .md-table-wrap::-webkit-scrollbar-track,
+.md-table-wrap::-webkit-scrollbar-track,
 .project-table-wrap::-webkit-scrollbar-track, .editor-fields::-webkit-scrollbar-track,
 .code-block pre::-webkit-scrollbar-track, .readme-doc pre::-webkit-scrollbar-track { background: transparent; }
-.preview-thumbs::-webkit-scrollbar-thumb, .md-table-wrap::-webkit-scrollbar-thumb,
+.md-table-wrap::-webkit-scrollbar-thumb,
 .project-table-wrap::-webkit-scrollbar-thumb, .editor-fields::-webkit-scrollbar-thumb,
 .code-block pre::-webkit-scrollbar-thumb, .readme-doc pre::-webkit-scrollbar-thumb {
   border: 2px solid transparent; border-radius: 8px; background-clip: content-box;
   background-color: var(--line-strong);
 }
-.preview-thumbs::-webkit-scrollbar-thumb:hover, .md-table-wrap::-webkit-scrollbar-thumb:hover,
+.md-table-wrap::-webkit-scrollbar-thumb:hover,
 .project-table-wrap::-webkit-scrollbar-thumb:hover, .editor-fields::-webkit-scrollbar-thumb:hover,
 .code-block pre::-webkit-scrollbar-thumb:hover, .readme-doc pre::-webkit-scrollbar-thumb:hover {
   background-color: var(--ink-tertiary);
@@ -670,7 +723,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   background: var(--bg-surface); font-size: 13px; color: var(--ink-secondary);
 }
 .compose-doc h3 { margin-bottom: 12px; }
-.code-block pre { margin: 0; padding: 18px 22px; max-height: min(56vh, 520px); overflow: auto; overscroll-behavior: contain; }
+.code-block pre { margin: 0; padding: 18px 22px; max-height: min(72vh, 760px); overflow: auto; overscroll-behavior: contain; }
 .code-block pre code { font: 12.5px/1.7 var(--font-mono); }
 
 /* 详情页加载/未找到占位 */
@@ -943,6 +996,12 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .detail-hero-grid { gap: 4vw; }
   .detail-narrative { gap: 6vw; }
   .capability-grid { grid-template-columns: 1fr 1fr; }
+  /* 预览区收成单列后，文案栏自己排成两栏：标题在左、说明与页码在右 */
+  .preview-section { grid-template-columns: 1fr; gap: 40px; align-items: start; }
+  .preview-copy { display: grid; grid-template-columns: 1fr 1fr; gap: 0 40px; align-items: end; }
+  .preview-copy .eyebrow, .preview-copy h2 { grid-column: 1; }
+  .preview-copy > p { grid-column: 2; grid-row: 1 / 3; align-self: end; }
+  .preview-pagination { grid-column: 2; margin-top: 0; }
   .admin-shell { grid-template-columns: 210px 1fr; }
   .admin-sidebar { width: 210px; }
   .admin-content, .admin-topbar { padding-left: 28px; padding-right: 28px; }
@@ -1016,9 +1075,22 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .detail-tabs { overflow-x: auto; }
   .detail-tabs button { min-width: 125px; padding: 0 16px; }
   .detail-section-label { margin-bottom: 42px; }
-  /* 预览区扇形在手机上收小；缩略图条占满宽度并横向滚动（留白与边距已由 token 统一处理） */
-  /* 扇形的展开距离与 hover 门槛已由上方按断点统一处理，这里不再重复设置 */
-  .preview-thumbs { max-width: 100%; }
+  /* 观察台在手机上收成整幅：画框变矮、主图收窄一点好把侧牌露出来，编号条保持 44px 触控目标。
+     .preview-section 这里保持 1100 断点那套单列 grid 不动（改成 block 会让 gap:40px 失效，文案与舞台贴死）；
+     下面把 .preview-copy 从两栏 grid 还原成 block 是另一回事——它自己不再需要左右分栏 */
+  .preview-copy { display: block; }
+  .preview-copy h2 { font-size: 40px; margin: 14px 0 16px; }
+  .preview-copy > p { font-size: 14px; }
+  .preview-pagination { margin: 22px 0 0; }
+  .preview-stage { height: 380px; }
+  .preview-frame { width: 78%; height: min(70%, 320px); }
+  .preview-stage.is-portrait .preview-frame { width: 50%; }
+  .preview-frame[data-position="previous"] { transform: translate(-78%, -44%) rotateY(42deg) translateZ(-180px) scale(.72); }
+  .preview-frame[data-position="next"] { transform: translate(-22%, -44%) rotateY(-42deg) translateZ(-160px) scale(.74); }
+  .frame-caption { min-height: 46px; padding: 8px 12px; }
+  .frame-caption small { display: none; }
+  .preview-controls { grid-template-columns: 44px 1fr 44px; }
+  .preview-controls > div button { min-width: 44px; }
   .detail-narrative { grid-template-columns: 1fr; gap: 58px; }
   .detail-narrative h2 { font-size: 42px; }
   .capability-grid { grid-template-columns: 1fr; }
