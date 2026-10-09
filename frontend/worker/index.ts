@@ -1,6 +1,14 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { getCookie } from 'hono/cookie'
+// 相册判据的唯一来源。用带 .ts 后缀的说明符是刻意的：闸门测试在 Node 里直接 import 本文件
+// （type stripping），无后缀的说明符在 Node ESM 下解析不到；worker/tsconfig.json 因此开了
+// allowImportingTsExtensions。管理端表单的即时校验必须走同一份规则，否则会出现
+// "前端说不违法、保存却 400"——那是本项目在后台明令禁止的假状态。
+// 本文件仍再导出 sanitizeImageUrl，闸门测试既有的 import 路径因此不必改。
+import { PREVIEW_IMAGE_LIMIT, sanitizeImageUrl } from '../src/utils/previewRules.ts'
+// 双语字段（挑战/方案）的读侧规则，与前台/管理端共用同一份（旧单列只读兜底）
+import { asBilingual, pairFromSingleText } from '../src/utils/bilingual.ts'
 
 // 环境变量与 D1 数据库绑定定义
 type Env = {
@@ -20,6 +28,9 @@ type Env = {
     ACCESS_ALLOWED_EMAILS?: string
     // 静态资产绑定（wrangler.toml [assets].binding）：用于取回首页 HTML 做 SEO 注入
     ASSETS: Fetcher
+    // 匿名使用度量（Analytics Engine 数据集 nestspace_usage，见 wrangler.toml）。
+    // 声明为可选：本地精简配置或绑定缺失时埋点整条降级为 no-op，不能因此让请求 500。
+    METRICS?: AnalyticsEngineDataset
   }
 }
 
@@ -89,6 +100,7 @@ app.get('/projects', async (c) => {
       SELECT
         id, date, status, name, cn, latin, habitat, type, language,
         stars, year, shape, version, updated, repository, challenge, solution,
+        challenge_json, solution_json,
         demo_url, demo_enabled,
         description_json, features_json, metrics_json, timeline_json, preview_image_url, preview_images_json
       FROM projects
@@ -119,9 +131,9 @@ app.get('/projects', async (c) => {
         // 演示入口：未上线时不下发地址，避免未公开的演示链接外泄
         demoEnabled,
         demoUrl: demoEnabled ? row.demo_url || '' : '',
-        challenge: row.challenge || '',
-        solution: row.solution || '',
-        description: safeJsonParse(row.description_json, { en: '', zh: '' }),
+        challenge: asBilingual(row.challenge_json, row.challenge),
+        solution: asBilingual(row.solution_json, row.solution),
+        description: asBilingual(row.description_json),
         features: safeJsonParse(row.features_json, []),
         metrics: safeJsonParse(row.metrics_json, []),
         timeline: safeJsonParse(row.timeline_json, []),
@@ -146,6 +158,7 @@ app.get('/projects/:id', async (c) => {
       SELECT
         id, date, status, name, cn, latin, habitat, type, language,
         stars, year, shape, version, updated, repository, challenge, solution,
+        challenge_json, solution_json,
         demo_url, demo_enabled,
         description_json, features_json, metrics_json, timeline_json,
         readme_zh, readme_en, compose_dev, compose_prod, docs_synced_at, preview_image_url, preview_images_json
@@ -178,9 +191,9 @@ app.get('/projects/:id', async (c) => {
       // 与列表接口同口径：未上线时不下发演示地址
       demoEnabled,
       demoUrl: demoEnabled ? row.demo_url || '' : '',
-      challenge: row.challenge || '',
-      solution: row.solution || '',
-      description: safeJsonParse(row.description_json, { en: '', zh: '' }),
+      challenge: asBilingual(row.challenge_json, row.challenge),
+      solution: asBilingual(row.solution_json, row.solution),
+      description: asBilingual(row.description_json),
       features: safeJsonParse(row.features_json, []),
       metrics: safeJsonParse(row.metrics_json, []),
       timeline: safeJsonParse(row.timeline_json, []),
@@ -308,6 +321,98 @@ app.get('/img', async (c) => {
   } catch {
     return c.redirect(target.toString(), 302)
   }
+})
+
+// ==========================================
+// 1b. 匿名使用度量（Analytics Engine）
+// ==========================================
+// 为什么要这一条：本轮改版（观察台 + 批量导入）此前没有任何度量，"有没有让人多看几张图"
+// "批量导入是否真的减少了手工粘贴"都无法回答。这里只收三类聚合事件，**不落 D1、不需要迁移、
+// 不存 IP/UA/cookie/项目 id 以外的任何个人数据**，免费额度（每月 1000 万行）远够用。
+// 查询：npx wrangler analytics query nestspace_usage（或在 Cloudflare 控制台 Analytics Engine 看）。
+// 绑定缺失时整条降级为 no-op——埋点永远不该让一次页面访问失败。
+
+/** 事件名 → 允许的 m（方式）取值。不在表里的组合一律 400，避免脏数据把数据集写花 */
+export const USAGE_EVENTS: Record<string, readonly string[]> = {
+  // 观察台：一次相册首屏 + 每次翻页（按触发方式区分，用来判断缩略图索引是否真的有用）
+  // plate = 点侧牌选张，thumb = 点索引条缩略图跳张
+  deck: ['view', 'thumb', 'plate', 'arrow', 'drag', 'key', 'zoom'],
+  // 代理取图失败（h 为图源主机名）：分母用 deck view，回答"图片加载失败率"
+  imgfail: [],
+  // 后台按目录批量导入的结果
+  dirimport: ['ok', 'ratelimited', 'notfound', 'error'],
+}
+
+const USAGE_RATE_LIMIT = 120
+const USAGE_RATE_WINDOW_MS = 60 * 1000
+const USAGE_STORE_MAX = 2000
+const USAGE_BODY_MAX = 1024
+const usageBuckets = new Map<string, { count: number; firstAt: number }>()
+
+const HOSTNAME_RE = /^[a-z0-9.-]{1,63}$/
+
+/** 只清过期桶；以前是超容量就 clear() 全清，等于让攻击者用新 IP 把所有人的计数一起抹掉 */
+function evictUsageBuckets(now: number) {
+  for (const [key, bucket] of usageBuckets) {
+    if (now - bucket.firstAt > USAGE_RATE_WINDOW_MS) usageBuckets.delete(key)
+  }
+}
+
+app.post('/usage', async (c) => {
+  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown'
+  const now = Date.now()
+  const bucket = usageBuckets.get(ip)
+  if (!bucket || now - bucket.firstAt > USAGE_RATE_WINDOW_MS) {
+    if (usageBuckets.size >= USAGE_STORE_MAX) evictUsageBuckets(now)
+    // 淘汰后仍然满（极端并发）：直接放行这一条但不再记账，宁可不限流也不无界增长
+    if (usageBuckets.size < USAGE_STORE_MAX) usageBuckets.set(ip, { count: 1, firstAt: now })
+  } else {
+    bucket.count += 1
+    if (bucket.count > USAGE_RATE_LIMIT) {
+      // 静默丢弃：埋点被刷不该变成给访客的错误，也不该占满数据集
+      return c.body(null, 204)
+    }
+  }
+
+  // 先量体积再解析：这是个公开无鉴权端点，不能让人用大 body 把 CPU/内存买走
+  const text = await c.req.text()
+  if (text.length > USAGE_BODY_MAX) {
+    return c.json({ error: `请求体过大（上限 ${USAGE_BODY_MAX} 字节）` }, 413)
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return c.json({ error: '请求体不是合法的 JSON' }, 400)
+  }
+  const event = (raw as Record<string, unknown>)?.e
+  if (typeof event !== 'string' || !USAGE_EVENTS[event]) {
+    return c.json({ error: `未知事件：${String(event).slice(0, 32)}` }, 400)
+  }
+  const method = (raw as Record<string, unknown>)?.m
+  if (method !== undefined && method !== '') {
+    if (typeof method !== 'string' || !USAGE_EVENTS[event].includes(method)) {
+      return c.json({ error: `事件 ${event} 不接受方式：${String(method).slice(0, 32)}` }, 400)
+    }
+  }
+  const subject = (raw as Record<string, unknown>)?.h
+  let host = ''
+  if (typeof subject === 'string') {
+    // 只收小写字母数字点横杠的主机名形态，其余（带路径 / 带查询 / 超长）当没给，不进数据集
+    const lower = subject.trim().toLowerCase()
+    if (HOSTNAME_RE.test(lower)) host = lower
+  }
+
+  try {
+    c.env.METRICS?.writeDataPoint({
+      blobs: [event, typeof method === 'string' ? method : '', host],
+      doubles: [1],
+      indexes: [event],
+    })
+  } catch {
+    // 写入失败不影响响应：度量丢一条比给前端报错好
+  }
+  return c.body(null, 204)
 })
 
 // ==========================================
@@ -470,16 +575,7 @@ adminApp.get('/projects', async (c) => {
       SELECT * FROM projects ORDER BY sort_order ASC, date DESC LIMIT ${QUERY_ROW_LIMIT}
     `).all()
 
-    const formatted = results.map((row: any) => ({
-      ...row,
-      // 管理端要原值供编辑；前端类型是布尔，D1 读回的是 0/1，必须在此转换
-      demoEnabled: row.demo_enabled === 1,
-      demoUrl: row.demo_url || '',
-      description: safeJsonParse(row.description_json, {}),
-      features: safeJsonParse(row.features_json, []),
-      metrics: safeJsonParse(row.metrics_json, []),
-      timeline: safeJsonParse(row.timeline_json, []),
-    }))
+    const formatted = results.map(adminProjectRow)
 
     return c.json(formatted)
   } catch (err: any) {
@@ -509,18 +605,24 @@ adminApp.post('/projects', async (c) => {
     if (demoUrl === null) {
       return c.json({ error: '演示地址无效：仅支持 http/https 地址或域名' }, 400)
     }
-    // 与 PUT 同判据：开关与地址是一对约束。这里不能静默降级为 0，
-    // 否则管理端会显示"已上线"而库里是 0（假状态）。
+    // 与 PUT 同判据：开关必须是布尔值。不能靠 `=== true` 把 "true" 之类静默降级成 0，
+    // 那会一边回 201 一边在库里写 0（管理端显示"已上线"而库里是 0 的假状态）；
+    // 且开关与地址是一对约束，开启前必须先有地址。
+    if (body.demoEnabled !== undefined && typeof body.demoEnabled !== 'boolean') {
+      return c.json({ error: 'demoEnabled 必须是布尔值' }, 400)
+    }
     if (body.demoEnabled === true && !demoUrl) {
       return c.json({ error: '开启演示入口前必须先填写演示地址' }, 400)
     }
     const demoEnabled = body.demoEnabled === true ? 1 : 0
 
-    // 预览图/相册：与 PUT 共用 validatePreviewInput 同一条规则（含封面补齐），非法条目直接 400
-    const previewChecked = validatePreviewInput(
-      body.previewImages !== undefined ? body.previewImages : body.preview_images_json,
-      body.previewImageUrl !== undefined ? body.previewImageUrl : body.preview_image_url,
-    )
+    // 预览图/相册：与 PUT 共用 validatePreviewInput 同一条规则，非法条目直接 400；
+    // 两种拼写同时出现且内容不一致时先被 previewFieldsFromBody 挡下（不再猜哪一个）
+    const previewFields = previewFieldsFromBody(body)
+    if (previewFields.error) {
+      return c.json({ error: previewFields.error }, 400)
+    }
+    const previewChecked = validatePreviewInput(previewFields.gallery, previewFields.cover)
     if (!previewChecked.ok) {
       return c.json({ error: previewChecked.error }, 400)
     }
@@ -531,7 +633,7 @@ adminApp.post('/projects', async (c) => {
       INSERT INTO projects (
         id, date, status, name, cn, latin, habitat, type, language, stars, year, shape, version, updated, repository,
         demo_url, demo_enabled,
-        challenge, solution, description_json, features_json, metrics_json, timeline_json, internal_notes, sort_order,
+        challenge_json, solution_json, description_json, features_json, metrics_json, timeline_json, internal_notes, sort_order,
         preview_image_url, preview_images_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
@@ -552,9 +654,9 @@ adminApp.post('/projects', async (c) => {
       body.repository || '',
       demoUrl,
       demoEnabled,
-      body.challenge || '',
-      body.solution || '',
-      JSON.stringify(body.description || {}),
+      normalizeJsonValue('challenge', body.challenge),
+      normalizeJsonValue('solution', body.solution),
+      normalizeJsonValue('description', body.description),
       JSON.stringify(body.features || []),
       JSON.stringify(body.metrics || []),
       JSON.stringify(body.timeline || []),
@@ -573,7 +675,33 @@ adminApp.post('/projects', async (c) => {
 
 // 管理端：更新项目（部分更新：仅覆盖请求体中出现的字段，避免漏传字段被写成 NULL）
 // 可编辑列白名单：键为请求体字段名，值为数据库列名，杜绝任意列注入
-const EDITABLE_COLUMNS: Record<string, string> = {
+/**
+ * 管理端列表的行投影（唯一实现点，纯函数便于闸门测试）。
+ *
+ * 关键点：**必须保留 D1 的原始列名**（readme_zh / compose_dev / internal_notes / sort_order /
+ * preview_image_url / preview_images_json …），因为编辑抽屉绑的就是这些名字；
+ * 只加 camel 别名是不够的——公开列表接口返回的是 camel 投影，一旦管理端误用它，
+ * 抽屉会整片空掉、README/Compose/相册看着"没数据"（本项目踩过）。
+ * 因此 preview_frames/sync_update 测试里断言：本函数的输出键集 ⊇ EDITABLE_COLUMNS(+json 列+相册两列)。
+ */
+export function adminProjectRow(row: any) {
+  return {
+    ...row,
+    // 管理端要原值供编辑；前端类型是布尔，D1 读回的是 0/1，必须在此转换
+    demoEnabled: row.demo_enabled === 1,
+    demoUrl: row.demo_url || '',
+    // 管理端同样拿到 {en, zh} 完整形状（旧写法默认值是 {}，于是 description.en 可能是 undefined）
+    description: asBilingual(row.description_json),
+    // 挑战 / 方案：双语列优先，旧单列按中文兜底（与公开投影同一份规则）
+    challenge: asBilingual(row.challenge_json, row.challenge),
+    solution: asBilingual(row.solution_json, row.solution),
+    features: safeJsonParse(row.features_json, []),
+    metrics: safeJsonParse(row.metrics_json, []),
+    timeline: safeJsonParse(row.timeline_json, []),
+  }
+}
+
+export const EDITABLE_COLUMNS: Record<string, string> = {
   date: 'date',
   status: 'status',
   name: 'name',
@@ -588,8 +716,6 @@ const EDITABLE_COLUMNS: Record<string, string> = {
   version: 'version',
   updated: 'updated',
   repository: 'repository',
-  challenge: 'challenge',
-  solution: 'solution',
   internal_notes: 'internal_notes',
   sort_order: 'sort_order',
   readme_zh: 'readme_zh',
@@ -597,11 +723,25 @@ const EDITABLE_COLUMNS: Record<string, string> = {
   compose_dev: 'compose_dev',
   compose_prod: 'compose_prod',
 }
-const EDITABLE_JSON_COLUMNS: Record<string, string> = {
+export const EDITABLE_JSON_COLUMNS: Record<string, string> = {
   description: 'description_json',
+  challenge: 'challenge_json',
+  solution: 'solution_json',
   features: 'features_json',
   metrics: 'metrics_json',
   timeline: 'timeline_json',
+}
+
+/**
+ * JSON 列落库前的归一化。**POST 与 PUT 必须共用它**——两条路径不一致就是本项目那条红线
+ * （同一请求体在两条路径落库不同）。双语两列尤其不能直接 stringify：
+ * 脚本/curl 传一个纯字符串过来时，原样存成 `"abc"`，下次读出来会带着一对引号进 UI。
+ */
+export function normalizeJsonValue(field: string, value: unknown): string {
+  if (field === 'challenge' || field === 'solution' || field === 'description') {
+    return JSON.stringify(asBilingual(value))
+  }
+  return JSON.stringify(value ?? null)
 }
 
 adminApp.put('/projects/:id', async (c) => {
@@ -629,7 +769,7 @@ adminApp.put('/projects/:id', async (c) => {
     for (const [field, column] of Object.entries(EDITABLE_JSON_COLUMNS)) {
       if (body[field] !== undefined) {
         assignments.push(`${column} = ?`)
-        values.push(JSON.stringify(body[field]))
+        values.push(normalizeJsonValue(field, body[field]))
       }
     }
     // 演示入口：地址规范化 + 开关与地址的一致性校验
@@ -671,23 +811,18 @@ adminApp.put('/projects/:id', async (c) => {
       values.push(demoEnabledPatch)
     }
     // 预览图/相册：任一非法条目都要 400，绝不静默丢条后回成功（否则后台会出现假状态）。
-    // 两列各自只在"请求体里出现"时才写，否则只改相册会把封面抹掉（部分更新语义）。
-    // 「空封面 + 本次带相册 → 取相册第一张」的补齐在 validatePreviewInput 内，与 POST 共用同一条规则。
-    const galleryInBody =
-      body.previewImages !== undefined || body.preview_images_json !== undefined
-    const coverInBody = body.previewImageUrl !== undefined || body.preview_image_url !== undefined
+    // 两列各自只在"请求体里出现"时才写，否则只改相册会把项目图片抹掉（部分更新语义）。
+    // 两种拼写同时出现且内容不一致 → previewFieldsFromBody 直接 400，不再由服务端挑一个。
+    const previewFields = previewFieldsFromBody(body)
+    if (previewFields.error) {
+      return c.json({ error: previewFields.error }, 400)
+    }
+    const galleryInBody = previewFields.gallery !== undefined
+    const coverInBody = previewFields.cover !== undefined
     if (galleryInBody || coverInBody) {
       const checked = validatePreviewInput(
-        galleryInBody
-          ? body.previewImages !== undefined
-            ? body.previewImages
-            : body.preview_images_json
-          : undefined,
-        coverInBody
-          ? body.previewImageUrl !== undefined
-            ? body.previewImageUrl
-            : body.preview_image_url
-          : undefined,
+        galleryInBody ? previewFields.gallery : undefined,
+        coverInBody ? previewFields.cover : undefined,
       )
       if (!checked.ok) {
         return c.json({ error: checked.error }, 400)
@@ -972,9 +1107,12 @@ const PREVIEW_BADGE_HINTS = [
   'appveyor',
   'buymeacoffee',
 ]
-// 相册上限：详情页没必要展示更多，也避免同步把整篇 README 的装饰图都搬进来
-const PREVIEW_IMAGE_LIMIT = 12
 
+// 相册上限与单条地址判据的唯一来源是 src/utils/previewRules.ts（管理端表单即时校验用同一份）。
+// 这里只再导出**函数**：workerd 不把数字常量当合法入口导出，实测启动即失败
+// （"Incorrect type for map entry 'PREVIEW_IMAGE_LIMIT': the provided value is not of type
+// function or ExportedHandler"）。上限的一致性改由闸门测试做行为断言（13 张必须被 400）。
+export { sanitizeImageUrl }
 /** 把 README 里的相对路径解析成 raw.githubusercontent 绝对地址；已是绝对 URL 的原样返回 */
 export function resolveRepoAssetUrl(
   raw: string,
@@ -991,18 +1129,6 @@ export function resolveRepoAssetUrl(
   const branch = String(defaultBranch ?? '').trim() || 'main'
   const path = url.replace(/^\.\//, '').replace(/^\//, '')
   return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`
-}
-
-/** 只放行带主机名的 http(s) 绝对地址；其余（含 data:、相对路径、`https://` 这种空壳、数组/对象）一律丢弃 */
-export function sanitizeImageUrl(raw: unknown): string {
-  if (typeof raw !== 'string') return ''
-  const url = raw.trim()
-  if (!/^https?:\/\//i.test(url)) return ''
-  try {
-    return new URL(url).hostname ? url : ''
-  } catch {
-    return ''
-  }
 }
 
 /**
@@ -1077,8 +1203,8 @@ export function publicGallery(row: { preview_image_url?: unknown; preview_images
  * 静默丢弃会让后台显示"已成功保存"而库里实际少图——与演示入口同一条红线（宁 400 不降级）。
  * 读取侧（publicGallery）仍保持宽容：绕过 Worker 直接写库的脏值不能变成 500。
  *
- * 「封面 = 相册第一张」的补齐也放在这里，POST 与 PUT 共用同一条规则——
- * 分成两处写就会出现同一请求体在两条路径落库不同（本仓库为 demoUrl 踩过一次）。
+ * POST 与 PUT 共用这一条规则——分成两处写就会出现同一请求体在两条路径落库不同
+ * （本仓库为 demoUrl 踩过一次）。项目图片与相册是两件事，这里不做任何相互补齐。
  */
 export function validatePreviewInput(
   rawGallery: unknown,
@@ -1128,23 +1254,91 @@ export function validatePreviewInput(
   let cover = ''
   if (rawCover !== undefined && rawCover !== null) {
     if (typeof rawCover !== 'string') {
-      return { ok: false, error: '封面地址必须是字符串' }
+      return { ok: false, error: '项目图片地址必须是字符串' }
     }
     const trimmed = rawCover.trim()
     if (trimmed) {
       cover = sanitizeImageUrl(trimmed)
       if (!cover) {
-        return { ok: false, error: '封面地址无效：仅支持 http/https 绝对地址' }
+        return { ok: false, error: '项目图片地址无效：仅支持 http/https 绝对地址' }
       }
     }
   }
 
-  // 相册随本次请求一起提交时，空封面按「封面 = 相册第一张」补齐
-  if (!cover && galleryProvided && gallery.length > 0) {
-    cover = gallery[0]
+  // 项目图片（封面）与相册是两件事：这里不再用「相册第一张」替用户补封面。
+  // 需要自动补齐的地方只有 README 同步（buildProjectSyncUpdate 的「只填空白」），
+  // 保存请求里补会让后台显示"项目图片为空"而库里却存了首张，属于假状态。
+  // 对外读取仍由 publicGallery 在两者皆缺时退化到相册第一张。
+  return { ok: true, gallery, cover }
+}
+
+/**
+ * 从请求体里取相册/项目图片，并挡掉「同一列两种拼写」的悄悄覆盖。
+ *
+ * 管理端与公开接口用的是两套字段名（snake 原始列名 / camel 投影名）。
+ * 一旦客户端把公开投影当成管理端行提交，两种拼写会同时出现在同一个体里，
+ * 服务端只能挑一个——挑错就是"界面显示 A、库里存了 B"。这里不再猜：
+ * 两者都在且规范化后不一致 → 400 点名；一致则按管理端口径（snake）写。
+ */
+/** 视为"没提供"的写法：undefined 与 null（null 若当"提供了空值"会静默清空整列，与部分更新语义冲突） */
+const fieldProvided = (value: unknown) => value !== undefined && value !== null
+
+export function previewFieldsFromBody(body: Record<string, any>): {
+  gallery: unknown
+  cover: unknown
+  error?: string
+} {
+  const camelGallery = fieldProvided(body.previewImages) ? body.previewImages : undefined
+  const snakeGallery = fieldProvided(body.preview_images_json) ? body.preview_images_json : undefined
+  const camelCover = fieldProvided(body.previewImageUrl) ? body.previewImageUrl : undefined
+  const snakeCover = fieldProvided(body.preview_image_url) ? body.preview_image_url : undefined
+
+  if (camelGallery !== undefined && snakeGallery !== undefined) {
+    // 逐项严格比（用与落库同一条 validatePreviewInput）：
+    // 之前我用宽松的 parsePreviewImages 归一化，会把"13 张 vs 12 张""含非法项"抹平成相同数组，
+    // 于是坏的那一份被静默丢掉、好的那份悄悄落库——正是本项目禁止的降级路径。
+    const camelChecked = validatePreviewInput(camelGallery, undefined)
+    const snakeChecked = validatePreviewInput(snakeGallery, undefined)
+    if (!camelChecked.ok) {
+      return { gallery: undefined, cover: undefined, error: `previewImages：${camelChecked.error}` }
+    }
+    if (!snakeChecked.ok) {
+      return { gallery: undefined, cover: undefined, error: `preview_images_json：${snakeChecked.error}` }
+    }
+    if (camelChecked.gallery.join('\n') !== snakeChecked.gallery.join('\n')) {
+      return {
+        gallery: undefined,
+        cover: undefined,
+        error:
+          '预览相册同时收到 previewImages 与 preview_images_json 两种写法且内容不一致，已拒绝写入。' +
+          '请先刷新后台列表（管理端应只提交一种写法）再保存。',
+      }
+    }
+  }
+  if (camelCover !== undefined && snakeCover !== undefined) {
+    const camelChecked = validatePreviewInput(undefined, camelCover)
+    const snakeChecked = validatePreviewInput(undefined, snakeCover)
+    if (!camelChecked.ok) {
+      return { gallery: undefined, cover: undefined, error: `previewImageUrl：${camelChecked.error}` }
+    }
+    if (!snakeChecked.ok) {
+      return { gallery: undefined, cover: undefined, error: `preview_image_url：${snakeChecked.error}` }
+    }
+    if (camelChecked.cover !== snakeChecked.cover) {
+      return {
+        gallery: undefined,
+        cover: undefined,
+        error:
+          '项目图片同时收到 previewImageUrl 与 preview_image_url 两种写法且内容不一致，已拒绝写入。' +
+          '请先刷新后台列表再保存。',
+      }
+    }
   }
 
-  return { ok: true, gallery, cover }
+  return {
+    gallery: snakeGallery !== undefined ? snakeGallery : camelGallery,
+    cover: snakeCover !== undefined ? snakeCover : camelCover,
+  }
 }
 
 function nowStamp(): string {
@@ -1285,17 +1479,18 @@ export function buildProjectSyncUpdate(
 
   const descText = String(meta.description || '').trim()
   if (descText) {
-    const current = safeJsonParse(row.description_json, {}) as { en?: string; zh?: string }
-    if ((current.en ?? '').trim() || (current.zh ?? '').trim()) {
+    const current = asBilingual(row.description_json)
+    if (current.en || current.zh) {
       notes.push('描述已保留，未覆盖后台手写文案')
     } else {
-      columns.description_json = JSON.stringify({ en: descText, zh: descText })
+      // 按内容猜一种语言填入，另一种留空 → 读侧回退时会如实标注「原文」
+      columns.description_json = JSON.stringify(pairFromSingleText(descText))
       notes.push('描述已按仓库信息首次填充')
     }
   }
 
   // 预览图/相册：编辑所有 → 只在「空」时从 README 提取。
-  // 注意语义：空 = 待填。管理员若主动清空封面或相册，下次同步会重新自动填充；
+  // 注意语义：空 = 待填。管理员若主动清空项目图片或相册，下次同步会重新自动填充；
   // 想永久不用自动图，请在字段里填一个自己的地址，而不是留空。
   if (row.has_preview !== 1 || row.has_preview_images !== 1) {
     const parsed = parseGithubRepo(row.repository)
@@ -1306,7 +1501,8 @@ export function buildProjectSyncUpdate(
         const filled: string[] = []
         if (row.has_preview !== 1) {
           columns.preview_image_url = images[0]
-          filled.push('封面')
+          // 与抽屉里的字段名一致（同一个概念只有一种叫法）；这里补的是「相册第一张」
+          filled.push('项目图片')
         }
         if (row.has_preview_images !== 1) {
           columns.preview_images_json = JSON.stringify(images)
@@ -1344,12 +1540,47 @@ export function buildProjectSyncUpdate(
 
 // 管理端：GitHub 指标同步——按各项目的 repository 地址拉取最新 stars / 最近推送时间 / 最新 Release 版本并写回 D1
 // body.fetchDocs 为真时同时抓取 README 与 Compose 文档（只填充空白字段，不覆盖手工维护的内容）
+/**
+ * 同步范围的 id 过滤（纯函数，闸门测试直接打它）。
+ * - 不给 ids / 给 null → undefined：保持"全表同步"的老语义；
+ * - 给了但形态不对（非数组、空数组、超长、含空白或超长 id）→ error：
+ *   绝不能把"空数组"当成"没选"而退化成全表——那是"界面显示选了 0 个、实际刷了全部"的假状态；
+ * - 合法 id 去重后交给参数化 IN 列表（值本身不进 SQL 文本，未知 id 只是匹配不到，不报错）。
+ */
+export function parseSyncIds(
+  raw: unknown,
+): { ids?: string[]; error?: string } {
+  if (raw === undefined || raw === null) return {}
+  if (!Array.isArray(raw)) return { error: 'ids 需要是标本编号数组' }
+  if (raw.length === 0) {
+    return { error: '没有勾选任何标本：要么至少选一个，要么不要提交 ids 字段' }
+  }
+  if (raw.length > QUERY_ROW_LIMIT) {
+    return { error: `一次最多同步 ${QUERY_ROW_LIMIT} 个标本` }
+  }
+  const ids: string[] = []
+  for (const item of raw) {
+    if (typeof item !== 'string' || item.trim() === '' || item.trim().length > 32) {
+      return { error: 'ids 里每一项都必须是非空字符串（≤32 字符）' }
+    }
+    const id = item.trim()
+    if (!ids.includes(id)) ids.push(id)
+  }
+  return { ids }
+}
+
 adminApp.post('/github-sync', async (c) => {
   try {
     // 该接口的请求体可选（不传即按默认方式同步），所以缺失/不可解析都退化成空对象，而不是 400
     const body = (await readJsonBody(c)) ?? {}
     const ghHeaders = getGithubHeaders(c, body?.token)
     const fetchDocs = body?.fetchDocs === true
+    const scope = parseSyncIds(body?.ids)
+    if (scope.error) {
+      return c.json({ error: scope.error }, 400)
+    }
+    // 只在**真正选了范围**时才加 WHERE：不带 ids 的旧客户端必须继续走原来的全表索引路径
+    const where = scope.ids ? `WHERE id IN (${scope.ids.map(() => '?').join(', ')})` : ''
 
     const { results } = await c.env.DB.prepare(
       `SELECT id, name, repository, description_json,
@@ -1361,8 +1592,10 @@ adminApp.post('/github-sync', async (c) => {
               (preview_images_json <> '' AND preview_images_json <> '[]') AS has_preview_images,
               substr(readme_en, 1, 2000) AS readme_head_en,
               substr(readme_zh, 1, 2000) AS readme_head_zh
-       FROM projects ORDER BY sort_order ASC LIMIT ${QUERY_ROW_LIMIT}`,
-    ).all()
+       FROM projects ${where} ORDER BY sort_order ASC LIMIT ${QUERY_ROW_LIMIT}`,
+    )
+      .bind(...(scope.ids ?? []))
+      .all()
 
     const outcomes: Record<string, unknown>[] = []
     // GitHub 一旦返回 403（频率超限）就立即停止后续请求：
@@ -1551,6 +1784,180 @@ adminApp.get('/github-repos', async (c) => {
 })
 
 // 管理端：从 GitHub 仓库一键导入为馆藏标本
+// ==========================================
+// 管理端：按目录批量导入预览图
+// ==========================================
+// 截图通常成批放在仓库的固定目录里（imgs/desktop、imgs/mobile…）。逐个粘 URL 太繁琐，
+// 这里给一个目录地址，由 Worker 用 GitHub Contents API 列出目录内的位图并拼成 raw 地址。
+// 只返回候选列表，**不写库**——写库仍然走保存时的 validatePreviewInput 同一条严格规则。
+const PREVIEW_BITMAP_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'avif', 'bmp']
+
+/**
+ * 解析「预览图所在目录」，返回按顺序尝试的 (ref, path) 候选。
+ * 接受：raw.githubusercontent.com/owner/repo/分支/路径、github.com/owner/repo/{tree|blob}/分支/路径，
+ * 也接受省略协议与省略域名（owner/repo/分支/路径）。
+ * 分支名里带 `/` 时第一段切法会不准，因此再给一个「整段当路径 + 用默认分支」的候选兜底。
+ */
+export function parsePreviewDirUrl(raw: unknown): {
+  owner: string
+  repo: string
+  candidates: { ref: string; path: string }[]
+} | null {
+  const cleaned = String(raw ?? '')
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+  if (!cleaned) return null
+  const segments = cleaned.split('/').filter(Boolean)
+  const host = (segments[0] ?? '').toLowerCase()
+  const hostLike = host.includes('.')
+  // 带主机名时只认 GitHub 两个形态；gitlab 等站点如实拒绝（Contents API 是 GitHub 的）
+  if (hostLike && host !== 'raw.githubusercontent.com' && host !== 'github.com') return null
+  let rest = hostLike ? segments.slice(1) : segments
+  // github.com 的 tree/blob 形态：owner/repo/{tree|blob}/ref/path → 抹掉动词，与 raw 形态同构
+  if (rest[2] && /^(tree|blob)$/i.test(rest[2])) rest = [rest[0], rest[1], ...rest.slice(3)]
+  const [owner, repo, ...tail] = rest
+  if (!owner || !repo || tail.length < 2) return null
+  // tail 只有一段时无法区分「分支」还是「目录」（owner/repo/main 与 owner/repo/imgs 同形），
+  // 猜错会去打仓库根目录，返回一堆非图片条目；宁可要求写全 owner/repo/分支/目录
+  if (!/^[A-Za-z0-9._-]+$/.test(owner) || !/^[A-Za-z0-9._-]+$/.test(repo)) return null
+  // owner/repo 与路径段里都不允许 . / ..：它们会匹配上面的字符集，却能把 API 路径拼歪
+  if (owner === '.' || owner === '..' || repo === '.' || repo === '..') return null
+  if (tail.some((segment) => segment === '.' || segment === '..')) return null
+  const candidates: { ref: string; path: string }[] = []
+  if (tail.length >= 2) candidates.push({ ref: tail[0], path: tail.slice(1).join('/') })
+  candidates.push({ ref: '', path: tail.join('/') })
+  return { owner, repo, candidates }
+}
+
+/** 从 Contents API 的目录条目里挑出位图，并按仓库路径拼成 raw 地址（名字排序保证顺序稳定） */
+export function pickBitmapEntries(
+  entries: unknown,
+  owner: string,
+  repo: string,
+  ref: string,
+): {
+  images: string[]
+  skippedNonBitmap: number
+  skippedBadge: number
+  subDirectories: number
+} {
+  const list = Array.isArray(entries) ? (entries as any[]) : []
+  const isObject = (e: any) => e && typeof e === 'object'
+  const files = list.filter((e) => isObject(e) && e.type === 'file')
+  const subDirectories = list.filter((e) => isObject(e) && e.type === 'dir').length
+  const nameOf = (e: any) => String(e.name ?? '').toLowerCase()
+  const bitmaps = files.filter((e) =>
+    PREVIEW_BITMAP_EXTS.some((ext) => nameOf(e).endsWith(`.${ext}`)),
+  )
+  const skippedNonBitmap = files.length - bitmaps.length
+  const kept = bitmaps.filter(
+    (e) => !PREVIEW_BADGE_HINTS.some((hint) => nameOf(e).includes(hint) || String(e.path ?? '').toLowerCase().includes(hint)),
+  )
+  const skippedBadge = bitmaps.length - kept.length
+  const branch = String(ref ?? '').trim()
+  // GitHub 返回的 path 是解码后的真实文件名（可能含空格）：逐段编码后再拼 URL，
+  // 库里存的就是可直接访问的规范化地址，去重也不会被 "a b.png" / "a%20b.png" 两种写法骗过
+  const encodePath = (value: string) => value.split('/').map(encodeURIComponent).join('/')
+  const imageHostAllowed = (value: unknown) => {
+    if (typeof value !== 'string') return ''
+    const url = sanitizeImageUrl(value)
+    if (!url) return ''
+    try {
+      // 只接受 raw.githubusercontent.com：GitHub 响应里的 download_url 不由我们支配，
+      // 直接回显等于让第三方响应决定前台 <img src> 指向哪
+      return new URL(url).hostname.toLowerCase() === 'raw.githubusercontent.com' ? url : ''
+    } catch {
+      return ''
+    }
+  }
+  const images = kept
+    .slice()
+    .sort((a, b) => String(a.name ?? a.path).localeCompare(String(b.name ?? b.path)))
+    .map((e) => {
+      const relPath = String(e.path ?? e.name ?? '').replace(/^\/+/, '')
+      // 空路径会拼出以 / 结尾的死地址；带 . / .. 的路径不能信（GitHub 正常不会给，防御性挡掉）
+      if (!relPath || relPath.split('/').some((s) => s === '.' || s === '..')) return ''
+      if (!branch) {
+        // 没指定分支这一路：GitHub 的 download_url 自带仓库默认分支，
+        // 自己拼 'main' 会在默认分支非 main 的仓库上整批 404（入库看着正常、前台图挂死）
+        return imageHostAllowed(e.download_url) || ''
+      }
+      return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${encodePath(relPath)}`
+    })
+    .map((url) => sanitizeImageUrl(url))
+    .filter(Boolean)
+  return { images, skippedNonBitmap, skippedBadge, subDirectories }
+}
+
+adminApp.post('/preview-import', async (c) => {
+  const body = await readJsonBody(c)
+  if (body === null) {
+    return c.json({ error: '请求体不是合法的 JSON 对象' }, 400)
+  }
+  const parsed = parsePreviewDirUrl(body.dir)
+  if (!parsed) {
+    return c.json(
+      {
+        error:
+          '目录地址无法识别：需要 raw.githubusercontent.com/owner/repo/分支/路径 或 github.com/owner/repo/tree/分支/路径（当前只支持 GitHub）',
+      },
+      400,
+    )
+  }
+  const headers = getGithubHeaders(c)
+  let lastError = ''
+  for (const candidate of parsed.candidates) {
+    if (!candidate.path) {
+      lastError = '目录路径为空'
+      continue
+    }
+    const encodedPath = encodeURIComponent(candidate.path).replace(/%2F/g, '/')
+    const refQuery = candidate.ref ? `?ref=${encodeURIComponent(candidate.ref)}` : ''
+    try {
+      const res = await ghFetch(
+        `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/contents/${encodedPath}${refQuery}`,
+        headers,
+      )
+      if (!res.ok) {
+        if (await isRateLimited(res)) {
+          return c.json(
+            {
+              error: `GitHub 接口触发频率限制（剩余配额 ${lastRateLimitRemaining ?? '未知'}）。可以稍后再试，或先在相册里手工粘贴地址。`,
+              rateLimited: true,
+            },
+            429,
+          )
+        }
+        lastError = candidate.ref
+          ? `分支「${candidate.ref}」下没有找到目录「${candidate.path}」（HTTP ${res.status}）`
+          : `没有找到目录「${candidate.path}」（HTTP ${res.status}）`
+        continue
+      }
+      const json = await res.json()
+      if (!Array.isArray(json)) {
+        return c.json({ error: `「${candidate.path}」是一个文件而不是目录，请填所在目录` }, 400)
+      }
+      const picked = pickBitmapEntries(json, parsed.owner, parsed.repo, candidate.ref)
+      const images = picked.images.slice(0, PREVIEW_IMAGE_LIMIT)
+      return c.json({
+        success: true,
+        dir: `${parsed.owner}/${parsed.repo}/${candidate.ref || '默认分支'}/${candidate.path}`,
+        images,
+        found: picked.images.length,
+        truncated: picked.images.length > images.length,
+        skippedNonBitmap: picked.skippedNonBitmap,
+        skippedBadge: picked.skippedBadge,
+        subDirectories: picked.subDirectories,
+        rateLimitRemaining: lastRateLimitRemaining,
+      })
+    } catch (err: any) {
+      lastError = `GitHub 请求失败：${err?.message ?? String(err)}`
+    }
+  }
+  return c.json({ error: lastError || '没有读到该目录' }, 404)
+})
+
 adminApp.post('/github-import', async (c) => {
   try {
     const body = await readJsonBody(c)
@@ -1641,7 +2048,7 @@ adminApp.post('/github-import', async (c) => {
     const repository = `https://github.com/${repoData.full_name}`
 
     // 同理：英文描述不再写进中文字段，留空由管理员填写；前台缺中文时会回退英文
-    const description = JSON.stringify({ en: descText, zh: '' })
+    const description = JSON.stringify(pairFromSingleText(descText))
     // 只认真实 topics；没有就留空（不再塞 'Production Ready' 这类凑数文案），后续同步会自动补齐
     const features = JSON.stringify(
       Array.isArray(repoData.topics) && repoData.topics.length > 0
@@ -1674,7 +2081,7 @@ adminApp.post('/github-import', async (c) => {
       c.env.DB.prepare(`
       INSERT INTO projects (
         id, date, status, name, cn, latin, habitat, type, language, stars, year, shape, version, updated, repository,
-        challenge, solution, description_json, features_json, metrics_json, timeline_json, internal_notes, sort_order,
+        challenge_json, solution_json, description_json, features_json, metrics_json, timeline_json, internal_notes, sort_order,
         readme_zh, readme_en, compose_dev, compose_prod, docs_synced_at, preview_image_url, preview_images_json
       ) VALUES (?, ?, 'LIVE', ?, ?, ?, 'GitHub Field', 'Tool', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
@@ -1702,7 +2109,8 @@ adminApp.post('/github-import', async (c) => {
       docs.composeDev,
       docs.composeProd,
       nowStamp(),
-      previewImages[0] ?? '',
+      // 项目图片留空：写侧一律不拿相册首张代替用户选择（对外读取时 publicGallery 才退化到首张）
+      '',
       JSON.stringify(previewImages),
     ).run()
 

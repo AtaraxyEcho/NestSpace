@@ -16,6 +16,14 @@ export function setAdminToken(token: string) {
   }
 }
 
+/**
+ * 401/403 说明当前口令不可用：清掉存储的口令。
+ * 否则每次挂载都会拿同一份失效口令重试，徒增 Worker 侧的失败计数（连续 10 次即被 429 锁定）。
+ */
+function clearTokenIfUnauthorized(status: number) {
+  if (status === 401 || status === 403) setAdminToken('')
+}
+
 function getAuthHeaders(): HeadersInit {
   const token = getAdminToken()
   const headers: Record<string, string> = {
@@ -46,7 +54,20 @@ export async function verifyAndFetchAdminProjects(customToken?: string): Promise
     })
 
     if (res.status === 401 || res.status === 403) {
-      return { success: false, error: '权限不足：口令无效或未被 Cloudflare 授权' }
+      clearTokenIfUnauthorized(res.status)
+      const errJson = await res.json().catch(() => ({}))
+      return {
+        success: false,
+        error: (errJson as any).error || '权限不足：口令无效或未被 Cloudflare 授权',
+      }
+    }
+
+    if (res.status === 429) {
+      const retryAfter = res.headers.get('Retry-After')
+      return {
+        success: false,
+        error: `鉴权失败次数过多，已被临时限制，请稍后再试${retryAfter ? `（约 ${retryAfter} 秒后）` : ''}`,
+      }
     }
 
     if (!res.ok) {
@@ -77,6 +98,7 @@ export async function saveAdminProject(project: Project, isNew = false): Promise
       body: JSON.stringify(project),
     })
 
+    clearTokenIfUnauthorized(res.status)
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}))
       return { success: false, error: (errJson as any).error || `保存失败: HTTP ${res.status}` }
@@ -118,6 +140,7 @@ export async function saveAdminSiteSettings(settings: SiteSettings): Promise<{ s
       body: JSON.stringify(settings),
     })
 
+    clearTokenIfUnauthorized(res.status)
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}))
       return { success: false, error: (errJson as any).error || `保存失败: HTTP ${res.status}` }
@@ -151,6 +174,8 @@ export type RemoteGithubRepo = {
 export async function syncGithubRepos(
   token?: string,
   fetchDocs = false,
+  /** 只同步这些标本；省略 = 全表（老语义）。空数组不发出去，见调用方的注释 */
+  ids?: string[],
 ): Promise<{
   success: boolean
   results?: Array<Record<string, unknown>>
@@ -161,10 +186,12 @@ export async function syncGithubRepos(
   try {
     const headers = getAuthHeaders() as Record<string, string>
     if (token) headers['X-GitHub-Token'] = token
+    const payload: Record<string, unknown> = { token, fetchDocs }
+    if (ids && ids.length) payload.ids = ids
     const res = await fetch('/api/admin/github-sync', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ token, fetchDocs }),
+      body: JSON.stringify(payload),
     })
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}))
@@ -227,6 +254,43 @@ export async function fetchGithubUserRepos(
 /**
  * 从 GitHub 远程仓库一键导入为标本
  */
+/**
+ * 按目录批量读取预览图候选（只返回地址列表，不写库；写库仍要点「保存项目」）
+ */
+export async function fetchPreviewImagesFromDir(
+  dir: string,
+  token?: string,
+): Promise<{
+  success: boolean
+  dir?: string
+  images?: string[]
+  found?: number
+  truncated?: boolean
+  skippedNonBitmap?: number
+  skippedBadge?: number
+  subDirectories?: number
+  rateLimitRemaining?: number | null
+  error?: string
+}> {
+  try {
+    const headers = getAuthHeaders() as Record<string, string>
+    if (token) headers['X-GitHub-Token'] = token
+
+    const res = await fetch('/api/admin/preview-import', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ dir }),
+    })
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}))
+      return { success: false, error: (errJson as any).error || `读取失败: HTTP ${res.status}` }
+    }
+    return await res.json()
+  } catch (err: any) {
+    return { success: false, error: `网络异常: ${err.message}` }
+  }
+}
+
 export async function importGithubRepo(
   repoFullName: string,
   token?: string,
@@ -266,6 +330,7 @@ export async function deleteAdminProject(id: string): Promise<{ success: boolean
       headers: getAuthHeaders(),
     })
 
+    clearTokenIfUnauthorized(res.status)
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}))
       return { success: false, error: (errJson as any).error || `删除失败: HTTP ${res.status}` }
