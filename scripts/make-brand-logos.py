@@ -1,11 +1,20 @@
 """从 frontend/assert/ 的完整组合标生成站点用的派生图（原件不动）。
 
 产出（frontend/public/brand/，随 dist 部署）：
-  logo-mark-<dark|light>.png     纯徽章（圆形肖像部分）→ 标头用，旁边仍是站点自己的排印文字
-  logo-lockup-<dark|light>.png   完整组合标（徽章 + OmniNest + ATARRAYECHO）→ 想要整标时用
+  logo-mark-on-dark.png     纯徽章 → 标头用（深色主题），旁边仍是站点自己的排印文字
+  logo-mark-on-light.png    纯徽章 → 标头用（浅色主题）
+  logo-lockup-on-dark.png   完整组合标（徽章 + OmniNest + ATARRAYECHO）→ 深色主题
+  logo-lockup-on-light.png  同上 → 浅色主题
+  favicon.ico / apple-touch-icon.png   浏览器图标（不透明底，见下文说明）
 
-为什么不直接把整标塞进标头：它是 882×882 的方形整标，标头图框只有 22–30px 高，
-里面的 "OmniNest" 会被压到 6px 左右——既读不出字，又和站点自己的 NESTSPACE 文字重复。
+**文件名按"用在哪种背景上"命名，不按原件的底色**——这是踩过一次的坑：
+  assert/logo_light.png 是浅底 + 浅发人物，抠掉底色后主体是**浅色**，只适合深色背景；
+  assert/logo_dark.png  是深底 + 深发人物，抠掉底色后主体是**深色**，只适合浅色背景。
+早期按原件底色命名（logo-mark-dark = 深底那版）并直接把"dark"喂给深色主题，结果深色标头拿到
+深发主体 → 头发与背景糊成一片、头像看着是破的。判定依据是"抠图后主体与背景的明暗关系"。
+
+为什么不直接把整标塞进标头：它是 882×882 的方形整标，标头图框只有几十 px 高，
+里面的 "OmniNest" 会被压到几 px——既读不出字，又和站点自己的 NESTSPACE 文字重复。
 抠图必须**从四边泛洪**而不是全局阈值：浅色版的头发/皮肤本身就接近底色，全局阈值会在人脸上打出洞。
 
 用法：python scripts/make-brand-logos.py
@@ -14,7 +23,7 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1] / "frontend"
 SRC = ROOT / "assert"
@@ -22,7 +31,7 @@ OUT = ROOT / "public" / "brand"
 
 TOL = 32            # 与底色的绝对色差和阈值：底色有轻微噪点（30,31,23 ↔ 31,32,23）
 MIN_AREA = 80       # 小于此面积的连通块视为泛洪碎屑
-MARK_HEIGHT = 128   # 标头 30px CSS × 最多 ~4 DPR
+MARK_HEIGHT = 160   # 标头 40px CSS × 最多 ~4 DPR
 LOCKUP_HEIGHT = 320
 
 
@@ -109,8 +118,15 @@ def save(img: Image.Image, path: Path, height: int) -> int:
 
 OUT.mkdir(parents=True, exist_ok=True)
 report = []
-for theme in ("dark", "light"):
-    src = SRC / f"logo_{theme}.png"
+
+# 源件 → 目标背景：判定依据是"抠图后的主体明暗"，不是源件底色的名字（见文件头说明）
+VARIANTS = (
+    ("light", "on-dark", (26, 24, 20)),      # 浅底 + 浅发主体 → 深色背景
+    ("dark", "on-light", (232, 224, 203)),   # 深底 + 深发主体 → 浅色背景
+)
+
+for src_theme, dest, _bg in VARIANTS:
+    src = SRC / f"logo_{src_theme}.png"
     rgb = np.array(Image.open(src).convert("RGB"))
     alpha = np.where(border_background_mask(rgb), 0, 255).astype("uint8")
     full = Image.fromarray(np.dstack([rgb, alpha]).astype("uint8"), "RGBA")
@@ -125,21 +141,48 @@ for theme in ("dark", "light"):
 
     lockup = crop_to(full, union)   # 徽章 + 两行文字（整标）
     mark = crop_to(full, biggest)   # 只有徽章（标头用）
-    lockup_kb = save(lockup, OUT / f"logo-lockup-{theme}.png", LOCKUP_HEIGHT) / 1024
-    mark_kb = save(mark, OUT / f"logo-mark-{theme}.png", MARK_HEIGHT) / 1024
+    lockup_kb = save(lockup, OUT / f"logo-lockup-{dest}.png", LOCKUP_HEIGHT) / 1024
+    mark_kb = save(mark, OUT / f"logo-mark-{dest}.png", MARK_HEIGHT) / 1024
     report.append(
-        f"{theme}: 内容块 {len(comps)} 个 | mark {mark.size} {mark_kb:.1f}KB"
+        f"{src_theme} → {dest}: 内容块 {len(comps)} 个 | mark {mark.size} {mark_kb:.1f}KB"
         f" | lockup {lockup.size} {lockup_kb:.1f}KB"
     )
 
-# 视觉核对图：按真实标头尺寸贴到站点底色上（浏览器面板 0×0 时唯一能"看见"的办法）
-for theme, base in (("dark", (26, 24, 20)), ("light", (232, 224, 203))):
-    canvas = Image.new("RGB", (560, 96), base)
-    mark = Image.open(OUT / f"logo-mark-{theme}.png").resize((30, 30), Image.LANCZOS)
-    canvas.paste(mark, (16, 33), mark)
-    lockup = Image.open(OUT / f"logo-lockup-{theme}.png").resize((76, 76), Image.LANCZOS)
-    canvas.paste(lockup, (400, 10), lockup)
-    canvas.save(SRC / f"preview-{theme}.png")
+# ---- 浏览器图标：标签栏底色不确定，所以图标**自带不透明底** -------------------
+# 用"深色主体 + 站点浅底"这一组：深色标签栏上是一枚清晰的浅色印章；
+# 浅色标签栏上底融进背景，但深色主体本身仍然可辨。
+ICON_BG = (232, 224, 203)
+ICON_INSET = 0.86
+
+
+def build_icon(size: int) -> Image.Image:
+    canvas = Image.new("RGB", (size, size), ICON_BG)
+    art = Image.open(OUT / "logo-mark-on-light.png").convert("RGBA")
+    side = max(1, round(size * ICON_INSET))
+    art.thumbnail((side, side), Image.LANCZOS)
+    canvas.paste(art, ((size - art.width) // 2, (size - art.height) // 2), art)
+    return canvas
+
+
+build_icon(48).save(OUT / "favicon.ico", sizes=[(16, 16), (32, 32), (48, 48)])
+build_icon(180).save(OUT / "apple-touch-icon.png", "PNG", optimize=True)
+
+# 视觉核对图：贴到各自的目标底色上（浏览器面板 0×0 时唯一能"看见"的办法）。
+# 尺寸给足：早先的 30px 缩略图在宽画布上会被预览器再缩一次，肉眼根本分不出好坏（踩过）。
+for _src_theme, dest, bg in VARIANTS:
+    canvas = Image.new("RGB", (720, 200), bg)
+    mark = Image.open(OUT / f"logo-mark-{dest}.png")
+    mark = mark.resize((120, round(120 * mark.height / mark.width)), Image.LANCZOS)
+    canvas.paste(mark, (24, 40), mark)
+    lockup = Image.open(OUT / f"logo-lockup-{dest}.png")
+    lockup = lockup.resize((150, round(150 * lockup.height / lockup.width)), Image.LANCZOS)
+    canvas.paste(lockup, (420, 25), lockup)
+    ImageDraw.Draw(canvas).text(
+        (200, 90), f"mark on {dest[3:]}\n(120px 徽章 / 150px 整标)", fill=(190, 60, 60)
+    )
+    canvas.save(SRC / f"preview-{dest}.png")
 
 print("\n".join(report))
-print("核对图: frontend/assert/preview-<dark|light>.png（左=30px 徽章，右=76px 整标）")
+print("核对图: frontend/assert/preview-on-<dark|light>.png（左=120px 徽章，右=150px 整标）")
+print("图标: frontend/public/brand/favicon.ico (16/32/48) + apple-touch-icon.png (180)")
+

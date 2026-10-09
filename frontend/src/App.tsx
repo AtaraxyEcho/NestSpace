@@ -330,8 +330,11 @@ function routeFromHash(hash: string) {
  * NESTSPACE 文字重复。public/ 下的文件按根路径引用，不能被 JS import（Vite 会报错）。
  */
 const BRAND_LOGO = {
-  mark: { dark: "/brand/logo-mark-dark.png", light: "/brand/logo-mark-light.png" },
-  lockup: { dark: "/brand/logo-lockup-dark.png", light: "/brand/logo-lockup-light.png" },
+  // 文件名按**目标背景**命名（on-dark / on-light），不是按原件的底色——
+  // 原件的底色会被脚本抠掉，留下的是"主体"，决定可读性的是主体与背景的明暗：
+  // assert/logo_light.png 是浅底 + 浅发主体 → 只能用在深色主题；logo_dark.png 反之。
+  mark: { onDark: "/brand/logo-mark-on-dark.png", onLight: "/brand/logo-mark-on-light.png" },
+  lockup: { onDark: "/brand/logo-lockup-on-dark.png", onLight: "/brand/logo-lockup-on-light.png" },
 } as const
 
 /**
@@ -347,8 +350,8 @@ function LogoContent({ settings, dark }: { settings: SiteSettings; dark: boolean
   const builtIn = !logoImageUrl
   const logoSrc = builtIn
     ? dark
-      ? BRAND_LOGO.mark.dark
-      : BRAND_LOGO.mark.light
+      ? BRAND_LOGO.mark.onDark
+      : BRAND_LOGO.mark.onLight
     : logoImageUrl
 
   return (
@@ -3253,12 +3256,16 @@ function AdminPage({
                     placeholder="留空 = 用内置的深浅两版徽章；填了 = 两个主题都用它"
                   />
                   <small>
-                    留空时深浅模式各用内置的一张（<code>/brand/logo-mark-dark.png</code> ·{" "}
-                    <code>/brand/logo-mark-light.png</code>，由{" "}
+                    留空时按主题各用内置的一张（深色主题 <code>/brand/logo-mark-on-dark.png</code> ·{" "}
+                    浅色主题 <code>/brand/logo-mark-on-light.png</code>，由{" "}
                     <code>scripts/make-brand-logos.py</code> 从{" "}
-                    <code>frontend/assert/</code> 的原件生成）。填了地址就两个主题共用它。
-                    想用含文字的完整组合标，填 <code>/brand/logo-lockup-dark.png</code> 并把显示模式改成「仅图片」
-                    （整标在 28px 图框里读不出字，所以默认用不带字的徽章）。
+                    <code>frontend/assert/</code> 的原件生成，后缀指"用在哪种背景上"）。
+                    填了地址就两个主题共用它。
+                    想用含文字的完整组合标，填 <code>/brand/logo-lockup-on-dark.png</code>（或 on-light）并把显示模式改成「仅图片」
+                    （整标在标头图框里读不出字，所以默认用不带字的徽章）。
+                    <br />
+                    浏览器图标 <code>/brand/favicon.ico</code> 与 <code>/brand/apple-touch-icon.png</code> 由同一个脚本生成，
+                    改标时一起更新。
                   </small>
                 </label>
 

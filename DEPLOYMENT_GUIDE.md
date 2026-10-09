@@ -661,21 +661,27 @@ bash scripts/usage-probe.sh
 
 ## 八、 品牌标 / 栏目顺序 / 双语叙述 / 同步范围
 
-- **品牌标按深浅模式各一张，且可被管理端替换**：原件是 `frontend/assert/logo_dark.png` 与 `logo_light.png`
+- **品牌标按"用在哪种背景上"各一张，且可被管理端替换**：原件是 `frontend/assert/logo_dark.png` 与 `logo_light.png`
   （882×882 的**完整组合标**：徽章 + `OmniNest` + `ATARRAYECHO`，各带不透明底色）。
   站点用的是 `python scripts/make-brand-logos.py` 生成的派生图（原件不动）：
-  - `public/brand/logo-mark-{dark,light}.png`（128px，只有徽章）→ 标头默认图；
-  - `public/brand/logo-lockup-{dark,light}.png`（320px，整标）→ 想要整标时在管理端填这个路径。
+  - `public/brand/logo-mark-on-{dark,light}.png`（160px，只有徽章）→ 标头默认图；
+  - `public/brand/logo-lockup-on-{dark,light}.png`（320px，整标）→ 想要整标时在管理端填这个路径；
+  - `public/brand/favicon.ico`（16/32/48）+ `apple-touch-icon.png`（180）→ 浏览器图标，同一脚本产出、跟着一起更新。
+  ⚠️ **后缀指的是"用在哪种背景上"，不是原件的底色**：原件的底色会被抠掉，决定可读性的是抠图后**主体**与背景的明暗——
+  `assert/logo_light.png` 是浅底 + 浅发主体，抠完只剩浅色主体，**只能**用在深色主题；`logo_dark.png` 反之。
+  早期按原件底色命名（`logo-mark-dark` = 深底那版）并直接喂给深色主题，结果深色标头拿到深发主体 ⇒
+  头发与背景糊成一片、头像看着是破的。**换标或改名时不要退回按底色命名的老习惯。**
   派生图**从四边泛洪抠背景**而不是全局阈值——浅色版的头发/皮肤本身就接近底色，全局阈值会在人脸上打出洞。
-  整标不进标头的原因：图框只有 28px 高，里面的字会被压到读不出，还会和站点自己的 `NESTSPACE` 文字重复。
+  整标不进标头的原因：图框只有 40px 高，里面的字会被压到读不出，还会和站点自己的 `NESTSPACE` 文字重复。
+  浏览器图标**自带不透明底**（标签栏底色不定，透明底在浅色/深色标签栏里总有一边看不见）。
   - 渲染收在一个组件里：`LogoContent`（内容）+ `LogoWordmark`（首页的 `<a>` 外壳）；
     详情页返回入口是 `<button>`，所以那里用 `LogoContent` 而不是把 `<a>` 套进 `<button>`（非法 HTML）。
   - 管理端「导航与标头」的 Logo 地址**留空 = 用内置深浅两版**，填了 = 两个主题共用它（这就是替换入口）。
     预览区是深浅两版并排——后台只有一套配色，跟着控制台主题走就永远看不到另一版的实际效果。
-  - ⚠️ **这些 PNG 必须留在 Git 里、不能走 LFS**：`frontend/.gitattributes` 原本对 `*.png` 全量启用 LFS，
+  - ⚠️ **这些 PNG / ICO 必须留在 Git 里、不能走 LFS**：`frontend/.gitattributes` 原本对 `*.png`、`*.ico` 全量启用 LFS，
     而 Workers Builds 的 git clone 不解 LFS 指针 —— 那样 `dist/brand/*.png` 会变成 ~130 字节的指针文本，
     配上 `not_found_handling=single-page-application`（缺失路径返回 200 + index.html）与 CSP
-    `img-src 'self'`，logo 会**静默坏图**，控制台什么都不报。
+    `img-src 'self'`，logo 与 favicon 都会**静默坏图**，控制台什么都不报。
     已在 `.gitattributes` 里给 `public/brand/*.png` 单独关掉 filter/diff/merge/text
     （`git check-attr` 实测四项均 unset）；原件 `frontend/assert/` 继续走 LFS 无妨，它不参与构建。
   - ⚠️ **内置默认不会覆盖已存的偏好**：`logo_type` 在生产库里已经是 `'text'`（当年保存过一次），

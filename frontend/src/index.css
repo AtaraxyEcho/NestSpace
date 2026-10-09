@@ -112,8 +112,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   text-decoration: none;
 }
 .wordmark .wordmark-logo-img {
-  /* 内置图是方形徽章：22px 时圆环里的人像糊成一团，抬到 28px 才认得出形状（标头高 64-72px，放得下） */
-  max-height: 28px;
+  /* 内置图是方形徽章：28px 时人像仍太小、远看只是一个点；标头高 72px，抬到 40px 才看得清轮廓 */
+  max-height: 40px;
   width: auto;
   object-fit: contain;
   display: block;
