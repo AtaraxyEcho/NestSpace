@@ -159,9 +159,14 @@ ALTER TABLE projects ADD COLUMN demo_enabled INTEGER NOT NULL DEFAULT 0;
 因此不会出现 `javascript:` 之类协议进入公开页面 `href` 的情况。
 **迁移必须先于引用这两列的 Worker 代码执行**（见 `DEPLOYMENT_GUIDE.md` 第二节的顺序要求）。
 
-> 本节只覆盖已列出的迁移文件：`0006`（展示偏好）与 `0007`（标本文档）由各自的功能批次维护。
-> 另注：上面 `0001` 的字段清单与本仓库实际表结构已有漂移——示例中的 `is_featured`
-> 并未在 `0001_create_projects.sql` 中创建。本节保留原样，漂移单独立项处理。
+> 本节只覆盖已列出的迁移文件：`0006`（展示偏好）、`0007`（标本文档）、`0009`（馆长手记）、
+> `0010`（预览图）与 `0011`（双语叙述）由各自的功能批次维护。
+> 另注：上面 `0001` 的字段清单与本仓库实际表结构已有漂移，本节的 SQL 示例**不是**现行 schema：
+> - 示例里的 `is_featured` 并未在 `0001_create_projects.sql` 中创建；
+> - 实际还有示例未列的 `sort_order INTEGER DEFAULT 0`（管理端拖序/权重用）；
+> - `features_json` / `metrics_json` / `timeline_json` 实际是 `NOT NULL`（示例写成可空）。
+>
+> 现行结构以 `migrations/` 与 `frontend/worker/index.ts` 为准；本节保留原样，漂移单独立项处理。
 
 ---
 

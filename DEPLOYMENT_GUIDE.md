@@ -55,7 +55,10 @@ NestSpace/
 │                                 # 挑战 / 解决方案双语列（challenge_json / solution_json，旧单列只读兜底）
 │
 ├── scripts/                      # 运维脚本
-│   └── d1-migrate.sh             # 一键按序执行全部 D1 迁移（local / remote，可反复执行）
+│   ├── d1-migrate.sh             # 一键按序执行全部 D1 迁移（local / remote，可反复执行）
+│   ├── usage-probe.sh            # 接口探针：起 8898 的本地 Worker，自收进程（埋点 / 图片 / 双语写读）
+│   ├── probe-bilingual-payload.mjs # 生成双语写读往返的请求载荷（供探针第 4 节 --data-binary 用）
+│   └── make-brand-logos.py       # 由 frontend/assert/ 原件派生 frontend/public/brand/ 两套 logo
 │
 └── ARCHITECTURE_PLAN.md          # 详细架构与审查设计文档
 ```
@@ -110,17 +113,17 @@ bash scripts/d1-migrate.sh remote
 | `0008` 演示入口 | 项目的读路径与写路径 | 管理端保存**任何**项目报 500（写路径引用不存在的列） |
 | `0009` 馆长手记 | `site_settings` 写白名单（`curator_*`，`worker/index.ts` 映射表） | 「站点设置」保存报 500（读侧同样静默回退，所以只有保存才暴露） |
 | `0010` 预览图 | 项目列表/详情的 SELECT 与同步写路径 | `GET /api/projects` 每条都 500（列表 SELECT 引用了不存在的列），首页与陈列整体空白 |
-| `0011` 双语叙述 | 项目列表/详情的 SELECT 与管理端写路径 | 同上两条 500；且
+| `0011` 双语叙述 | 项目列表/详情的 SELECT 与管理端写路径 | 同上两条 500；且「挑战 / 解决方案」保存写不进库（`challenge_json` / `solution_json` 不存在） |
 
 > ⚠️ **顺序是硬约束，而且 Git 自动构建不会替你把关**：第 4 节的 Workers Builds 是"push 即部署"，
 > 一旦你为了跑迁移而先 push 了代码，部署就已经发生了。正确顺序是
 > **先 `bash scripts/d1-migrate.sh remote` → 再 push/部署**。
 > 反序的实际表现（本轮实测，不是推测）：`no such column: challenge_json` →
-> `GET /api/projects` 与详情接口 500 → 首页**不报错、不空白**，而是**静默退化成内置的
-> 4 条 fallback 标本**（`App.tsx` 初始 state 就是 `fallbackProjects`，接口失败时不改写它），
-> 详情页里 001–004 显示陈旧内容、其它 id 显示"未找到标本"，管理端保存项目直接 500。
-> 这类"看起来还在跑的错数据"比白屏更难发现，所以 `sync_update.test.mjs` 的 case 17f 已经把
-> **代码引用的列 ⊆ migrations/ 声明的列** 钉成闸门（含反向验证：喂一个不存在的列会红）。「挑战 / 解决方案」保存写不进库（`challenge_json` / `solution_json` 不存在） |
+> `GET /api/projects` 与详情接口 500 → 首页不报错，但公开列表变为空并显示一句
+> 「馆藏尚未公开任何标本」的空状态（列表从空开始，接口失败时保持当前内容、**不再**用内置示例顶替），
+> 详情页里已发布 id 仍显示陈旧内容、其它 id 显示"未找到标本"，管理端保存项目直接 500。
+> 这类"接口全 500 但页面还在跑"的形态比白屏更难发现，所以 `sync_update.test.mjs` 的 case 17f 已经把
+> **代码引用的列 ⊆ migrations/ 声明的列** 钉成闸门（含反向验证：喂一个不存在的列会红）。
 
 ---
 
@@ -615,7 +618,7 @@ bash scripts/usage-probe.sh
 
 改版前先回答一句"怎么知道有没有变好"。此前整站**零度量**，所有判断只能靠专家走查，所以这轮补了三个聚合事件。
 
-- **为什么用 Analytics Engine 而不是新开 D1 表**：免费额度（每月 1000 万行）足够、**不需要数据库迁移**
+- **为什么用 Analytics Engine 而不是新开 D1 表**：免费额度每天 10 万个数据点（约合每月 300 万）足够、**不需要数据库迁移**
   （因此不涉及生产写库）、数据天然按时间分桶。数据集 `nestspace_usage`，绑定名 `METRICS`（见 `frontend/wrangler.toml`）。
 - **收什么**（白名单在 `worker/index.ts` 的 `USAGE_EVENTS`，白名单外一律 **400**，`preview_rules.test.mjs` 会核对这份表）：
   | 事件 | 方式（`m`） | 回答的问题 |
