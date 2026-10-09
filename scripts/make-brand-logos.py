@@ -5,7 +5,7 @@
   logo-mark-on-light.png    纯徽章 → 标头用（浅色主题）
   logo-lockup-on-dark.png   完整组合标（徽章 + OmniNest + ATARRAYECHO）→ 深色主题
   logo-lockup-on-light.png  同上 → 浅色主题
-  favicon.ico / apple-touch-icon.png   浏览器图标（不透明底，见下文说明）
+  favicon.ico / apple-touch-icon.png   浏览器图标（同日生成；favicon 透明，iOS 图标带底）
 
 **文件名按"用在哪种背景上"命名，不按原件的底色**——这是踩过一次的坑：
   assert/logo_light.png 是浅底 + 浅发人物，抠掉底色后主体是**浅色**，只适合深色背景；
@@ -148,24 +148,40 @@ for src_theme, dest, _bg in VARIANTS:
         f" | lockup {lockup.size} {lockup_kb:.1f}KB"
     )
 
-# ---- 浏览器图标：标签栏底色不确定，所以图标**自带不透明底** -------------------
-# 用"深色主体 + 站点浅底"这一组：深色标签栏上是一枚清晰的浅色印章；
-# 浅色标签栏上底融进背景，但深色主体本身仍然可辨。
-ICON_BG = (232, 224, 203)
-ICON_INSET = 0.86
+# ---- 浏览器图标 -------------------------------------------------------------
+# favicon 做成**透明**：带不透明底会显出一个方块，而且主体在方形图框里显得小。
+# 用深墨那版（logo-mark-on-light.png）——浅色标签栏上清楚，深色标签栏上仍可辨；
+# 浅墨那版在浅色标签栏上几乎看不见，不适合当唯一图标。
+# 素材是竖构图（圆盘上下还有装饰尖），只按高度贴合进正方形会显得小，
+# 所以**居中取正方形**（保留圆盘、裁掉上下尖）再铺满，主体才真正占满图标。
+# apple-touch-icon 反过来必须**不透明**：iOS 把透明区域按黑色渲染，自带底才好看。
+ICON_ART = "logo-mark-on-light.png"
+ICON_INSET = 0.98
+ICON_TOUCH_BG = (232, 224, 203)   # 与站点浅底一致
+
+
+def _icon_art() -> Image.Image:
+    art = Image.open(OUT / ICON_ART).convert("RGBA")
+    side = min(art.size)
+    left = (art.width - side) // 2
+    top = (art.height - side) // 2
+    return art.crop((left, top, left + side, top + side))
 
 
 def build_icon(size: int) -> Image.Image:
-    canvas = Image.new("RGB", (size, size), ICON_BG)
-    art = Image.open(OUT / "logo-mark-on-light.png").convert("RGBA")
-    side = max(1, round(size * ICON_INSET))
-    art.thumbnail((side, side), Image.LANCZOS)
-    canvas.paste(art, ((size - art.width) // 2, (size - art.height) // 2), art)
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    inner = max(1, round(size * ICON_INSET))
+    art = _icon_art().resize((inner, inner), Image.LANCZOS)
+    off = (size - inner) // 2
+    canvas.paste(art, (off, off), art)
     return canvas
 
 
 build_icon(48).save(OUT / "favicon.ico", sizes=[(16, 16), (32, 32), (48, 48)])
-build_icon(180).save(OUT / "apple-touch-icon.png", "PNG", optimize=True)
+_touch_art = _icon_art().resize((180, 180), Image.LANCZOS)
+_touch = Image.new("RGB", (180, 180), ICON_TOUCH_BG)
+_touch.paste(_touch_art, (0, 0), _touch_art)
+_touch.save(OUT / "apple-touch-icon.png", "PNG", optimize=True)
 
 # 视觉核对图：贴到各自的目标底色上（浏览器面板 0×0 时唯一能"看见"的办法）。
 # 尺寸给足：早先的 30px 缩略图在宽画布上会被预览器再缩一次，肉眼根本分不出好坏（踩过）。
