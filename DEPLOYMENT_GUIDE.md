@@ -22,9 +22,10 @@ NestSpace/
 │   │   ├── types/                # 数据类型定义 (project.ts / siteSettings.ts)
 │   │   └── App.tsx               # 动态数据渲染与安全管理端
 │   ├── .dev.vars.example         # 本地开发环境变量模板（复制为 .dev.vars 使用，不入 Git）
-│   ├── jwt_verify.test.mjs       # JWT 校验与 Access 白名单单元测试（pnpm test 依次跑以下三个文件）
+│   ├── jwt_verify.test.mjs       # JWT 校验与 Access 白名单单元测试（pnpm test 依次跑以下四个文件）
 │   ├── demo_url.test.mjs         # 演示地址规范化单元测试
 │   ├── sync_update.test.mjs      # GitHub 同步字段归属 / 时间线生成单元测试
+│   ├── image_proxy.test.mjs      # 图片代理：宽度夹取 / 图源白名单 / 转换地址构造单元测试
 │   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（本地与 Git 构建共用）
 │   └── package.json
 │
@@ -328,6 +329,7 @@ pnpm typecheck
     `timeline_json`（按仓库事实生成：建档 / 最多 4 个 Release / 最近推送，按月倒序，最多 8 条）；
     管理端「Stars 展示值 / 版本 / 技术语言 / 特性列表 / 指标」这几个输入框因此会被同步覆盖，界面已标注。
   - **编辑所有、只在空白时填充**：`description_json`、README/Compose 文档与预览图（封面 `preview_image_url` + 相册 `preview_images_json`）；后台手写内容一律不覆盖。
+    「空」= 待填：主动清空后下次同步会重新自动填充（详见下一节）。
   - 星数展示口径统一为一份实现（≥1000 用 `2.8k`），卡片与指标卡不会再出现 `2.8k` 与 `2800` 并存。
 - **无 Release 的项目**：`version` 保持空串（不再编造 `v1.0.0`），前台会省略版本位而不是显示空占位。
 - **同步的健壮性**：所有 GitHub 出网请求带 10 秒超时（含 Access 证书端点），单个卡住的响应不会拖住整个同步；
@@ -346,18 +348,89 @@ pnpm typecheck
   数据分两列：**封面** `preview_image_url`（卡片/Hero/分享图用，取值 = 相册第一张）与**相册**
   `preview_images_json`（详情页相册用，有序数组）。图片来源与管理端一致：编辑抽屉里的「预览图」多行文本框
   （每行一个 URL，第一行即封面）→ 同步时从 README 自动提取。
+  **公开列表与公开详情都返回这两列**：`ProjectRoute` 会先用列表项当初始值渲染详情页，列表若只给封面，
+  相册会在详情到达前短暂只显示一张（无导航）。README/Compose 文档仍只在详情接口返回。
+  - **位置**：预览区在 **OVERVIEW 面板内**（不再夹在页签与面板之间），切到 README / DEPLOYMENT 时不会看到它；
+    hero 右栏在项目**有封面时显示封面图**（相框按图片自身比例自适应，夹在 `[0.8, 2.2]`），
+    没有封面才退回原来的占位标本图。
   - **自动提取**：同步（含勾选「同时抓取文档」的全量同步）会把 README 里的**全部真实截图**（`![](…)` 或
     `<img src=…>`）按出现顺序解析出来；**跳过 shields.io / badge 等徽章**，**位图优先于 SVG 矢量图**，去重、
     **最多 12 张**；相对路径按仓库默认分支拼成 `raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>`，
     已是绝对地址的保留原值，`data:` / `javascript:` 等内联资源一律忽略——**提取不到就留空，绝不编造**。
-  - **只填空、不覆盖**：与描述、文档同一原则——两列都只在为空时填充；已有封面/相册的项目同步时不会被改写，
-    想换图在管理端「预览图」文本框里手工维护即可。
+  - **只填空、不覆盖**：与描述、文档同一原则——两列都只在**为空**时填充；已有封面/相册的项目同步时不会被改写。
+    注意语义是「空 = 待填」：**主动清空封面或相册后，下次同步会重新自动填充**；若想彻底不用自动图，
+    请在字段里填自己的地址，而不是留空。
+  - **写入是严格的，不静默降级**：管理端保存相册/封面时任一非法条目都返回 **400** 并点名第几行、什么原因
+    （缺协议、非 http(s)、重复、超过 12 张），**绝不"丢掉坏行后回成功"**——那会让后台显示"已保存并同步到 D1"
+    而库里实际少图，是本项目在演示入口上已经定过的红线（宁 400 不降级）。
+    两列各自只在"请求体里出现该键"时才写，所以只改相册不会把封面抹掉（部分更新语义）。
+    「空封面 + 本次带相册 → 取相册第一张」的补齐只在 `validatePreviewInput` 里实现一份，
+    **POST 与 PUT 共用**——同一请求体在两条路径必须落库一致（本仓库为 `demoUrl` 踩过两条路径不一致的坑）。
+    读取侧仍保持宽容：绕过 Worker 直接写库的脏值不会让接口 500，只会被过滤掉。
   - **方向自适应**：每张图按自身宽高判断方向——横图走宽板（`cover`），竖图（手机截图）自动收窄成手机框
     （`contain` 不裁切）。无需管理员声明「桌面端/移动端」，混排的相册也能各自框对。
-  - **相册交互**：多张时右下/左下出现翻页按钮，支持 ←→ 方向键与触摸滑动切换，底部一排缩略图可直接跳转；
-    单张时不显示任何翻页控件。
-  - **托板动效**：桌面端（`hover` + 精细指针）指针在图上移动时，托板以 ≤6° 的幅度轻微跟随倾斜，
-    指针移开后复位；触屏与开启「减少动态效果」时**直接退化为静态托板**（仍可翻页），不做任何倾斜动画。
+  - **相册交互**：牌堆只渲染当前图两侧各若干张（最多 5 张；2 张时不展开，否则两侧会绕回同一张）；
+    下方一排缩略图可直接跳转、并可横向滚动，配「‹ 3 / 12 ›」翻页（44px 触控目标），
+    支持 ←→ 方向键与触摸滑动；单张时不显示任何翻页控件。计数用了 `aria-live="polite"`，
+    缩略图是 `role="group"` + `aria-current`（不是 tab——它们没有对应的 tabpanel）。
+  - **堆叠卡片扇（B 方案）**：悬停或键盘聚焦时，当前图两侧的卡片以 Y 轴旋转 + 后退展开成扇形，
+    过渡 300ms；移开/失焦即合拢；点击邻卡即切到该张。**不加模糊、不做无限循环**。
+    两条必要门槛（都是实测踩出来的）：
+    - **只在 `(hover: hover) and (pointer: fine)` 下展开**——触屏点按会让牌堆获得焦点，
+      不设门槛会在手机上误展开；
+    - **展开距离按断点收窄**（150 / 112 / 88 / 64px）：`±fan + 半张邻卡`必须留在视口内，
+      否则最外侧两张会被 `html` 的 `overflow-x: clip` **无声裁掉**。
+    开启「减少动态效果」时**不展开也不旋转**（该 reset 必须排在所有 `.is-open` 断点规则之后，
+    否则同权重的后来者会把它盖掉——移动端断点就踩过这个）。
+  - **预览区留白**：用「密集档」间距（`--section-pad-dense`），而不是叙述段落的 loose 档，避免图被推到很下方。
+- **图片代理**（同源 `GET /api/img`）：详情页所有相册图都经它中转，**这是解决"图显示慢"的关键**。
+  - **为什么需要**：图源是站外的 GitHub raw（原图常见几百 KB 的 PNG，且只缓存 5 分钟）；Workers 运行时装不了
+    图片解码器、Cloudflare 自带的 Image Resizing 要付费。因此由 Worker 借免费的转换服务
+    （`wsrv.nl`）把图压成 **webp** 再回给浏览器：实测 446KB 的 PNG → 主图 31KB、缩略图 3.4KB。
+  - **接口**：`/api/img?w=<宽度>&src=<原图 URL>`。宽度夹到 `[64, 2000]`（默认 1600）；主图用 1600、
+    邻卡 900、缩略图 160。
+  - **边缘缓存**：转换结果写入 `caches.default`，`Cache-Control: public, max-age=604800`
+    （不写 `stale-while-revalidate`——Cache API 的 `put`/`match` 不支持，写了是空承诺）。
+    **每个「源图 × 宽度」在每个边缘节点只真的转换一次**；实测命中约 7ms，回源约 1s。
+    源图地址用的是分支（内容可能变），所以给有界 TTL 而非 immutable。
+    注意：`cache.match` 返回的响应头是**只读**的，必须重新包一层可写头部再返回，
+    否则全局安全头中间件会抛 `Can't modify immutable headers` 并让命中请求全部 500（已实测踩过）。
+  - **安全（必须保留）**：只代理白名单图源（`raw.githubusercontent.com`、`user-images.githubusercontent.com`、
+    `camo.githubusercontent.com`、`objects.githubusercontent.com`、`github.com`、`cdn.jsdelivr.net`）；
+    **名单外的主机一律 404，不做 302**——否则会多出一条开放重定向（钓鱼 / 绕过过滤器的跳板）。
+    另限 `src` 长度 ≤2048、协议只放行 http(s) 且必须解析出主机名。
+    **转换服务自身（`wsrv.nl` / `images.weserv.nl`）绝不能进白名单**：那样
+    `/api/img?src=https://wsrv.nl/?url=<任意地址>` 就绕过了整套限制，本站会退化成真正的开放代理，
+    还会把任意内容缓存到自己的边缘缓存里。
+    前端 `IMAGE_PROXY_HOSTS`（`App.tsx`）必须与该名单一致**或更窄**：名单外的地址直接原样使用、不绕代理，
+    所以两边漂移时安全方向是「前端更窄」，反向漂移会让图片挂掉。
+  - **兜底**：白名单内的图源若遇转换服务抖动、限流或超时（15s），则 **302 回原图**（目标本身就是自家
+    白名单，不构成开放重定向），绝不白屏。
+  - **依赖与隐私**：`wsrv.nl` 是免费的第三方公共服务（BSD-3-Clause 开源，文档未承诺配额或 SLA），
+    图片会经过它的服务器。若将来开通 Cloudflare Image Resizing，只需改 `buildWeservUrl` 这一处即可切换。
+- **详情页布局约定**（`frontend/src/index.css` 的 `:root` token）：
+  - **统一栅格**：`--gutter`（`clamp(20px, 6vw, 96px)`）是 header / hero / 各 section / 文档区**共用的左右边缘**。
+    原先四处各自为政（header 固定 40px、hero 叠加 6vw+4vw、section 6vw、文档区居中），最宽处差到 100px 以上；
+    现在全部对齐，切页签也不会横向跳动。
+  - **纵向两档**：`--section-pad-loose`（叙述段）与 `--section-pad-dense`（预览 / 统计等密集区块），
+    取代原来所有区块一律 `128px`。
+  - **锚点偏移**：`--sticky-offset`（72px 吸顶头 + 16px）作为 `scroll-margin-top`，
+    用在各 section、compose 块与 README 的 h1–h4 上——原来「READ FIELD NOTES」与 README 目录跳转
+    的落点会被吸顶头盖住。
+  - **文档列宽**：`minmax(0, 58ch)` 并在 760px 以下收成单列，中英文行长都落在可读区间。
+- **详情页排版约定**：详情页微标签统一到 **10px 下限**（原来是 7/8/9px 混用，最小 7px 出现在代码块的
+  COPY 按钮上）；`h1` 行距 `.76 → .9`（`.76` 会把中文行距压太紧）；README 标题只有**一套**字号——
+  原 `.markdown-body h2` 的 `48–78px` 会被 `.markdown-body .readme-doc h2` 完全盖掉，
+  且在 deployment 面板里是 52px 的隐患，已合并为 `clamp(26px, 2.6vw, 34px)`。
+  > 注意：全站其余位置的 8px 微标签（首页 / 页脚 / 管理端）**本轮未动**，若要一并抬到 10px 需单独确认。
+- **DEPLOYMENT 代码块**：头部（路径 + COPY）从绝对定位改为 **flex 行**，去掉 54px 占位内边距与
+  `min-height: 118px`，因此**短 compose 文件不再被撑高**；`pre` 改 `max-height: min(56vh, 520px)` +
+  `overscroll-behavior: contain`（矮屏不再出现双层滚动）；COPY 按钮 7px→10px、触控目标 ≥32px。
+  滚动条统一为一档**低对比细条**（`scrollbar-width: thin` + `::-webkit-scrollbar`，深色块内用浅色 thumb）——
+  刻意**不隐藏**滚动条，避免丢掉「这里能滚」的可发现性。
+- **管理端写接口对请求体本身也是严格的**：`POST/PUT /api/admin/projects*`、`POST /api/admin/github-import`、
+  `PUT /api/admin/site-settings` 收到**不可解析的请求体**时返回 **400**（此前会抛错变成 500，把客户端问题
+  报成服务端问题）。`POST /api/admin/github-sync` 的请求体是可选的，缺失或不可解析按默认方式同步，不报错。
 - **详情页文档展示**：仅 `GET /api/projects/:id` 返回文档内容（列表接口不携带，避免体积膨胀）。前台
   README tab 用内置极简 Markdown 渲染器（`frontend/src/utils/markdown.tsx`）把 Markdown 转成 React
   元素——**不解析也不透传原始 HTML**，链接只放行 http/https/mailto；当前语言缺 README 时回退另一种语言

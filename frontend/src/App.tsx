@@ -230,6 +230,36 @@ function demoHref(project: Project): string | null {
   return /^https?:\/\//i.test(url) ? url : null
 }
 
+// 图片宽度档位：主图要清晰，邻卡与缩略图按显示尺寸要小图（原图常是几百 KB 的 PNG）
+const IMAGE_WIDTH = { plate: 1600, card: 900, thumb: 160 } as const
+
+// 可经代理压缩的图源主机。**必须与 worker 的 IMG_ALLOWED_HOSTS 保持一致（只允许是其子集）**：
+// Worker 对名单外的主机返回 404（不做开放重定向），所以这里名单外的地址直接原样使用，
+// 不绕代理。若两边漂移，方向必须是"前端更窄"，否则图片会挂。
+const IMAGE_PROXY_HOSTS = new Set([
+  "raw.githubusercontent.com",
+  "user-images.githubusercontent.com",
+  "camo.githubusercontent.com",
+  "objects.githubusercontent.com",
+  "github.com",
+  "cdn.jsdelivr.net",
+])
+
+/**
+ * 白名单图源走同源代理（Worker 压成 webp + 边缘缓存）；其余直接用原地址。
+ */
+function proxiedImage(url: string, width: number): string {
+  if (!/^https?:\/\//i.test(url)) return url
+  let host = ""
+  try {
+    host = new URL(url).hostname.toLowerCase()
+  } catch {
+    return url
+  }
+  if (!IMAGE_PROXY_HOSTS.has(host)) return url
+  return `/api/img?w=${width}&src=${encodeURIComponent(url)}`
+}
+
 // 站内章节锚点：Cabinet → Catalogue → Curator → Index
 const SECTION_ANCHORS = ["cabinet", "catalogue", "curator", "index", "colophon"]
 
@@ -1006,6 +1036,11 @@ function DetailPage({
       : project.previewImageUrl
         ? [project.previewImageUrl]
         : []
+  // hero 右栏：有封面就显示封面（按图比例自适应相框），没有才退回占位标本图
+  const coverSrc = project.previewImageUrl
+    ? proxiedImage(project.previewImageUrl, IMAGE_WIDTH.plate)
+    : ""
+  const [plateRatio, setPlateRatio] = useState<number | null>(null)
   const [detailTab, setDetailTab] =
     useState<"overview" | "readme" | "deployment">("overview")
 
@@ -1115,10 +1150,36 @@ function DetailPage({
               </button>
             </div>
           </div>
-          <div className="detail-plate">
+          <div
+            className={`detail-plate${coverSrc ? " has-cover" : ""}`}
+            style={
+              plateRatio
+                ? ({ "--plate-ratio": String(plateRatio) } as React.CSSProperties)
+                : undefined
+            }
+          >
             <CropMarks />
             <span className="plate-code">NS / {project.id}</span>
-            <SpecimenSvg shape={project.shape} />
+            {coverSrc ? (
+              <img
+                className="plate-cover"
+                src={coverSrc}
+                alt={`${project.name} 预览`}
+                decoding="async"
+                fetchPriority="high"
+                onLoad={(event) => {
+                  const el = event.currentTarget
+                  if (el.naturalWidth && el.naturalHeight) {
+                    // 相框跟随图片自身比例，但夹在 [0.8, 2.2] 内，避免极端长图把 hero 拉变形
+                    setPlateRatio(
+                      Math.min(2.2, Math.max(0.8, el.naturalWidth / el.naturalHeight)),
+                    )
+                  }
+                }}
+              />
+            ) : (
+              <SpecimenSvg shape={project.shape} />
+            )}
             <p className="hand-note">Observed in {project.habitat}</p>
             <span className="plate-status">
               <b /> {project.status}
@@ -1181,16 +1242,6 @@ function DetailPage({
         </nav>
       </section>
 
-      {previewImages.length > 0 ? (
-        <section className="detail-section preview-section">
-          <div className="detail-section-label">
-            <span className="eyebrow">PLATE / 预览</span>
-            <span>PROJECT PREVIEW</span>
-          </div>
-          <PreviewPlate images={previewImages} alt={project.name} />
-        </section>
-      ) : null}
-
       <div
         id="detail-panel-overview"
         role="tabpanel"
@@ -1198,6 +1249,16 @@ function DetailPage({
         tabIndex={0}
         className={detailTab === "overview" ? "" : "document-hidden"}
       >
+        {previewImages.length > 0 ? (
+          <section className="detail-section preview-section">
+            <div className="detail-section-label">
+              <span className="eyebrow">PLATE / 预览</span>
+              <span>PROJECT PREVIEW</span>
+            </div>
+            <PreviewPlate images={previewImages} alt={project.name} />
+          </section>
+        ) : null}
+
         <section className="detail-section" id="field-notes">
           <div className="detail-section-label">
             <span className="eyebrow">FIELD NOTES / 01</span>
@@ -1399,13 +1460,15 @@ function DetailPage({
                 <div className="compose-doc" id={entry.id} key={entry.id}>
                   <h3>{entry.label}</h3>
                   <div className="code-block">
-                    <span>{entry.path}</span>
-                    <button
-                      type="button"
-                      onClick={() => navigator.clipboard?.writeText(entry.content)}
-                    >
-                      COPY
-                    </button>
+                    <div className="code-block-head">
+                      <span>{entry.path}</span>
+                      <button
+                        type="button"
+                        onClick={() => navigator.clipboard?.writeText(entry.content)}
+                      >
+                        COPY
+                      </button>
+                    </div>
                     <pre>
                       <code>{entry.content}</code>
                     </pre>
@@ -1415,21 +1478,23 @@ function DetailPage({
             )}
             <h3 id="env-vars">环境变量</h3>
             <div className="code-block">
-              <span>.ENV.PRODUCTION</span>
-              <button
-                type="button"
-                onClick={() =>
-                  navigator.clipboard?.writeText(
-                    `PUBLIC_REPOSITORY=${project.repository}${
-                      demoUrl
-                        ? `\nPUBLIC_DEMO_URL=${demoUrl}`
-                        : ""
-                    }`,
-                  )
-                }
-              >
-                COPY
-              </button>
+              <div className="code-block-head">
+                <span>.ENV.PRODUCTION</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigator.clipboard?.writeText(
+                      `PUBLIC_REPOSITORY=${project.repository}${
+                        demoUrl
+                          ? `\nPUBLIC_DEMO_URL=${demoUrl}`
+                          : ""
+                      }`,
+                    )
+                  }
+                >
+                  COPY
+                </button>
+              </div>
               <pre>
                 <code>
                   PUBLIC_REPOSITORY={project.repository}
@@ -4196,8 +4261,9 @@ function AdminPage({
                   placeholder={"https://…/shot-1.png\nhttps://…/shot-2.png"}
                 />
                 <small>
-                  详情页「PLATE / 预览」相册；需填绝对地址（自动提取的值已解析为绝对地址）。
-                  留空则下次同步从 README 自动提取，最多 12 张。
+                  详情页「PLATE / 预览」相册；每行必须是可以直接访问的 http/https 绝对地址。
+                  任一行非法、重复或超过 12 张都会拒绝保存并指出第几行（不会偷偷丢掉坏行还提示成功）。
+                  全部留空则下次同步从 README 自动提取。
                 </small>
               </label>
               {textToFeatures(previewImagesText).length > 0 ? (
@@ -4328,23 +4394,15 @@ function detectSystemTheme(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches
 }
 
-// 详情页预览图：可翻看的「标本托板」相册。
-// 受限动效约定：整体倾斜角度很小（≤6°），不加模糊、不做无限循环；
-// 触屏与 prefers-reduced-motion 下退化为静态托板（仍可翻页）。
+// 详情页预览图：可翻看的「堆叠卡片」相册（B 方案）。
+// 受限动效约定：不做模糊、不做无限循环；展开的位移与旋转都很克制（≤13°），过渡 300ms。
+// 触屏与 prefers-reduced-motion 下不展开也不旋转，退化为静态堆叠（仍可翻页）。
 // 每张图按自身宽高判断方向：横图走宽板 cover，竖图（手机截图）收窄成手机框 contain，避免被裁掉。
 function PreviewPlate({ images, alt }: { images: string[]; alt: string }) {
-  const MAX_TILT_DEG = 6
-  const [tilt, setTilt] = useState<{ x: number; y: number } | null>(null)
   const [index, setIndex] = useState(0)
+  const [open, setOpen] = useState(false)
   const [portrait, setPortrait] = useState(false)
   const touchStartX = useRef<number | null>(null)
-  const interactive = useMemo(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false
-    return (
-      window.matchMedia("(hover: hover) and (pointer: fine)").matches &&
-      !window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    )
-  }, [])
 
   // 切换标本（相册来源变化）时回到第一张
   useEffect(() => {
@@ -4361,20 +4419,29 @@ function PreviewPlate({ images, alt }: { images: string[]; alt: string }) {
     setIndex((value) => (value + delta + total) % total)
   }
 
+  // 牌堆向两侧各取 reach 张（最多 2）。reach 上限是 (总数-1)/2，否则总数少时
+  // 环形取 index 会把同一张重复渲染成多张：2 张时两侧都落回同一张，所以不展开。
+  const reach = Math.min(2, Math.floor((total - 1) / 2))
+  const offsets: number[] = []
+  for (let offset = -reach; offset <= reach; offset += 1) offsets.push(offset)
+
   return (
     <div className="preview-gallery">
       <div
-        className={`preview-plate ${portrait ? "is-portrait" : "is-landscape"}`}
+        className={`preview-deck ${portrait ? "is-portrait" : "is-landscape"}${
+          open ? " is-open" : ""
+        }`}
         tabIndex={total > 1 ? 0 : -1}
-        aria-label={total > 1 ? `${alt} 预览图，第 ${safeIndex + 1} / ${total} 张` : undefined}
-        onMouseMove={(event) => {
-          if (!interactive) return
-          const rect = event.currentTarget.getBoundingClientRect()
-          const px = (event.clientX - rect.left) / rect.width - 0.5
-          const py = (event.clientY - rect.top) / rect.height - 0.5
-          setTilt({ x: -py * MAX_TILT_DEG * 2, y: px * MAX_TILT_DEG * 2 })
-        }}
-        onMouseLeave={() => setTilt(null)}
+        role="group"
+        aria-label={
+          total > 1
+            ? `${alt} 预览图，共 ${total} 张，当前第 ${safeIndex + 1} 张`
+            : `${alt} 预览图`
+        }
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
         onKeyDown={(event) => {
           if (event.key === "ArrowLeft") {
             event.preventDefault()
@@ -4394,66 +4461,94 @@ function PreviewPlate({ images, alt }: { images: string[]; alt: string }) {
           if (startX === null || endX === undefined) return
           if (Math.abs(endX - startX) > 40) step(endX < startX ? 1 : -1)
         }}
-        style={
-          tilt
-            ? ({
-                "--tilt-x": `${tilt.x.toFixed(2)}deg`,
-                "--tilt-y": `${tilt.y.toFixed(2)}deg`,
-              } as React.CSSProperties)
-            : undefined
-        }
       >
-        <div className="preview-plate-inner">
-          <img
-            key={current}
-            src={current}
-            alt={`${alt} 预览 ${safeIndex + 1}`}
-            loading={safeIndex === 0 ? "eager" : "lazy"}
-            onLoad={(event) => {
-              const el = event.currentTarget
-              if (el.naturalWidth && el.naturalHeight) {
-                setPortrait(el.naturalHeight > el.naturalWidth)
-              }
-            }}
-          />
-        </div>
-        {total > 1 ? (
-          <>
+        {offsets.map((offset) => {
+          const target = (safeIndex + offset + total) % total
+          const isActive = offset === 0
+          return (
             <button
               type="button"
-              className="preview-nav preview-prev"
+              key={offset}
+              className={`deck-card${isActive ? " is-active" : " is-peek"}`}
+              aria-current={isActive ? "true" : undefined}
+              aria-label={
+                isActive ? `当前预览图，第 ${target + 1} 张` : `切换到第 ${target + 1} 张预览图`
+              }
+              tabIndex={-1}
+              style={
+                {
+                  "--offset": offset,
+                  "--abs": Math.abs(offset),
+                  zIndex: 10 - Math.abs(offset),
+                } as React.CSSProperties
+              }
+              onClick={() => {
+                if (!isActive) setIndex(target)
+              }}
+            >
+              <img
+                src={proxiedImage(images[target], isActive ? IMAGE_WIDTH.plate : IMAGE_WIDTH.card)}
+                alt={isActive ? `${alt} 预览 ${target + 1}` : ""}
+                loading={isActive ? "eager" : "lazy"}
+                decoding="async"
+                fetchPriority={isActive ? "high" : "auto"}
+                onLoad={(event) => {
+                  if (!isActive) return
+                  const el = event.currentTarget
+                  if (el.naturalWidth && el.naturalHeight) {
+                    setPortrait(el.naturalHeight > el.naturalWidth)
+                  }
+                }}
+              />
+            </button>
+          )
+        })}
+      </div>
+      {total > 1 ? (
+        <>
+          <div className="preview-nav-row">
+            <button
+              type="button"
+              className="preview-nav"
               aria-label="上一张预览图"
               onClick={() => step(-1)}
             >
               ‹
             </button>
+            <span className="preview-counter" aria-live="polite">
+              {safeIndex + 1} / {total}
+            </span>
             <button
               type="button"
-              className="preview-nav preview-next"
+              className="preview-nav"
               aria-label="下一张预览图"
               onClick={() => step(1)}
             >
               ›
             </button>
-          </>
-        ) : null}
-      </div>
-      {total > 1 ? (
-        <div className="preview-thumbs" role="tablist" aria-label="预览图列表">
-          {images.map((url, i) => (
-            <button
-              key={url}
-              type="button"
-              role="tab"
-              aria-selected={i === safeIndex}
-              aria-label={`第 ${i + 1} 张预览图`}
-              className={`preview-thumb${i === safeIndex ? " is-active" : ""}`}
-              onClick={() => setIndex(i)}
-            >
-              <img src={url} alt="" loading="lazy" />
-            </button>
-          ))}
-        </div>
+          </div>
+          {/* 缩略图是"选择当前张"的开关，不是 tab（没有对应的 tabpanel），
+              用 group + aria-current 才与实际行为一致 */}
+          <div className="preview-thumbs" role="group" aria-label="预览图列表">
+            {images.map((url, i) => (
+              <button
+                key={`${i}-${url}`}
+                type="button"
+                aria-current={i === safeIndex ? "true" : undefined}
+                aria-label={`第 ${i + 1} 张预览图`}
+                className={`preview-thumb${i === safeIndex ? " is-active" : ""}`}
+                onClick={() => setIndex(i)}
+              >
+                <img
+                  src={proxiedImage(url, IMAGE_WIDTH.thumb)}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
+            ))}
+          </div>
+        </>
       ) : null}
     </div>
   )

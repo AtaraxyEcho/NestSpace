@@ -125,6 +125,8 @@ app.get('/projects', async (c) => {
         features: safeJsonParse(row.features_json, []),
         metrics: safeJsonParse(row.metrics_json, []),
         timeline: safeJsonParse(row.timeline_json, []),
+        // 列表也带相册：ProjectRoute 会先拿列表项当初始值渲染详情页，
+        // 只给封面会让相册在详情到达前短暂只显示一张（无导航）
         ...publicGallery(row),
       }
     })
@@ -191,6 +193,120 @@ app.get('/projects/:id', async (c) => {
     })
   } catch (err: any) {
     return c.json({ error: 'Failed to retrieve project detail' }, 500)
+  }
+})
+
+// ==========================================
+// 1.5 图片代理（同源 /api/img）
+// ==========================================
+// 相册里的图都在站外（GitHub raw 等），原图常见几百 KB 的 PNG；而 Workers 运行时装不了
+// 图片解码器、Cloudflare 自带的 Image Resizing 又要付费。这里借免费的转换服务把图压成 webp
+// 再回给浏览器，并把结果留在边缘缓存：每个「源图 × 宽度」在每个边缘节点只真的转换一次。
+// 只代理白名单图源，其余一律 302 回原图——否则这里就成了开放代理（SSRF / 被拿去当图床）。
+const IMG_WIDTH_MIN = 64
+const IMG_WIDTH_MAX = 2000
+const IMG_WIDTH_DEFAULT = 1600
+const IMG_SRC_MAX_LENGTH = 2048
+const IMG_UPSTREAM_TIMEOUT_MS = 15_000
+// 源图 URL 用的是分支（内容可能变），所以给有界 TTL 而不是 immutable
+// 源图 URL 用的是分支（内容可能变），所以给有界 TTL 而不是 immutable。
+// 不写 stale-while-revalidate：Cache API 的 put/match 不支持它，写了也是空承诺。
+const IMG_CACHE_CONTROL = 'public, max-age=604800'
+
+// 只代理真实的图源主机。**绝不要把转换服务自身（wsrv.nl）列进来**：
+// 那等于开放 `/api/img?src=https://wsrv.nl/?url=<任意地址>`，白名单会被绕开，
+// 还会把任意内容缓存到我们自己的边缘缓存里。
+const IMG_ALLOWED_HOSTS = new Set([
+  'raw.githubusercontent.com',
+  'user-images.githubusercontent.com',
+  'camo.githubusercontent.com',
+  'objects.githubusercontent.com',
+  'github.com',
+  'cdn.jsdelivr.net',
+])
+
+/** 宽度参数规范化：缺失或非法用默认值，并夹到 [MIN, MAX] */
+export function normalizeImageWidth(raw: unknown): number {
+  const value = Number(Array.isArray(raw) ? raw[0] : raw)
+  if (!Number.isFinite(value)) return IMG_WIDTH_DEFAULT
+  return Math.min(IMG_WIDTH_MAX, Math.max(IMG_WIDTH_MIN, Math.round(value)))
+}
+
+/** 是否允许经转换服务代理的图源主机 */
+export function isProxyableImageHost(host: unknown): boolean {
+  return IMG_ALLOWED_HOSTS.has(String(host ?? '').trim().toLowerCase())
+}
+
+/** 构造免费转换服务的地址（统一压成 webp + 指定宽度） */
+export function buildWeservUrl(src: string, width: number): string {
+  const params = new URLSearchParams({ url: src, w: String(width), output: 'webp', q: '82' })
+  return `https://wsrv.nl/?${params.toString()}`
+}
+
+app.get('/img', async (c) => {
+  const rawSrc = c.req.query('src') ?? ''
+  if (!rawSrc || rawSrc.length > IMG_SRC_MAX_LENGTH) {
+    return c.text('Invalid image source', 400)
+  }
+  let target: URL
+  try {
+    target = new URL(rawSrc)
+  } catch {
+    return c.text('Invalid image source', 400)
+  }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    return c.text('Invalid image source', 400)
+  }
+  // 非白名单图源：拒绝，而不是 302 到调用方给的目标——那会把本站变成开放重定向
+  // （钓鱼与绕过过滤器的常见跳板）。前端也只对本名单内的主机走这个代理。
+  if (!isProxyableImageHost(target.hostname)) {
+    return c.text('Image host not allowed', 404)
+  }
+
+  const width = normalizeImageWidth(c.req.query('w'))
+  const upstream = buildWeservUrl(target.toString(), width)
+  const cache = typeof caches === 'undefined' ? undefined : caches.default
+  const cacheKey = new Request(upstream, { method: 'GET' })
+  if (cache) {
+    const cached = await cache.match(cacheKey)
+    // 缓存命中的响应头是只读的，直接返回会让全局安全头中间件设置失败（500），
+    // 因此这里重新包一层可写头部的 Response
+    if (cached) {
+      return new Response(cached.body, {
+        status: cached.status,
+        headers: new Headers(cached.headers),
+      })
+    }
+  }
+
+  try {
+    const res = await fetch(upstream, {
+      headers: { accept: 'image/webp,image/*,*/*' },
+      signal: AbortSignal.timeout(IMG_UPSTREAM_TIMEOUT_MS),
+    })
+    const contentType = res.headers.get('Content-Type') ?? ''
+    if (!res.ok || !contentType.startsWith('image/')) {
+      // 转换服务抖动或限流：兜底回原图（此处目标已通过白名单校验，不是开放重定向）
+      return c.redirect(target.toString(), 302)
+    }
+    const response = new Response(res.body, {
+      status: 200,
+      headers: {
+        'Content-Type': contentType,
+        'Cache-Control': IMG_CACHE_CONTROL,
+        'X-Image-Source': 'wsrv',
+      },
+    })
+    if (cache) {
+      try {
+        c.executionCtx.waitUntil(cache.put(cacheKey, response.clone()))
+      } catch {
+        // 某些运行环境没有 executionCtx（此时缓存写入静默跳过，不影响本次响应）
+      }
+    }
+    return response
+  } catch {
+    return c.redirect(target.toString(), 302)
   }
 })
 
@@ -335,6 +451,18 @@ adminApp.use('*', async (c, next) => {
   return c.json({ error: '403 Forbidden: 管理端接口未授权访问' }, 403)
 })
 
+/** 读取 JSON 请求体：不可解析时返回 null，由调用方给 400，而不是抛错变成 500 */
+async function readJsonBody(c: any): Promise<Record<string, any> | null> {
+  try {
+    const parsed = await c.req.json()
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, any>)
+      : null
+  } catch {
+    return null
+  }
+}
+
 // 管理端：获取全量项目（含草稿、归档、内部笔记）
 adminApp.get('/projects', async (c) => {
   try {
@@ -363,7 +491,10 @@ adminApp.get('/projects', async (c) => {
 // 管理端：新增项目
 adminApp.post('/projects', async (c) => {
   try {
-    const body = await c.req.json()
+    const body = await readJsonBody(c)
+    if (body === null) {
+      return c.json({ error: '请求体不是合法的 JSON 对象' }, 400)
+    }
     if (!body.id || !body.name || !body.status) {
       return c.json({ error: 'Missing required fields: id, name, status' }, 400)
     }
@@ -385,16 +516,16 @@ adminApp.post('/projects', async (c) => {
     }
     const demoEnabled = body.demoEnabled === true ? 1 : 0
 
-    // 预览图/相册：与 PUT 同口径，写入侧只放行 http(s) 绝对地址
-    const previewImages = parsePreviewImages(
+    // 预览图/相册：与 PUT 共用 validatePreviewInput 同一条规则（含封面补齐），非法条目直接 400
+    const previewChecked = validatePreviewInput(
       body.previewImages !== undefined ? body.previewImages : body.preview_images_json,
+      body.previewImageUrl !== undefined ? body.previewImageUrl : body.preview_image_url,
     )
-    const previewImageUrl =
-      sanitizeImageUrl(
-        body.previewImageUrl !== undefined ? body.previewImageUrl : body.preview_image_url,
-      ) ||
-      previewImages[0] ||
-      ''
+    if (!previewChecked.ok) {
+      return c.json({ error: previewChecked.error }, 400)
+    }
+    const previewImages = previewChecked.gallery
+    const previewImageUrl = previewChecked.cover
 
     await c.env.DB.prepare(`
       INSERT INTO projects (
@@ -476,7 +607,10 @@ const EDITABLE_JSON_COLUMNS: Record<string, string> = {
 adminApp.put('/projects/:id', async (c) => {
   const id = c.req.param('id')
   try {
-    const body = await c.req.json()
+    const body = await readJsonBody(c)
+    if (body === null) {
+      return c.json({ error: '请求体不是合法的 JSON 对象' }, 400)
+    }
     if (body.status !== undefined && !ALLOWED_STATUSES.includes(body.status)) {
       return c.json(
         { error: `Invalid status, must be one of: ${ALLOWED_STATUSES.join(', ')}` },
@@ -536,17 +670,36 @@ adminApp.put('/projects/:id', async (c) => {
       assignments.push('demo_enabled = ?')
       values.push(demoEnabledPatch)
     }
-    // 预览图/相册：写入侧只放行 http(s) 绝对地址；相册经白名单/去重/限量后序列化
-    if (body.previewImages !== undefined || body.preview_images_json !== undefined) {
-      const source = body.previewImages !== undefined ? body.previewImages : body.preview_images_json
-      assignments.push('preview_images_json = ?')
-      values.push(JSON.stringify(parsePreviewImages(source)))
-    }
-    if (body.previewImageUrl !== undefined || body.preview_image_url !== undefined) {
-      const source =
-        body.previewImageUrl !== undefined ? body.previewImageUrl : body.preview_image_url
-      assignments.push('preview_image_url = ?')
-      values.push(sanitizeImageUrl(source))
+    // 预览图/相册：任一非法条目都要 400，绝不静默丢条后回成功（否则后台会出现假状态）。
+    // 两列各自只在"请求体里出现"时才写，否则只改相册会把封面抹掉（部分更新语义）。
+    // 「空封面 + 本次带相册 → 取相册第一张」的补齐在 validatePreviewInput 内，与 POST 共用同一条规则。
+    const galleryInBody =
+      body.previewImages !== undefined || body.preview_images_json !== undefined
+    const coverInBody = body.previewImageUrl !== undefined || body.preview_image_url !== undefined
+    if (galleryInBody || coverInBody) {
+      const checked = validatePreviewInput(
+        galleryInBody
+          ? body.previewImages !== undefined
+            ? body.previewImages
+            : body.preview_images_json
+          : undefined,
+        coverInBody
+          ? body.previewImageUrl !== undefined
+            ? body.previewImageUrl
+            : body.preview_image_url
+          : undefined,
+      )
+      if (!checked.ok) {
+        return c.json({ error: checked.error }, 400)
+      }
+      if (galleryInBody) {
+        assignments.push('preview_images_json = ?')
+        values.push(JSON.stringify(checked.gallery))
+      }
+      if (coverInBody) {
+        assignments.push('preview_image_url = ?')
+        values.push(checked.cover)
+      }
     }
     if (assignments.length === 0) {
       return c.json({ error: 'No editable fields provided' }, 400)
@@ -840,10 +993,16 @@ export function resolveRepoAssetUrl(
   return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`
 }
 
-/** 只放行 http(s) 绝对地址；其余（含 data:、相对路径、空值）一律丢弃 */
+/** 只放行带主机名的 http(s) 绝对地址；其余（含 data:、相对路径、`https://` 这种空壳、数组/对象）一律丢弃 */
 export function sanitizeImageUrl(raw: unknown): string {
-  const url = String(raw ?? '').trim()
-  return /^https?:\/\//i.test(url) ? url : ''
+  if (typeof raw !== 'string') return ''
+  const url = raw.trim()
+  if (!/^https?:\/\//i.test(url)) return ''
+  try {
+    return new URL(url).hostname ? url : ''
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -911,6 +1070,81 @@ export function publicGallery(row: { preview_image_url?: unknown; preview_images
     previewImageUrl: cover,
     previewImages: images.length > 0 ? images : cover ? [cover] : [],
   }
+}
+
+/**
+ * 管理端写入预览图时的校验：任一非法条目都直接拒绝，而不是静默丢弃。
+ * 静默丢弃会让后台显示"已成功保存"而库里实际少图——与演示入口同一条红线（宁 400 不降级）。
+ * 读取侧（publicGallery）仍保持宽容：绕过 Worker 直接写库的脏值不能变成 500。
+ *
+ * 「封面 = 相册第一张」的补齐也放在这里，POST 与 PUT 共用同一条规则——
+ * 分成两处写就会出现同一请求体在两条路径落库不同（本仓库为 demoUrl 踩过一次）。
+ */
+export function validatePreviewInput(
+  rawGallery: unknown,
+  rawCover: unknown,
+): { ok: true; gallery: string[]; cover: string } | { ok: false; error: string } {
+  const galleryProvided = rawGallery !== undefined && rawGallery !== null
+  let list: unknown[] = []
+  if (galleryProvided && rawGallery !== '') {
+    if (Array.isArray(rawGallery)) {
+      list = rawGallery
+    } else if (typeof rawGallery === 'string') {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(rawGallery)
+      } catch {
+        return { ok: false, error: '预览相册格式无效：需要 URL 数组或其 JSON 字符串' }
+      }
+      if (!Array.isArray(parsed)) {
+        return { ok: false, error: '预览相册格式无效：需要 URL 数组' }
+      }
+      list = parsed
+    } else {
+      return { ok: false, error: '预览相册格式无效：需要 URL 数组' }
+    }
+  }
+  if (list.length > PREVIEW_IMAGE_LIMIT) {
+    return { ok: false, error: `预览相册最多 ${PREVIEW_IMAGE_LIMIT} 张，当前 ${list.length} 张` }
+  }
+
+  const gallery: string[] = []
+  const seen = new Set<string>()
+  for (let i = 0; i < list.length; i += 1) {
+    const url = sanitizeImageUrl(list[i])
+    if (!url) {
+      return {
+        ok: false,
+        error: `预览相册第 ${i + 1} 行不是有效的 http/https 绝对地址（需带协议与主机名）`,
+      }
+    }
+    if (seen.has(url)) {
+      return { ok: false, error: `预览相册第 ${i + 1} 行与前面重复：同一地址不能出现两次` }
+    }
+    seen.add(url)
+    gallery.push(url)
+  }
+
+  let cover = ''
+  if (rawCover !== undefined && rawCover !== null) {
+    if (typeof rawCover !== 'string') {
+      return { ok: false, error: '封面地址必须是字符串' }
+    }
+    const trimmed = rawCover.trim()
+    if (trimmed) {
+      cover = sanitizeImageUrl(trimmed)
+      if (!cover) {
+        return { ok: false, error: '封面地址无效：仅支持 http/https 绝对地址' }
+      }
+    }
+  }
+
+  // 相册随本次请求一起提交时，空封面按「封面 = 相册第一张」补齐
+  if (!cover && galleryProvided && gallery.length > 0) {
+    cover = gallery[0]
+  }
+
+  return { ok: true, gallery, cover }
 }
 
 function nowStamp(): string {
@@ -1060,7 +1294,9 @@ export function buildProjectSyncUpdate(
     }
   }
 
-  // 预览图/相册：编辑所有 → 只在空白时从 README 提取；管理员覆盖过的不动
+  // 预览图/相册：编辑所有 → 只在「空」时从 README 提取。
+  // 注意语义：空 = 待填。管理员若主动清空封面或相册，下次同步会重新自动填充；
+  // 想永久不用自动图，请在字段里填一个自己的地址，而不是留空。
   if (row.has_preview !== 1 || row.has_preview_images !== 1) {
     const parsed = parseGithubRepo(row.repository)
     const readmeText = docs?.readmeEn || docs?.readmeZh || row.readme_head_en || row.readme_head_zh
@@ -1110,7 +1346,8 @@ export function buildProjectSyncUpdate(
 // body.fetchDocs 为真时同时抓取 README 与 Compose 文档（只填充空白字段，不覆盖手工维护的内容）
 adminApp.post('/github-sync', async (c) => {
   try {
-    const body = await c.req.json().catch(() => ({}))
+    // 该接口的请求体可选（不传即按默认方式同步），所以缺失/不可解析都退化成空对象，而不是 400
+    const body = (await readJsonBody(c)) ?? {}
     const ghHeaders = getGithubHeaders(c, body?.token)
     const fetchDocs = body?.fetchDocs === true
 
@@ -1316,7 +1553,10 @@ adminApp.get('/github-repos', async (c) => {
 // 管理端：从 GitHub 仓库一键导入为馆藏标本
 adminApp.post('/github-import', async (c) => {
   try {
-    const body = await c.req.json()
+    const body = await readJsonBody(c)
+    if (body === null) {
+      return c.json({ error: '请求体不是合法的 JSON 对象' }, 400)
+    }
     const repoFullName = (body.repoFullName || '').trim()
     const customToken = body.token
     if (!repoFullName || !repoFullName.includes('/')) {
@@ -1619,7 +1859,10 @@ adminApp.get('/site-settings', async (c) => {
 // 管理端：部分更新站点设置（UPSERT，容忍迁移未插入默认行的情况）
 adminApp.put('/site-settings', async (c) => {
   try {
-    const body = await c.req.json()
+    const body = await readJsonBody(c)
+    if (body === null) {
+      return c.json({ error: '请求体不是合法的 JSON 对象' }, 400)
+    }
 
     const insertColumns: string[] = []
     const insertValues: (string | number)[] = [1]

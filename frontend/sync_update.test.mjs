@@ -19,6 +19,7 @@ const {
   extractPreviewImages,
   parsePreviewImages,
   sanitizeImageUrl,
+  validatePreviewInput,
   resolveRepoAssetUrl,
 } = await import(ROUTE_URL)
 
@@ -391,6 +392,8 @@ assert.equal(
 assert.equal(sanitizeImageUrl('javascript:alert(1)'), '', 'case 14b: javascript: 被丢弃')
 assert.equal(sanitizeImageUrl('docs/a.png'), '', 'case 14c: 相对路径不算合法绝对地址')
 assert.equal(sanitizeImageUrl('https://cdn.example.com/a.png'), 'https://cdn.example.com/a.png', 'case 14d: http(s) 放行')
+assert.equal(sanitizeImageUrl('https://'), '', 'case 14e: 空壳地址（无主机名）被拒')
+assert.equal(sanitizeImageUrl(['https://a.example/1.png', 'https://a.example/2.png']), '', 'case 14f: 数组不当作单个地址')
 
 assert.deepEqual(
   parsePreviewImages('["https://a.example/1.png","javascript:alert(1)","https://a.example/1.png"]'),
@@ -402,4 +405,62 @@ assert.deepEqual(parsePreviewImages('{"a":1}'), [], 'case 15c: 非数组退化�
 assert.deepEqual(parsePreviewImages(undefined), [], 'case 15d: 空值退化为空数组')
 assert.deepEqual(parsePreviewImages([1, null, 'https://a.example/x.png']), ['https://a.example/x.png'], 'case 15e: 非字符串项被剔除')
 
-console.log('sync_update：全部用例通过（字段归属 / 格式口径 / 文档规则 / 地址解析 / 时间线 / 预览图 / 相册）✓')
+// ============================================
+// 8. 管理端写入校验（宁 400 不静默丢条：否则后台会出现假状态）
+// ============================================
+const okGallery = validatePreviewInput(
+  ['https://a.example/1.png', 'https://a.example/2.png'],
+  'https://a.example/1.png',
+)
+assert.equal(okGallery.ok, true, 'case 16a: 合法数组 + 合法封面通过')
+assert.deepEqual(okGallery.gallery, ['https://a.example/1.png', 'https://a.example/2.png'], 'case 16b: 原样保留顺序')
+
+const jsonSource = validatePreviewInput('["https://a.example/1.png"]', undefined)
+assert.equal(jsonSource.ok, true, 'case 16c: 接受 JSON 字符串形式')
+assert.deepEqual(jsonSource.gallery, ['https://a.example/1.png'], 'case 16d: JSON 字符串解析正确')
+
+const noScheme = validatePreviewInput(['https://a.example/1.png', 'example.com/2.png'], undefined)
+assert.equal(noScheme.ok, false, 'case 16e: 缺协议的行被拒绝')
+assert.ok(String(noScheme.error).includes('第 2 行'), `case 16f: 错误信息点名行号（实际：${noScheme.error}）`)
+
+const dup = validatePreviewInput(['https://a.example/1.png', 'https://a.example/1.png'], undefined)
+assert.equal(dup.ok, false, 'case 16g: 重复条目被拒绝（而不是静默去重）')
+assert.ok(String(dup.error).includes('重复'), 'case 16h: 说明是重复')
+
+const tooMany = validatePreviewInput(
+  Array.from({ length: 13 }, (_, i) => `https://a.example/${i}.png`),
+  undefined,
+)
+assert.equal(tooMany.ok, false, 'case 16i: 超过 12 张被拒绝（而不是静默截断）')
+assert.ok(String(tooMany.error).includes('13'), 'case 16j: 报出实际张数')
+
+assert.equal(validatePreviewInput('not json', undefined).ok, false, 'case 16k: 坏 JSON 被拒绝')
+assert.equal(validatePreviewInput('{"a":1}', undefined).ok, false, 'case 16l: 非数组被拒绝')
+assert.equal(validatePreviewInput([42], undefined).ok, false, 'case 16m: 非字符串项被拒绝')
+assert.equal(validatePreviewInput(undefined, 'ftp://a.example/x').ok, false, 'case 16n: 非法协议封面被拒绝')
+
+const emptyBoth = validatePreviewInput(undefined, undefined)
+assert.deepEqual(emptyBoth, { ok: true, gallery: [], cover: '' }, 'case 16o: 两者都不传 → 空值合法')
+
+const clearedCover = validatePreviewInput(['https://a.example/1.png'], '')
+assert.equal(clearedCover.ok, true, 'case 16p: 显式清空封面是合法写法')
+// 关键不变量：空封面 + 本次带相册 → 补齐为相册第一张。POST/PUT 都走这一个函数，
+// 所以同一请求体在两条路径上落库必须一致（本仓库为 demoUrl 踩过两条路径不一致的坑）。
+assert.equal(clearedCover.cover, 'https://a.example/1.png', 'case 16r: 空封面按相册第一张补齐')
+assert.equal(
+  validatePreviewInput(['https://a.example/1.png'], undefined).cover,
+  'https://a.example/1.png',
+  'case 16s: 未提供封面键时同样补齐',
+)
+assert.equal(
+  validatePreviewInput(undefined, '').cover,
+  '',
+  'case 16t: 本次不带相册时，清空封面就是清空（不凭空造封面）',
+)
+assert.equal(
+  validatePreviewInput(['https://a.example/1.png'], 'https://keep.example/x.png').cover,
+  'https://keep.example/x.png',
+  'case 16u: 显式封面不被相册首张覆盖',
+)
+
+console.log('sync_update：全部用例通过（字段归属 / 格式口径 / 文档规则 / 地址解析 / 时间线 / 预览图 / 相册 / 写入校验）✓')

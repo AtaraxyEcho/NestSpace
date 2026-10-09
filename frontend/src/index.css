@@ -21,6 +21,13 @@
   --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-hover: cubic-bezier(0.33, 1, 0.68, 1);
   --page-progress: 0;
+  /* 详情页统一栅格：所有区块共用同一个左右边缘，避免 header / hero / section / 文档区各自为政 */
+  --gutter: clamp(20px, 6vw, 96px);
+  /* 区块纵向节奏分两档：叙述/统计/时间线用 loose，预览这种密集区块用 dense */
+  --section-pad-loose: clamp(88px, 9vw, 148px);
+  --section-pad-dense: clamp(56px, 6vw, 96px);
+  /* 吸顶头高度 + 余量：锚点跳转时避免落点被标题遮住 */
+  --sticky-offset: calc(72px + 16px);
   color-scheme: light;
 }
 
@@ -395,22 +402,22 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .detail-page { min-height: 100vh; background: var(--bg-base); }
 .detail-page .site-footer { opacity: 1; transform: none; }
 .detail-header {
-  height: 72px; padding: 0 40px; position: sticky; top: 0; z-index: 900;
+  height: 72px; padding: 0 var(--gutter); position: sticky; top: 0; z-index: 900;
   display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
   border-bottom: 1px solid var(--line-hair); background: color-mix(in srgb, var(--bg-base) 94%, transparent);
   backdrop-filter: blur(10px); font: 9px var(--font-mono); letter-spacing: .18em;
 }
 .detail-header .wordmark { border: 0; padding: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; }
 .detail-location { color: var(--ink-tertiary); }
-.detail-hero { min-height: calc(100vh - 72px); padding: 48px max(6vw, 40px) 0; display: flex; flex-direction: column; }
+.detail-hero { min-height: calc(100vh - 72px); padding: 48px var(--gutter) 0; display: flex; flex-direction: column; }
 .back-link {
   align-self: flex-start; border: 0; border-bottom: 1px solid var(--line-default); padding: 0 0 8px;
-  background: transparent; cursor: pointer; font: 8px var(--font-mono); letter-spacing: .17em; color: var(--ink-tertiary);
+  background: transparent; cursor: pointer; font: 10px var(--font-mono); letter-spacing: .14em; color: var(--ink-tertiary);
 }
 .back-link:hover { color: var(--accent); border-color: var(--accent); }
-.detail-hero-grid { flex: 1; display: grid; grid-template-columns: 1.1fr .9fr; align-items: center; gap: 9vw; padding: 40px 4vw; }
+.detail-hero-grid { flex: 1; display: grid; grid-template-columns: 1.1fr .9fr; align-items: center; gap: 9vw; padding: 40px 0; }
 .detail-title .latin { font-size: 19px; margin: 20px 0 7px; }
-.detail-title h1 { margin: 0; font-size: clamp(72px, 10vw, 148px); line-height: .76; letter-spacing: -.055em; font-weight: 600; }
+.detail-title h1 { margin: 0; font-size: clamp(72px, 10vw, 148px); line-height: .9; letter-spacing: -.055em; font-weight: 600; }
 .detail-cn { margin: 24px 0 0; font: italic 18px "Noto Serif SC", serif; color: var(--accent); }
 .detail-intro { max-width: 600px; margin: 24px 0 0; font-size: 19px; line-height: 1.65; color: var(--ink-secondary); }
 .detail-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 34px; }
@@ -422,32 +429,46 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 }
 .detail-plate::before { content: ""; position: absolute; inset: 20px; border: 1px dashed var(--line-default); }
 .detail-plate svg { width: 58%; height: 70%; filter: drop-shadow(7px 10px 0 color-mix(in srgb, var(--accent) 12%, transparent)); }
-.plate-code { position: absolute; top: 34px; left: 36px; font: 8px var(--font-mono); letter-spacing: .2em; color: var(--ink-tertiary); }
+.plate-code { position: absolute; top: 34px; left: 36px; font: 10px var(--font-mono); letter-spacing: .16em; color: var(--ink-tertiary); }
 .detail-plate .hand-note { position: absolute; bottom: 33px; left: 36px; transform: rotate(-2deg); }
-.plate-status { position: absolute; right: 35px; bottom: 36px; font: 8px var(--font-mono); letter-spacing: .13em; }
+.plate-status { position: absolute; right: 35px; bottom: 36px; font: 10px var(--font-mono); letter-spacing: .12em; }
 .plate-status b { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--accent); }
+/* 有真实封面时：相框跟随图片比例（--plate-ratio 由 onLoad 写入并夹在 [0.8,2.2]）。
+   解码前先用 16/10 兜底——封面绝大多数是横图，比沿用占位的 4/5 少一次尺寸跳变 */
+.detail-plate.has-cover { aspect-ratio: var(--plate-ratio, 16 / 10); overflow: hidden; }
+.detail-plate .plate-cover { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; object-fit: cover; }
+/* 虚线装裱框与角标必须压在照片之上：它们在 DOM 里早于 img，没有 z-index 会被整幅照片盖掉 */
+.detail-plate.has-cover::before { z-index: 2; }
+.detail-plate.has-cover .plate-code,
+.detail-plate.has-cover .plate-status,
+.detail-plate.has-cover .hand-note {
+  z-index: 2;
+  /* 照片深浅不可控：给标签一块纸色小底，而不是压暗整幅图 */
+  background: color-mix(in srgb, var(--bg-base) 90%, transparent);
+  padding: 3px 8px;
+}
 .detail-register { margin: 0; display: grid; grid-template-columns: repeat(5, 1fr); border-top: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong); }
 .detail-register div { min-height: 86px; padding: 20px 24px; border-right: 1px solid var(--line-default); }
 .detail-register div:last-child { border-right: 0; }
-.detail-register dt { font: 8px var(--font-mono); letter-spacing: .17em; color: var(--ink-tertiary); }
+.detail-register dt { font: 10px var(--font-mono); letter-spacing: .13em; color: var(--ink-tertiary); }
 .detail-register dd { margin: 9px 0 0; font-size: 17px; font-weight: 600; }
 .detail-tabs { display: flex; border-bottom: 1px solid var(--line-strong); }
 .detail-tabs button {
   min-width: 150px; min-height: 54px; padding: 0 24px; border: 0; border-right: 1px solid var(--line-default);
   background: transparent; color: var(--ink-tertiary); cursor: pointer;
-  font: 8px var(--font-mono); letter-spacing: .17em; text-transform: uppercase;
+  font: 10px var(--font-mono); letter-spacing: .13em; text-transform: uppercase;
 }
 .detail-tabs button.active { background: var(--accent-dark); color: #f5eed9; }
 .document-hidden { display: none; }
-.detail-section { padding: 128px max(6vw, 40px); border-bottom: 1px solid var(--line-default); }
-.detail-section-label { display: flex; justify-content: space-between; margin-bottom: 64px; font: 8px var(--font-mono); letter-spacing: .18em; color: var(--ink-tertiary); }
+.detail-section { padding: var(--section-pad-loose) var(--gutter); border-bottom: 1px solid var(--line-default); }
+.detail-section-label { display: flex; justify-content: space-between; margin-bottom: 64px; font: 10px var(--font-mono); letter-spacing: .16em; color: var(--ink-tertiary); }
 .detail-narrative { display: grid; grid-template-columns: 1fr 1fr; gap: 10vw; }
-.detail-narrative article > span { font: 8px var(--font-mono); letter-spacing: .2em; color: var(--accent); }
+.detail-narrative article > span { font: 10px var(--font-mono); letter-spacing: .16em; color: var(--accent); }
 .detail-narrative h2 { max-width: 480px; margin: 17px 0 25px; font-size: clamp(38px, 4.5vw, 68px); line-height: .95; font-weight: 600; letter-spacing: -.03em; }
 .detail-narrative p { max-width: 600px; font-size: 18px; line-height: 1.85; color: var(--ink-secondary); }
 .capability-grid { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 48px; border-top: 1px solid var(--line-strong); border-left: 1px solid var(--line-default); }
 .capability-grid article { min-height: 260px; padding: 28px; border-right: 1px solid var(--line-default); border-bottom: 1px solid var(--line-default); }
-.capability-grid article > span { font: 9px var(--font-mono); color: var(--ink-tertiary); }
+.capability-grid article > span { font: 10px var(--font-mono); color: var(--ink-tertiary); }
 .capability-grid h3 { margin: 70px 0 16px; font-size: 25px; line-height: 1.1; }
 .capability-grid p { margin: 0; font-size: 14px; line-height: 1.6; color: var(--ink-secondary); }
 /* 详情页内容区为空时的单行占位：只说"还没有"，不塞模板文案 */
@@ -457,49 +478,86 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 }
 .metric-strip { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 72px; background: var(--accent-dark); color: #e8dfd0; }
 .metric-strip div { min-height: 180px; padding: 34px; border-right: 1px solid rgba(232,223,208,.18); }
-.metric-strip span { display: block; font: 8px var(--font-mono); letter-spacing: .18em; color: #b8ab98; }
+.metric-strip span { display: block; font: 10px var(--font-mono); letter-spacing: .15em; color: #b8ab98; }
 .metric-strip strong { display: block; margin-top: 34px; font-size: clamp(48px, 5vw, 72px); line-height: .8; }
-/* 详情页预览图「标本托板」相册：跟随指针的小角度倾斜 + 分层投影；不加模糊、不做无限循环 */
-.preview-section { background: var(--bg-base); }
+/* 详情页预览图「堆叠卡片」相册：悬停/聚焦时展开成扇形；不加模糊、不做无限循环 */
+/* 预览区不套用叙述段落的 128px 大留白，否则图会被推到很低 */
+.preview-section { background: var(--bg-base); padding-top: var(--section-pad-dense); padding-bottom: var(--section-pad-dense); }
 .preview-gallery {
-  display: flex; flex-direction: column; align-items: center; gap: 14px;
-  width: fit-content; max-width: 100%; margin: 8px auto 0;
+  display: flex; flex-direction: column; align-items: center; gap: 18px;
+  width: 100%; margin: 8px auto 0;
 }
-.preview-plate {
-  --tilt-x: 0deg;
-  --tilt-y: 0deg;
-  position: relative; width: fit-content; perspective: 1200px;
+.preview-deck {
+  --fan: 12px;         /* 邻卡的横向展开距离（静止态几乎重合） */
+  --fan-rot: 2.5deg;   /* 邻卡的 Y 轴旋转 */
+  --fan-rise: 3px;     /* 越靠外越往上抬一点，形成扇形弧 */
+  position: relative; display: grid; place-items: center;
+  perspective: 1400px; touch-action: pan-y;
+  /* 主图解码前不占位会整块跳一下；先按横图常见的比例留出盒子 */
+  min-height: min(46vh, 380px);
 }
-.preview-plate:focus-visible { outline: 1px solid var(--accent); outline-offset: 6px; }
-.preview-plate-inner {
+/* 展开只在有指针的设备上生效，并按断点收窄距离：
+   ① 触屏点按会让 deck 获得焦点，若无 hover 门槛会误展开（触屏也看不出扇形的意义）；
+   ② ±fan + 半张邻卡必须留在视口内，否则最外侧两张会被 html 的 overflow-x: clip 无声裁掉。
+   全部条件都带 hover 前缀，避免任一断点在触屏上生效。 */
+@media (hover: hover) and (pointer: fine) {
+  .preview-deck.is-open { --fan: 150px; --fan-rot: 13deg; --fan-rise: 7px; }
+}
+@media (hover: hover) and (pointer: fine) and (max-width: 1300px) {
+  .preview-deck.is-open { --fan: 112px; --fan-rot: 12deg; --fan-rise: 6px; }
+}
+@media (hover: hover) and (pointer: fine) and (max-width: 1100px) {
+  .preview-deck.is-open { --fan: 88px; --fan-rot: 11deg; --fan-rise: 5px; }
+}
+@media (hover: hover) and (pointer: fine) and (max-width: 760px) {
+  .preview-deck.is-open { --fan: 64px; --fan-rot: 10deg; --fan-rise: 4px; }
+}
+.preview-deck:focus-visible { outline: 1px solid var(--accent); outline-offset: 8px; }
+.deck-card {
+  grid-area: 1 / 1;
   padding: 10px; border: 1px solid var(--line-strong); background: var(--bg-elevated);
-  transform: rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
-  transition: transform 300ms var(--ease-hover, ease-out), box-shadow 300ms ease-out;
+  cursor: pointer;
+  transform:
+    translate3d(
+      calc(var(--offset) * var(--fan)),
+      calc(var(--abs) * var(--fan-rise) * -1),
+      calc(var(--abs) * -26px)
+    )
+    rotateY(calc(var(--offset) * var(--fan-rot)))
+    scale(calc(1 - var(--abs) * 0.05));
+  transition: transform 300ms var(--ease-hover, ease-out), box-shadow 300ms ease-out, opacity 200ms ease-out;
   box-shadow: 10px 12px 0 color-mix(in srgb, var(--accent) 16%, transparent), 0 34px 60px -34px rgba(42,38,32,.32);
 }
-.preview-plate img { display: block; }
+.deck-card.is-peek { opacity: .78; }
+.deck-card img { display: block; }
 /* 横图走宽板；竖图（手机截图）收窄成手机框，contain 不裁 */
-.preview-plate.is-landscape img { max-width: min(880px, 82vw); max-height: 62vh; object-fit: cover; }
-.preview-plate.is-portrait img { max-width: min(420px, 72vw); max-height: 70vh; object-fit: contain; }
+.preview-deck.is-landscape .deck-card.is-active img { max-width: min(880px, 82vw); max-height: 62vh; object-fit: cover; }
+.preview-deck.is-portrait .deck-card.is-active img { max-width: min(420px, 72vw); max-height: 70vh; object-fit: contain; }
+/* 邻卡统一小尺寸，避免和主图抢视觉 */
+.deck-card.is-peek img { max-width: min(560px, 62vw); max-height: 42vh; object-fit: cover; }
+.preview-nav-row { display: flex; align-items: center; gap: 14px; }
+.preview-counter { font: 9px var(--font-mono); letter-spacing: .14em; color: var(--ink-tertiary); }
+/* 44px 触控目标（原来 34px 且贴边外扩，手机上难点也不合规） */
 .preview-nav {
-  position: absolute; top: 50%; transform: translateY(-50%);
-  width: 34px; height: 34px; display: grid; place-items: center;
+  width: 44px; height: 44px; display: grid; place-items: center;
   font: 16px var(--font-mono); line-height: 1;
   border: 1px solid var(--line-strong); background: var(--bg-elevated); color: var(--ink-primary);
   cursor: pointer; transition: background 200ms var(--ease-hover, ease-out);
 }
 .preview-nav:hover { background: var(--bg-surface); }
-.preview-prev { left: -12px; }
-.preview-next { right: -12px; }
-.preview-thumbs { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: min(880px, 88vw); }
+/* 十几张时横向滚动，而不是换行堆成一大块 */
+.preview-thumbs {
+  display: flex; flex-wrap: nowrap; gap: 8px; justify-content: flex-start;
+  max-width: min(880px, 88vw); overflow-x: auto; padding-bottom: 6px;
+}
 .preview-thumb {
-  width: 72px; height: 48px; padding: 0; overflow: hidden; cursor: pointer;
+  flex: 0 0 auto; width: 84px; height: 56px; padding: 0; overflow: hidden; cursor: pointer;
   border: 1px solid var(--line-default); background: var(--bg-elevated);
 }
 .preview-thumb img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .preview-thumb.is-active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 /* 管理端抽屉里的相册缩略图（首张标「封面」） */
-.preview-thumbs-admin { justify-content: flex-start; max-width: 100%; margin-bottom: 19px; }
+.preview-thumbs-admin { justify-content: flex-start; flex-wrap: wrap; max-width: 100%; margin-bottom: 19px; overflow: visible; }
 .preview-thumb-admin { position: relative; width: 96px; height: 64px; overflow: hidden; border: 1px solid #c5c5bc; background: #ecebe5; }
 .preview-thumb-admin img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .preview-thumb-admin em {
@@ -508,29 +566,80 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   background: var(--accent); color: var(--bg-base);
 }
 @media (prefers-reduced-motion: reduce) {
-  .preview-plate-inner { transition: none; transform: none; }
+  /* 减少动态效果：不展开扇形，只留静态堆叠 */
+  .preview-deck.is-open { --fan: 12px; --fan-rot: 2.5deg; --fan-rise: 3px; }
+  .deck-card { transition: none; }
 }
 .evolution-section { background: var(--bg-surface); }
 .evolution-list { border-top: 1px solid var(--line-strong); }
 .evolution-list article { display: grid; grid-template-columns: .5fr .8fr 1.3fr 3fr; align-items: baseline; gap: 30px; min-height: 120px; padding: 32px 20px; border-bottom: 1px solid var(--line-default); }
-.evolution-list .event-index, .evolution-list time { font: 9px var(--font-mono); letter-spacing: .14em; color: var(--ink-tertiary); }
+.evolution-list .event-index, .evolution-list time { font: 10px var(--font-mono); letter-spacing: .12em; color: var(--ink-tertiary); }
 .evolution-list h3 { margin: 0; font-size: 24px; }
 .evolution-list p { margin: 0; font-size: 15px; line-height: 1.6; color: var(--ink-secondary); }
-.document-section { display: grid; grid-template-columns: 220px minmax(0, 760px); justify-content: center; gap: 7vw; }
-.document-section > aside { position: sticky; top: 120px; align-self: start; display: flex; flex-direction: column; }
+/* 文档区与叙述区共用同一左边缘（原来居中，切页签时内容会横向跳动）；内容列按 58ch 收窄，
+   中英文行长都落在可读区间 */
+.document-section { display: grid; grid-template-columns: 220px minmax(0, 58ch); justify-content: start; gap: var(--gutter); }
+.document-section > aside { position: sticky; top: calc(var(--sticky-offset) + 40px); align-self: start; display: flex; flex-direction: column; }
 .document-section > aside a { padding: 12px 0; border-bottom: 1px solid var(--line-hair); font: 9px var(--font-mono); color: var(--ink-tertiary); }
-.markdown-body h2 { margin: 18px 0 32px; font-size: clamp(48px, 6vw, 78px); line-height: .92; }
+/* 锚点跳转（READ FIELD NOTES / README 目录 / compose 定位）统一避开 72px 吸顶头 */
+.detail-section, .compose-doc, .markdown-body > h3,
+.readme-doc h1, .readme-doc h2, .readme-doc h3, .readme-doc h4 { scroll-margin-top: var(--sticky-offset); }
+/* README 文档标题只有这一套字号：原来 `.markdown-body h2` 的 48–78px 会被下面的后代选择器
+   完全盖掉（且在无 readme-doc 的 deployment 面板里是 52px 的隐患），故统一到这里 */
+.markdown-body h2 { margin: 46px 0 14px; font-size: clamp(26px, 2.6vw, 34px); line-height: 1.2; }
 .markdown-body h3 { margin: 52px 0 16px; font-size: 27px; }
 .markdown-body p, .markdown-body li { font-size: 16px; line-height: 1.8; color: var(--ink-secondary); }
 .markdown-body blockquote { margin: 0 0 34px; padding-left: 24px; border-left: 3px solid var(--accent); font-size: 21px; font-style: italic; line-height: 1.6; }
-.code-block { position: relative; min-height: 118px; padding: 54px 22px 22px; background: #232019; color: #e8dfd0; }
-.code-block > span, .code-block > button { position: absolute; top: 16px; font: 7px var(--font-mono); letter-spacing: .14em; color: #b8ab98; }
-.code-block > span { left: 22px; }.code-block > button { right: 16px; border: 1px solid #5d5a51; background: transparent; color: #e8dfd0; cursor: pointer; padding: 7px 10px; }
+/* 细滚动条：默认滚动条在深色代码块里非常跳，统一成一档低对比的细条。
+   刻意不隐藏（display:none / scrollbar-width:none 会丢掉"这里能滚"的可发现性） */
+.preview-thumbs, .md-table-wrap, .project-table-wrap, .editor-fields,
+.code-block pre, .readme-doc pre {
+  scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent;
+}
+.preview-thumbs::-webkit-scrollbar, .md-table-wrap::-webkit-scrollbar,
+.project-table-wrap::-webkit-scrollbar, .editor-fields::-webkit-scrollbar,
+.code-block pre::-webkit-scrollbar, .readme-doc pre::-webkit-scrollbar { width: 10px; height: 10px; }
+.preview-thumbs::-webkit-scrollbar-track, .md-table-wrap::-webkit-scrollbar-track,
+.project-table-wrap::-webkit-scrollbar-track, .editor-fields::-webkit-scrollbar-track,
+.code-block pre::-webkit-scrollbar-track, .readme-doc pre::-webkit-scrollbar-track { background: transparent; }
+.preview-thumbs::-webkit-scrollbar-thumb, .md-table-wrap::-webkit-scrollbar-thumb,
+.project-table-wrap::-webkit-scrollbar-thumb, .editor-fields::-webkit-scrollbar-thumb,
+.code-block pre::-webkit-scrollbar-thumb, .readme-doc pre::-webkit-scrollbar-thumb {
+  border: 2px solid transparent; border-radius: 8px; background-clip: content-box;
+  background-color: var(--line-strong);
+}
+.preview-thumbs::-webkit-scrollbar-thumb:hover, .md-table-wrap::-webkit-scrollbar-thumb:hover,
+.project-table-wrap::-webkit-scrollbar-thumb:hover, .editor-fields::-webkit-scrollbar-thumb:hover,
+.code-block pre::-webkit-scrollbar-thumb:hover, .readme-doc pre::-webkit-scrollbar-thumb:hover {
+  background-color: var(--ink-tertiary);
+}
+/* 深色块内换浅色 thumb，避免灰条压暗底色 */
+.code-block pre, .readme-doc pre { scrollbar-color: rgba(232,223,208,.34) transparent; }
+.code-block pre::-webkit-scrollbar-thumb, .readme-doc pre::-webkit-scrollbar-thumb {
+  background-color: rgba(232,223,208,.28);
+}
+.code-block pre::-webkit-scrollbar-thumb:hover, .readme-doc pre::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(232,223,208,.5);
+}
+
+/* 代码块：头部（路径 + COPY）用 flex，短文件不再被 54px 占位内边距撑高 */
+.code-block { background: #232019; color: #e8dfd0; }
+.code-block-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 14px 10px 22px; border-bottom: 1px solid rgba(232,223,208,.14);
+}
+.code-block-head > span { font: 10px var(--font-mono); letter-spacing: .13em; color: #b8ab98; }
+.code-block-head > button {
+  min-height: 32px; padding: 0 12px; display: inline-flex; align-items: center; flex: 0 0 auto;
+  border: 1px solid #5d5a51; background: transparent; color: #e8dfd0; cursor: pointer;
+  font: 10px var(--font-mono); letter-spacing: .13em;
+}
+.code-block-head > button:hover { border-color: #8a8680; }
 .code-block code { font: 13px/1.7 var(--font-mono); }
 .deployment-table { border: 1px solid var(--line-default); }
 .deployment-table div { min-height: 68px; padding: 15px 18px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line-default); }
 .deployment-table div:last-child { border-bottom: 0; }
-.deployment-table span { font: 8px var(--font-mono); letter-spacing: .15em; color: var(--ink-tertiary); }
+.deployment-table span { font: 10px var(--font-mono); letter-spacing: .13em; color: var(--ink-tertiary); }
 
 /* 真实 README / Compose 文档渲染（内容由 utils/markdown.tsx 产出 React 元素，无 HTML 注入面） */
 .document-section > aside .doc-toc-item {
@@ -541,7 +650,6 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .document-section > aside .doc-toc-empty { padding: 12px 0; color: var(--ink-tertiary); font: 9px var(--font-mono); }
 
 .readme-doc h1 { margin: 22px 0 18px; font-size: clamp(34px, 3.6vw, 48px); line-height: 1.08; }
-.markdown-body .readme-doc h2 { margin: 46px 0 14px; font-size: clamp(26px, 2.6vw, 34px); line-height: 1.2; }
 .markdown-body .readme-doc h3 { margin: 34px 0 10px; font-size: 21px; }
 .markdown-body .readme-doc h4 { margin: 24px 0 8px; font-size: 17px; }
 .markdown-body .readme-doc p, .markdown-body .readme-doc li { font-size: 15px; line-height: 1.85; }
@@ -562,7 +670,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   background: var(--bg-surface); font-size: 13px; color: var(--ink-secondary);
 }
 .compose-doc h3 { margin-bottom: 12px; }
-.code-block pre { margin: 0; overflow-x: auto; max-height: 560px; overflow-y: auto; }
+.code-block pre { margin: 0; padding: 18px 22px; max-height: min(56vh, 520px); overflow: auto; overscroll-behavior: contain; }
 .code-block pre code { font: 12.5px/1.7 var(--font-mono); }
 
 /* 详情页加载/未找到占位 */
@@ -832,7 +940,8 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .stats-grid { grid-template-columns: 1fr 1fr; }
   .stat-card { min-height: 210px; }
   .curator-section { gap: 5vw; }
-  .detail-hero-grid { gap: 4vw; padding-left: 0; padding-right: 0; }
+  .detail-hero-grid { gap: 4vw; }
+  .detail-narrative { gap: 6vw; }
   .capability-grid { grid-template-columns: 1fr 1fr; }
   .admin-shell { grid-template-columns: 210px 1fr; }
   .admin-sidebar { width: 210px; }
@@ -893,9 +1002,9 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .footer-grid > div:last-child { display: none; }
   .footer-bottom { align-items: flex-start; gap: 20px; }
   .footer-bottom small { text-align: right; line-height: 1.6; }
-  .detail-header { height: 64px; padding: 0 16px; grid-template-columns: 1fr auto; }
+  .detail-header { height: 64px; padding: 0 var(--gutter); grid-template-columns: 1fr auto; }
   .detail-location, .detail-header .wordmark span, .detail-header .header-tools button:last-child { display: none; }
-  .detail-hero { min-height: auto; padding: 28px 20px 0; }
+  .detail-hero { min-height: auto; padding: 28px var(--gutter) 0; }
   .detail-hero-grid { grid-template-columns: 1fr; padding: 50px 0; }
   .detail-title h1 { font-size: 67px; }
   .detail-intro { font-size: 16px; }
@@ -906,8 +1015,10 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .detail-register div:last-child { grid-column: 1 / -1; }
   .detail-tabs { overflow-x: auto; }
   .detail-tabs button { min-width: 125px; padding: 0 16px; }
-  .detail-section { padding: 90px 20px; }
   .detail-section-label { margin-bottom: 42px; }
+  /* 预览区扇形在手机上收小；缩略图条占满宽度并横向滚动（留白与边距已由 token 统一处理） */
+  /* 扇形的展开距离与 hover 门槛已由上方按断点统一处理，这里不再重复设置 */
+  .preview-thumbs { max-width: 100%; }
   .detail-narrative { grid-template-columns: 1fr; gap: 58px; }
   .detail-narrative h2 { font-size: 42px; }
   .capability-grid { grid-template-columns: 1fr; }
@@ -920,7 +1031,6 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .document-section { grid-template-columns: 1fr; gap: 42px; }
   .document-section > aside { position: static; display: grid; grid-template-columns: 1fr 1fr; }
   .document-section > aside .eyebrow { grid-column: 1 / -1; margin-bottom: 12px; }
-  .markdown-body h2 { font-size: 52px; }
   .related-grid { grid-template-columns: 1fr; }
   .admin-login { padding: 20px; }
   .admin-login > .back-link { top: 18px; left: 18px; }
