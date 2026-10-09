@@ -129,6 +129,29 @@ check('无扩展名 / 空路径 / 非 URL：一律有兜底，牌面不会空白
   assert.equal(frameLabel('', 'Fjord').path, 'Fjord')
 })
 
+check('+N 的期望值来自独立写死的表，不是 total 减在场张数的恒等式', () => {
+  // hiddenFrameCount 目前就是 total - frames.length 实现的；只断言那个等式等于什么都没测。
+  // 这张表独立写出"该藏几张"，改坏实现（比如写死 total-4、或阈值改错）会红。
+  const table = [
+    [1, 0, 0],
+    [2, 1, 0],
+    [3, 2, 0],
+    [4, 0, 0],
+    [5, 0, 1],
+    [8, 3, 4],
+    [12, 0, 8],
+    [12, 11, 8],
+    [20, 7, 16],
+  ]
+  for (const [total, active, expected] of table) {
+    assert.equal(
+      hiddenFrameCount(total, active),
+      expected,
+      `+N 口径：${total} 张在第 ${active + 1} 张时应藏 ${expected} 张`,
+    )
+  }
+})
+
 let failed = 0
 for (const [name, fn] of cases) {
   try {
