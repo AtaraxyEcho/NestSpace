@@ -23,10 +23,14 @@ export const fallbackProjects: Project[] = [
     repository: "github.com/nestspace/aperture",
     demoUrl: "",
     demoEnabled: false,
-    challenge:
-      "Creative teams were spending more time maintaining image tooling than shaping the work itself. Existing pipelines were powerful, but configuration-heavy and difficult to reproduce.",
-    solution:
-      "Aperture turns a folder of source material into a deterministic, production-ready image set through one concise command and a human-readable manifest.",
+    challenge: {
+      en: "Creative teams were spending more time maintaining image tooling than shaping the work itself. Existing pipelines were powerful, but configuration-heavy and difficult to reproduce.",
+      zh: "创意团队花在维护图片工具链上的时间，多过打磨作品本身。既有管线足够强大，但配置繁重、结果难以复现。",
+    },
+    solution: {
+      en: "Aperture turns a folder of source material into a deterministic, production-ready image set through one concise command and a human-readable manifest.",
+      zh: "Aperture 用一条简短命令和一份人能直接读懂的清单，把一整目录的源素材变成确定、可上线的图片集。",
+    },
     features: [
       "Lossless batch pipeline",
       "Deterministic manifests",
@@ -78,10 +82,14 @@ export const fallbackProjects: Project[] = [
     repository: "github.com/nestspace/lumen",
     demoUrl: "",
     demoEnabled: false,
-    challenge:
-      "Edge applications needed useful traces without shipping a full observability stack or exposing customer data.",
-    solution:
-      "Lumen captures a minimal set of structured signals at the edge, then assembles them into readable traces close to the developer workflow.",
+    challenge: {
+      en: "Edge applications needed useful traces without shipping a full observability stack or exposing customer data.",
+      zh: "边缘应用想要有用的链路记录，却不愿为此打包整套可观测性方案，也不能暴露客户数据。",
+    },
+    solution: {
+      en: "Lumen captures a minimal set of structured signals at the edge, then assembles them into readable traces close to the developer workflow.",
+      zh: "Lumen 在边缘只采集最小一组结构化信号，再在离开发者工作流最近的地方拼成可读的链路。",
+    },
     features: [
       "Privacy-first tracing",
       "Edge runtime support",
@@ -133,10 +141,14 @@ export const fallbackProjects: Project[] = [
     repository: "github.com/nestspace/fjord",
     demoUrl: "",
     demoEnabled: false,
-    challenge:
-      "Small internal services inherited deployment complexity designed for systems many times their size.",
-    solution:
-      "Fjord packages process supervision, service discovery, and local persistence into a portable runtime with deliberately narrow boundaries.",
+    challenge: {
+      en: "Small internal services inherited deployment complexity designed for systems many times their size.",
+      zh: "规模很小的内部服务，却继承了为大它许多的系统设计的部署复杂度。",
+    },
+    solution: {
+      en: "Fjord packages process supervision, service discovery, and local persistence into a portable runtime with deliberately narrow boundaries.",
+      zh: "Fjord 把进程守护、服务发现和本地持久化收进一个可移植的运行时，边界刻意划得很窄。",
+    },
     features: [
       "Single binary deploy",
       "Local-first discovery",
@@ -188,10 +200,14 @@ export const fallbackProjects: Project[] = [
     repository: "github.com/nestspace/meridian",
     demoUrl: "",
     demoEnabled: false,
-    challenge:
-      "Conventional search flattened rich visual collections into ranked lists and removed their sense of place.",
-    solution:
-      "Meridian combines a compact spatial index with interaction primitives for maps, canvases, timelines, and exploratory archives.",
+    challenge: {
+      en: "Conventional search flattened rich visual collections into ranked lists and removed their sense of place.",
+      zh: "常规检索把丰富的视觉收藏压成排序列表，也抹掉了它们的空间感。",
+    },
+    solution: {
+      en: "Meridian combines a compact spatial index with interaction primitives for maps, canvases, timelines, and exploratory archives.",
+      zh: "Meridian 用一个紧凑的空间索引，加上面向地图、画布、时间线与探索式档案的交互原语。",
+    },
     features: [
       "2D spatial queries",
       "Incremental indexing",

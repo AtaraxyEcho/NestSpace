@@ -1,5 +1,8 @@
 export type Language = 'en' | 'zh'
 
+// 双语文本的形状与读侧规则都在 utils/bilingual.ts，类型也从那里来（同一个概念一种写法）
+import type { BilingualText } from '../utils/bilingual'
+
 export type ProjectShape = 'aperture' | 'lumen' | 'fjord' | 'meridian'
 
 export type ProjectStatus = 'LIVE' | 'BETA' | 'DRAFT' | 'ARCHIVED'
@@ -16,7 +19,7 @@ export type Project = {
   language: string
   stars: string
   year: string
-  description: { en: string; zh: string }
+  description: BilingualText
   shape: ProjectShape
   version: string
   updated: string
@@ -24,8 +27,9 @@ export type Project = {
   /** 项目演示入口：地址已是 http/https 规范化形式；开关关闭时公开接口不下发地址 */
   demoUrl: string
   demoEnabled: boolean
-  challenge: string
-  solution: string
+  /** 挑战 / 解决方案：双语。库里旧单列（纯文本）按中文只读兜底，见 utils/bilingual.ts */
+  challenge: BilingualText
+  solution: BilingualText
   features: string[]
   metrics: { label: string; value: string }[]
   timeline: { date: string; title: string; note: string }[]

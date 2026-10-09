@@ -13,12 +13,20 @@ import {
   syncGithubRepos,
   fetchGithubUserRepos,
   importGithubRepo,
+  fetchPreviewImagesFromDir,
   type RemoteGithubRepo,
 } from "./api/adminClient"
 import type { SiteSettings, NavItemConfig } from "./types/siteSettings"
 import { computeCatalogueStats, computeActivityTimeline } from "./utils/stats"
 import { renderMarkdown } from "./utils/markdown"
 import { frameLabel, hiddenFrameCount, previewFrames } from "./utils/previewFrames"
+import { orderHomeSections } from "./utils/navOrder"
+// 双语字段（挑战/方案）的读侧规则，与 Worker 投影同一份
+import { asBilingual, pickBilingual, type BilingualText } from "./utils/bilingual"
+// 相册判据与 Worker 写侧共用这一份（坏行即时点名与 400 点名必然是同一批）
+import { PREVIEW_IMAGE_LIMIT, galleryRowIssues } from "./utils/previewRules"
+import { changedColumns } from "./utils/projectDiff"
+import { trackImageFailure, trackUsage } from "./utils/usage"
 
 
 function SpecimenSvg({ shape }: { shape: Project["shape"] }) {
@@ -140,7 +148,8 @@ function SpecimenCard({
           <p className="latin">{project.latin}</p>
           <h2>{project.name}</h2>
           <p className="cn-name">{project.cn}</p>
-          <p className="description">{project.description[language]}</p>
+          {/* 卡片是提要位置：缺当前语言时回退另一种语言，但不加「原文」标注（那里是噪声） */}
+          <p className="description">{pickBilingual(project.description, language).text}</p>
           <div className="attributes">
             <div>
               <span>CLASS</span>
@@ -231,11 +240,28 @@ function demoHref(project: Project): string | null {
   return /^https?:\/\//i.test(url) ? url : null
 }
 
+/**
+ * 站点设置里的外链（githubUrl / icpUrl 等）只放行带主机名的 http(s) 绝对地址，其余一律 null。
+ * mergeSiteSettings 只判空串，所以直接写进 D1 的 `javascript:` 会原样落进 href；这里再校验一次。
+ */
+function settingsHref(raw: string | null | undefined): string | null {
+  const url = (raw ?? "").trim()
+  if (!/^https?:\/\//i.test(url)) return null
+  try {
+    return new URL(url).hostname ? url : null
+  } catch {
+    return null
+  }
+}
+
 // 图片宽度档位：观察台上同时出现的卡片不超过 4 张，一律按主图清晰度取，
 // 这样翻到邻牌时不必再请求一次更大的尺寸（原图常是几百 KB 的 PNG）。
 // 也别给侧牌/后牌单独设小档：后牌每次翻页换一张，相册里的每张图迟早都会当一次后牌，
 // 分档会让同一张图产生两种转换变体（12 张全看完时 12 次 → 24 次），免费的第三方转换服务反而吃更多请求。
-const IMAGE_WIDTH = { plate: 1600 } as const
+// thumb 是唯一的例外，而且它**只给索引条与管理端抽屉**用：那两个位置是"认出这是哪张图"，
+// 不是"看清图里的字"。同一张图的缩略图在管理端与前台共用同一档，缓存因此也是同一份。
+// zoom = 放大层，2000 就是 /api/img 的宽度上限（IMG_WIDTH_MAX），再大也会被服务端夹回来。
+const IMAGE_WIDTH = { plate: 1600, thumb: 200, zoom: 2000 } as const
 
 // 可经代理压缩的图源主机。**必须与 worker 的 IMG_ALLOWED_HOSTS 保持一致（只允许是其子集）**：
 // Worker 对名单外的主机返回 404（不做开放重定向），所以这里名单外的地址直接原样使用，
@@ -292,15 +318,102 @@ function routeFromHash(hash: string) {
     return "home"
   }
   if (!clean || SECTION_ANCHORS.includes(clean)) return "home"
+  // 只有 admin 与 project/<id> 是真路由；其余（比如导航里一个手工写进库的未知锚点）
+  // 必须留在首页分支——否则首页虽然渲染，但进场动画与深链定位两个 effect 都因
+  // `route !== "home"` 早退，`.reveal-section` 一类初始 opacity:0 的段落会整片看不见。
+  if (!clean.startsWith("project/") && clean !== "admin") return "home"
   return clean
 }
 
-function LogoWordmark({ settings }: { settings: SiteSettings }) {
+/**
+ * 内置品牌标（深浅模式各一张），由 `python scripts/make-brand-logos.py` 从
+ * `frontend/assert/logo_*.png` 的完整组合标生成：mark = 只有徽章（标头用），
+ * lockup = 徽章 + OmniNest + ATARRAYECHO 整标（想整标换上去时用，见管理端那条说明）。
+ * 整标不直接进标头是因为图框只有 28px 高，里面的字会被压到读不出，还会和站点自己的
+ * NESTSPACE 文字重复。public/ 下的文件按根路径引用，不能被 JS import（Vite 会报错）。
+ */
+const BRAND_LOGO = {
+  mark: { dark: "/brand/logo-mark-dark.png", light: "/brand/logo-mark-light.png" },
+  lockup: { dark: "/brand/logo-lockup-dark.png", light: "/brand/logo-lockup-light.png" },
+} as const
+
+/**
+ * 标头品牌内容（图 + 文字）。宿主自己决定外层是 <a> 还是 <button>：
+ * 详情页的返回入口是 button，把 <a> 套进 <button> 是非法 HTML，所以这里只出内容。
+ */
+function LogoContent({ settings, dark }: { settings: SiteSettings; dark: boolean }) {
   const logoText = settings.logoText || "NESTSPACE"
   const logoSubtext = settings.logoSubtext || "ATARAXYECHO"
-  const logoType = settings.logoType || "text"
-  const logoImageUrl = settings.logoImageUrl
+  const logoType = settings.logoType || "both"
+  const logoImageUrl = (settings.logoImageUrl || "").trim()
+  // 管理端填了地址 = 两个主题都用它（替换）；留空才回到内置的深浅两版
+  const builtIn = !logoImageUrl
+  const logoSrc = builtIn
+    ? dark
+      ? BRAND_LOGO.mark.dark
+      : BRAND_LOGO.mark.light
+    : logoImageUrl
 
+  return (
+    <>
+      {logoType !== "text" ? (
+        <img
+          src={logoSrc}
+          alt={logoText}
+          className="wordmark-logo-img"
+          // 内置 mark 是 128×128 的方形图：给出固有尺寸，浏览器能在解码前就留好盒子
+          // （标头在首屏，缺宽高会抖一下）。自定义地址不知道比例，就不硬填。
+          {...(builtIn ? { width: 128, height: 128 } : {})}
+          fetchPriority="high"
+          decoding="async"
+        />
+      ) : null}
+      {logoType !== "image" ? (
+        <>
+          {logoText}
+          {logoSubtext ? <span> — {logoSubtext}</span> : null}
+        </>
+      ) : null}
+    </>
+  )
+}
+
+/**
+ * 双语字段的一对输入框（中文 / English）。
+ * 值可能仍是旧单列的纯文本（0011 之前的数据），所以先 asBilingual 归一再渲染——
+ * 否则抽屉一打开就是空的，管理员保存后反而把老内容抹掉。
+ */
+function BilingualField({
+  label,
+  hint,
+  value,
+  onChange,
+}: {
+  label: string
+  hint?: string
+  value: BilingualText | string
+  onChange: (next: BilingualText) => void
+}) {
+  const pair = asBilingual(value)
+  return (
+    <div className="bilingual-field">
+      <span className="bilingual-title">{label}</span>
+      <div className="bilingual-pair">
+        <label>
+          <small>中文</small>
+          <textarea value={pair.zh} onChange={(e) => onChange({ ...pair, zh: e.target.value })} />
+        </label>
+        <label>
+          <small>English</small>
+          <textarea value={pair.en} onChange={(e) => onChange({ ...pair, en: e.target.value })} />
+        </label>
+      </div>
+      {hint ? <small className="bilingual-hint">{hint}</small> : null}
+    </div>
+  )
+}
+
+function LogoWordmark({ settings, dark }: { settings: SiteSettings; dark: boolean }) {
   return (
     <a
       className="wordmark"
@@ -313,15 +426,7 @@ function LogoWordmark({ settings }: { settings: SiteSettings }) {
         }
       }}
     >
-      {logoType !== "text" && logoImageUrl ? (
-        <img src={logoImageUrl} alt={logoText} className="wordmark-logo-img" />
-      ) : null}
-      {logoType !== "image" ? (
-        <>
-          {logoText}
-          {logoSubtext ? <span> — {logoSubtext}</span> : null}
-        </>
-      ) : null}
+      <LogoContent settings={settings} dark={dark} />
     </a>
   )
 }
@@ -385,7 +490,7 @@ function Header({
 
   return (
     <header className="site-header">
-      <LogoWordmark settings={settings} />
+      <LogoWordmark settings={settings} dark={dark} />
       <nav aria-label="Primary navigation">
         {navList.map((item) => {
           const label =
@@ -512,7 +617,6 @@ function SpiralGallery({
         Math.max(0, Math.round(p * (items.length - 1))),
       )
       setActive((current) => (current === nextActive ? current : nextActive))
-      document.documentElement.style.setProperty("--page-progress", `${p}`)
       frame = requestAnimationFrame(animate)
     }
 
@@ -724,6 +828,7 @@ function CatalogueStats({
 
 function Curator({ language, settings }: { language: Language; settings: SiteSettings }) {
   const copy = (en: string, zh: string) => (language === "zh" ? zh || en : en || zh)
+  const githubHref = settingsHref(settings.githubUrl)
   const headlineLines = (settings.curatorHeadlineEn || "")
     .split("\n")
     .map((line) => line.trim())
@@ -771,11 +876,7 @@ function Curator({ language, settings }: { language: Language; settings: SiteSet
         <blockquote>
           {copy(settings.curatorQuoteEn, settings.curatorQuoteZh)}
         </blockquote>
-        <p>
-          {" "}
-          {settings.aboutEn}
-        </p>
-        <p>{settings.aboutZh}</p>
+        <p>{copy(settings.aboutEn, settings.aboutZh)}</p>
         <dl>
           <div>
             <dt>HABITAT</dt>
@@ -788,13 +889,13 @@ function Curator({ language, settings }: { language: Language; settings: SiteSet
           <div>
             <dt>GITHUB</dt>
             <dd>
-              <a
-                href={settings.githubUrl}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {settings.githubUrl.replace(/^https?:\/\//, "")}
-              </a>
+              {githubHref ? (
+                <a href={githubHref} target="_blank" rel="noreferrer">
+                  {settings.githubUrl.replace(/^https?:\/\//, "")}
+                </a>
+              ) : (
+                "—"
+              )}
             </dd>
           </div>
           <div>
@@ -890,6 +991,9 @@ function SiteFooter({
     year: new Date().getFullYear(),
   }
   const fill = (text: string) => fillFooterTemplate(text, templateVars)
+  // 外链只渲染通过协议校验的地址；ICP 号非法时退回工信部官网（否则链接不可点）
+  const githubHref = settingsHref(settings.githubUrl)
+  const icpHref = settingsHref(settings.icpUrl) ?? "https://beian.miit.gov.cn/"
 
   // COLLECTION 列跟随「导航与标头」的顺序、名称与显示状态，末尾固定 Colophon 入口
   const navList =
@@ -978,13 +1082,11 @@ function SiteFooter({
         </div>
         <div>
           <b>{copy(settings.footerColLinksEn, settings.footerColLinksZh)}</b>
-          <a
-            href={settings.githubUrl}
-            target="_blank"
-            rel="noreferrer"
-          >
-            {copy(settings.footerGithubLabelEn, settings.footerGithubLabelZh)}
-          </a>
+          {githubHref ? (
+            <a href={githubHref} target="_blank" rel="noreferrer">
+              {copy(settings.footerGithubLabelEn, settings.footerGithubLabelZh)}
+            </a>
+          ) : null}
           <a href={`mailto:${settings.contactEmail}`}>
             {copy(settings.footerContactLabelEn, settings.footerContactLabelZh)}
           </a>
@@ -996,7 +1098,7 @@ function SiteFooter({
         </span>
         {settings.icpEnabled && settings.icpNumber ? (
           <a
-            href={settings.icpUrl || "https://beian.miit.gov.cn/"}
+            href={icpHref}
             target="_blank"
             rel="noreferrer"
             style={{ font: '8px var(--font-mono)', letterSpacing: ".18em", color: "#b8ab98" }}
@@ -1055,6 +1157,10 @@ function DetailPage({
   const fallbackReadme = language === "zh" ? readmeEn : readmeZh
   const readmeText = preferredReadme || fallbackReadme
   const readmeFromFallback = !preferredReadme && Boolean(fallbackReadme)
+
+  // 挑战 / 方案：与 README 同一套规则——当前语言没有内容就回退另一种语言，并标出「原文」
+  const challengeCopy = pickBilingual(project.challenge, language)
+  const solutionCopy = pickBilingual(project.solution, language)
   const readmeDoc = useMemo(() => renderMarkdown(readmeText), [readmeText])
 
   const composeEntries = [
@@ -1076,14 +1182,7 @@ function DetailPage({
     <main className="detail-page">
       <header className="detail-header">
         <button type="button" className="wordmark" onClick={onBack}>
-          {settings.logoType !== "text" && settings.logoImageUrl ? (
-            <img src={settings.logoImageUrl} alt={settings.logoText || "NESTSPACE"} className="wordmark-logo-img" />
-          ) : null}
-          {settings.logoType !== "image" ? (
-            <>
-              {settings.logoText || "NESTSPACE"} <span>— {settings.logoSubtext || "ATARAXYECHO"}</span>
-            </>
-          ) : null}
+          <LogoContent settings={settings} dark={dark} />
         </button>
         <span className="detail-location">CABINET / SPEC—{project.id}</span>
         <div className="header-tools">
@@ -1111,15 +1210,20 @@ function DetailPage({
             <h1>{project.name}</h1>
             <p className="detail-cn">{project.cn}</p>
             {(() => {
-              // 中文简介可能为空（导入不再把英文塞进 zh 字段）：回退到另一种语言，
-              // 而不是留一段空白
-              const intro =
-                project.description[language] ||
-                project.description[language === "zh" ? "en" : "zh"]
-              return intro ? (
-                <p className="detail-intro">{intro}</p>
+              // 简介与挑战/方案共用一套双语规则（utils/bilingual）：当前语言缺失时回退另一种
+              // 语言并标注「原文」，而不是留一段空白，也不假装它是本语言文案
+              const intro = pickBilingual(project.description, language)
+              return intro.text ? (
+                <p className="detail-intro">
+                  {intro.text}
+                  {intro.fallback ? (
+                    <em className="lang-fallback">{language === "en" ? "中文原文" : "ENGLISH 原文"}</em>
+                  ) : null}
+                </p>
               ) : (
-                <p className="detail-intro section-empty">尚未填写简介</p>
+                <p className="detail-intro section-empty">
+                  {language === "zh" ? "尚未填写简介" : "No summary yet"}
+                </p>
               )
             })()}
             <div className="detail-actions">
@@ -1269,19 +1373,29 @@ function DetailPage({
             <article>
               <span>THE CONDITION</span>
               <h2>Why it needed to exist.</h2>
-              {project.challenge ? (
-                <p>{project.challenge}</p>
+              {challengeCopy.text ? (
+                <p>
+                  {challengeCopy.text}
+                  {challengeCopy.fallback ? (
+                    <em className="lang-fallback">{language === "en" ? "中文原文" : "ENGLISH 原文"}</em>
+                  ) : null}
+                </p>
               ) : (
-                <p className="section-empty">尚未记录</p>
+                <p className="section-empty">{language === "zh" ? "尚未记录" : "Not recorded"}</p>
               )}
             </article>
             <article>
               <span>THE RESPONSE</span>
               <h2>A narrow tool, carefully shaped.</h2>
-              {project.solution ? (
-                <p>{project.solution}</p>
+              {solutionCopy.text ? (
+                <p>
+                  {solutionCopy.text}
+                  {solutionCopy.fallback ? (
+                    <em className="lang-fallback">{language === "en" ? "中文原文" : "ENGLISH 原文"}</em>
+                  ) : null}
+                </p>
               ) : (
-                <p className="section-empty">尚未记录</p>
+                <p className="section-empty">{language === "zh" ? "尚未记录" : "Not recorded"}</p>
               )}
             </article>
           </div>
@@ -1882,6 +1996,10 @@ function AdminGateway({
       if (res.success && res.data) {
         onChange(res.data)
         setAuthenticated(true)
+      } else if (existing) {
+        // 本地存过口令却失败（口令改了 / Cloudflare 授权变更）：说清楚为什么停在登录页，
+        // 别让人对着空表单猜。没存过口令时停在登录页是正常路径，不显示错误。
+        setAuthError(`${res.error || "本地保存的口令已失效"}，请重新输入口令`)
       }
     })
   }, [])
@@ -1956,27 +2074,59 @@ function textToFeatures(text: string): string[] {
     .filter(Boolean)
 }
 
+// 指标/时间线文本框的逐行解析：坏行**不能静默丢弃**，否则 draft 会退化成与基线相同，
+// 表现为"没有检测到任何改动"而用户刚敲的那行凭空消失（相册用 galleryRowIssues 挡住的就是这一类）。
+// 行号对的是文本框里真实的行（含空行），用户能直接数。
+type RowIssue = { row: number; reason: string }
+
+function parseMetricsText(text: string): { rows: Project["metrics"]; issues: RowIssue[] } {
+  const rows: Project["metrics"] = []
+  const issues: RowIssue[] = []
+  text.split("\n").forEach((raw, index) => {
+    const line = raw.trim()
+    if (!line) return
+    const parts = line.split("|")
+    if (parts.length < 2) {
+      issues.push({ row: index + 1, reason: "格式应为「标签 | 数值」" })
+      return
+    }
+    const label = (parts[0] ?? "").trim()
+    if (!label) {
+      issues.push({ row: index + 1, reason: "标签不能为空" })
+      return
+    }
+    rows.push({ label, value: parts.slice(1).join("|").trim() })
+  })
+  return { rows, issues }
+}
+
+function parseTimelineText(text: string): { rows: Project["timeline"]; issues: RowIssue[] } {
+  const rows: Project["timeline"] = []
+  const issues: RowIssue[] = []
+  text.split("\n").forEach((raw, index) => {
+    const line = raw.trim()
+    if (!line) return
+    const parts = line.split("|")
+    if (parts.length < 2) {
+      issues.push({ row: index + 1, reason: "格式应为「日期 | 标题 | 说明」" })
+      return
+    }
+    const date = (parts[0] ?? "").trim()
+    if (!date) {
+      issues.push({ row: index + 1, reason: "日期不能为空" })
+      return
+    }
+    rows.push({ date, title: (parts[1] ?? "").trim(), note: parts.slice(2).join("|").trim() })
+  })
+  return { rows, issues }
+}
+
 function textToMetrics(text: string): Project["metrics"] {
-  return text
-    .split("\n")
-    .map((line) => line.split("|"))
-    .filter((parts) => parts.length >= 2 && parts[0].trim() !== "")
-    .map((parts) => ({
-      label: parts[0].trim(),
-      value: parts.slice(1).join("|").trim(),
-    }))
+  return parseMetricsText(text).rows
 }
 
 function textToTimeline(text: string): Project["timeline"] {
-  return text
-    .split("\n")
-    .map((line) => line.split("|"))
-    .filter((parts) => parts.length >= 2 && parts[0].trim() !== "")
-    .map((parts) => ({
-      date: parts[0].trim(),
-      title: (parts[1] ?? "").trim(),
-      note: parts.slice(2).join("|").trim(),
-    }))
+  return parseTimelineText(text).rows
 }
 
 // 相册列存的是 JSON 字符串（管理端原值）；坏数据一律退化为空数组，避免编辑时抛错
@@ -1992,12 +2142,11 @@ function parsePreviewImagesJson(raw: string | undefined): string[] {
   }
 }
 
-// 抽屉里相册用逐行 URL 编辑；没有相册时退化为单张封面，第一行即封面
+// 抽屉里相册用逐行 URL 编辑。**不**在项目图片非空时把它当成相册第一行：
+// 那样任何一次"只改别的字段"的保存都会把项目图片固化成相册（并让 has_preview_images 变 1，
+// 此后同步再也不会为该项目的相册自动补图）。对外展示的退化交给读侧 publicGallery。
 function galleryToText(project: Project): string {
-  const gallery = parsePreviewImagesJson(project.preview_images_json)
-  const list =
-    gallery.length > 0 ? gallery : project.preview_image_url ? [project.preview_image_url] : []
-  return list.join("\n")
+  return parsePreviewImagesJson(project.preview_images_json).join("\n")
 }
 
 function AdminPage({
@@ -2021,7 +2170,42 @@ function AdminPage({
   const [timelineText, setTimelineText] = useState("")
   // 相册同理：逐行 URL 暂存，保存时序列化回 JSON 字符串
   const [previewImagesText, setPreviewImagesText] = useState("")
-  const [notice, setNotice] = useState("")
+  // 「按目录批量导入」的草稿输入与在途标记（结果只并入文本框，点保存才写库）
+  const [previewDirText, setPreviewDirText] = useState("")
+  const [dirImporting, setDirImporting] = useState(false)
+  // 上一次目录读取的失败原因（非空时按钮变成「重试」，输入内容原样保留）
+  const [dirImportError, setDirImportError] = useState("")
+  // 上一次目录读取的结果统计，就近显示在触发控件旁（顶部通知条会被后续操作冲掉）
+  const [dirImportNote, setDirImportNote] = useState("")
+  // 默认追加；勾上则整体替换相册内容（满 12 张时"只能追加"等于导入无效）
+  const [replaceGallery, setReplaceGallery] = useState(false)
+  // 新建项目的空白模板快照：作为"未保存改动"的比对基线（列表里还没有这一行）
+  const [newDraftBase, setNewDraftBase] = useState<Project | null>(null)
+  // 关闭抽屉时如果有未保存改动，这里存改动列数（>0 表示确认条展开）
+  const [confirmClose, setConfirmClose] = useState(0)
+  // 后台只有一条通知位（.admin-notice）。三种状态各有归宿：
+  //   info —— 结果性提示，6 秒后自动让位（否则一条旧消息会常驻到下次操作，失败提示会被冲掉）；
+  //   error —— 常驻，带关闭按钮，直到用户确认它被看过；
+  //   busy —— 在途提示，不自动消失（GitHub 抓取可能超过 10 秒，自动消失会让人以为没反应）。
+  const [notice, setNoticeText] = useState("")
+  const [noticeKind, setNoticeKind] = useState<"info" | "error" | "busy">("info")
+  const setNotice = (message: string) => {
+    setNoticeText(message)
+    setNoticeKind("info")
+  }
+  const setNoticeError = (message: string) => {
+    setNoticeText(message)
+    setNoticeKind("error")
+  }
+  const setNoticeBusy = (message: string) => {
+    setNoticeText(message)
+    setNoticeKind("busy")
+  }
+  useEffect(() => {
+    if (noticeKind !== "info" || !notice) return
+    const timer = setTimeout(() => setNoticeText(""), 6000)
+    return () => clearTimeout(timer)
+  }, [notice, noticeKind])
   const [contentLanguage, setContentLanguage] = useState<Language>("zh")
   // 站点文案与合规设置：初始为内置默认值，挂载后从 D1 拉取覆盖
   const [siteContent, setSiteContent] = useState<SiteSettings>({
@@ -2030,6 +2214,9 @@ function AdminPage({
   const [syncing, setSyncing] = useState(false)
   // 是否在同步指标的同时抓取 README / Compose 文档
   const [syncDocs, setSyncDocs] = useState(false)
+  // 同步范围：null = 没做过选择（= 全部，老语义）；数组 = 显式勾选的编号。
+  // 以前这个接口只有"全表同步"一个按钮，GitHub 配额常为 0 时想只刷两个仓库都做不到。
+  const [syncScopeIds, setSyncScopeIds] = useState<string[] | null>(null)
   // 站点文案是否已成功从 D1 载入；未载入时禁止保存，防止默认文案覆盖线上配置
   const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [settingsLoadError, setSettingsLoadError] = useState("")
@@ -2074,16 +2261,17 @@ function AdminPage({
 
   const saveSettings = async () => {
     if (!settingsLoaded) {
-      setNotice("站点文案尚未从 D1 加载成功，已阻止保存以避免覆盖线上配置。请先点上方「重新加载」。")
+      setNoticeError("站点文案尚未从线上库加载成功，已阻止保存以避免覆盖线上配置。请先点上方「重新加载」。")
       return
     }
-    setNotice("正在保存站点设置到 Cloudflare D1...")
+    setNoticeBusy("正在保存站点设置到线上库...")
     const res = await saveAdminSiteSettings(siteContent)
-    setNotice(
-      res.success
-        ? "站点设置已保存，刷新公开站点即可生效。"
-        : `保存失败: ${res.error || "请检查网络或口令权限"}`,
-    )
+    // 成功/失败分两条通道：成功会 6 秒淡出，失败常驻到用户关掉——混在一个三元里就没法区分
+    if (res.success) {
+      setNotice("站点设置已保存，刷新公开站点即可生效。")
+    } else {
+      setNoticeError(`保存失败: ${res.error || "请检查网络或口令权限"}`)
+    }
   }
 
   const patchFooterPair = (
@@ -2100,15 +2288,15 @@ function AdminPage({
 
   const handleScanRepos = async () => {
     if (!githubUser.trim()) {
-      setNotice("请输入 GitHub 用户名")
+      setNoticeError("请输入 GitHub 用户名")
       return
     }
     setScanningRepos(true)
-    setNotice(`正在扫描 GitHub 用户 @${githubUser.trim()} 的所有公开仓库…`)
+    setNoticeBusy(`正在扫描 GitHub 用户 @${githubUser.trim()} 的所有公开仓库…`)
     const res = await fetchGithubUserRepos(githubUser.trim(), githubToken.trim() || undefined)
     setScanningRepos(false)
     if (!res.success || !res.repos) {
-      setNotice(`扫描失败: ${res.error || "请检查网络或用户名"}`)
+      setNoticeError(`扫描失败: ${res.error || "请检查网络或用户名"}`)
       return
     }
     setDiscoveredRepos(res.repos)
@@ -2124,11 +2312,11 @@ function AdminPage({
 
   const handleImportRepo = async (repoFullName: string) => {
     setImportingRepo(repoFullName)
-    setNotice(`正在将 ${repoFullName} 导入为馆藏标本…`)
+    setNoticeBusy(`正在将 ${repoFullName} 导入为馆藏标本…`)
     const res = await importGithubRepo(repoFullName, githubToken.trim() || undefined)
     setImportingRepo(null)
     if (!res.success) {
-      setNotice(`导入失败: ${res.error}`)
+      setNoticeError(`导入失败: ${res.error}`)
       return
     }
     setNotice(`✓ ${res.message || "导入成功"}`)
@@ -2146,17 +2334,43 @@ function AdminPage({
     )
   }
 
+  // 当前勾选的编号：始终与现存列表取交集（删过标本后残留的旧勾选不该被发出去）
+  const syncSelected =
+    syncScopeIds === null
+      ? items.map((item) => item.id)
+      : syncScopeIds.filter((id) => items.some((item) => item.id === id))
+
+  const toggleSyncId = (id: string) => {
+    const next = new Set(syncSelected)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    setSyncScopeIds(items.map((item) => item.id).filter((item) => next.has(item)))
+  }
+
+  const invertSyncScope = () => {
+    const picked = new Set(syncSelected)
+    setSyncScopeIds(items.map((item) => item.id).filter((id) => !picked.has(id)))
+  }
+
   const runGithubSync = async () => {
+    if (syncSelected.length === 0) {
+      setNoticeError("没有勾选要同步的标本：至少选一个，或点「全选」。")
+      return
+    }
     setSyncing(true)
-    setNotice(
+    setNoticeBusy(
       syncDocs
-        ? "正在从 GitHub 采集指标并抓取 README / Compose 文档…"
-        : "正在从 GitHub 采集已有标本的最新指标…",
+        ? `正在从 GitHub 采集 ${syncSelected.length} 个标本的指标并抓取文档…`
+        : `正在从 GitHub 采集 ${syncSelected.length} 个标本的最新指标…`,
     )
-    const res = await syncGithubRepos(githubToken.trim() || undefined, syncDocs)
+    const res = await syncGithubRepos(
+      githubToken.trim() || undefined,
+      syncDocs,
+      syncSelected,
+    )
     setSyncing(false)
     if (!res.success || !res.results) {
-      setNotice(`同步失败: ${res.error || "未知错误"}`)
+      setNoticeError(`同步失败: ${res.error || "未知错误"}`)
       return
     }
     const results = res.results as GithubSyncResult[]
@@ -2193,14 +2407,18 @@ function AdminPage({
     const reordered = [...orderedItems]
     ;[reordered[index], reordered[target]] = [reordered[target], reordered[index]]
 
-    setNotice("正在保存新的展示顺序...")
+    setNoticeBusy("正在保存新的展示顺序...")
     const changed = reordered
       .map((item, position) => ({ item, position }))
       .filter(({ item, position }) => (item.sort_order ?? 0) !== position)
     for (const { item, position } of changed) {
-      const res = await saveAdminProject({ ...item, sort_order: position }, false)
+      // 只提交 sort_order：整行回写会把这一行打开期间被同步刷新的字段一起盖回旧值
+      const res = await saveAdminProject(
+        { id: item.id, sort_order: position } as unknown as Project,
+        false,
+      )
       if (!res.success) {
-        setNotice(`顺序保存失败: ${res.error || "请检查网络或口令权限"}`)
+        setNoticeError(`顺序保存失败: ${res.error || "请检查网络或口令权限"}`)
         return
       }
     }
@@ -2218,15 +2436,91 @@ function AdminPage({
     )
   })
 
-  // 抽屉打开时支持 Esc 关闭（键盘可达性；抽屉本身已是 role=dialog + aria-modal）
+  // 抽屉里的当前内容：把逐行文本解析回结构化字段。
+  // **保存与「有没有未保存改动」必须共用这一份**，否则会出现"关闭时说没改动、保存却写进去"的分裂。
+  const buildDraft = (base: Project): Project => ({
+    ...base,
+    features: textToFeatures(featuresText),
+    metrics: textToMetrics(metricsText),
+    timeline: textToTimeline(timelineText),
+    // 项目图片（preview_image_url）走它自己的输入框，不再由相册第一张推导
+    preview_images_json: JSON.stringify(textToFeatures(previewImagesText)),
+  })
+
+  // 相册即时校验：判据与 Worker 写侧同一份（src/utils/previewRules），
+  // 于是"填的时候说的坏行"与"点保存后 400 点名的坏行"必然是同一批。服务端仍是最终裁决。
+  const galleryLines = textToFeatures(previewImagesText)
+  const galleryIssues = galleryRowIssues(galleryLines)
+
+  // 指标/时间线同样即时点名坏行：这些行不会被写库，所以必须在点保存前就说清楚，
+  // 不能让它们"静默消失 + 提示没有改动"
+  const metricsIssues = parseMetricsText(metricsText).issues
+  const timelineIssues = parseTimelineText(timelineText).issues
+
+  // 比对基线：已保存的项目用列表里那一行（管理端投影，保存后以库为准刷新过）；
+  // 新建项目用 createProject 生成的空白模板——否则一份没动过的新草稿关闭时也会弹确认。
+  const draftBaseline = (base: Project): Project | undefined =>
+    items.find((item) => item.id === base.id) ?? newDraftBase ?? undefined
+
+  const dirtyColumnCount = () => {
+    if (!editing) return 0
+    // 格式错误的行不会被写库，但确实是用户敲进去的内容：关闭前也要提示，避免静默丢失
+    const issueCount = (metricsIssues.length ? 1 : 0) + (timelineIssues.length ? 1 : 0)
+    const baseline = draftBaseline(editing)
+    if (!baseline) return 1 + issueCount
+    return (
+      Object.keys(
+        changedColumns(
+          baseline as unknown as Record<string, unknown>,
+          buildDraft(editing) as unknown as Record<string, unknown>,
+        ),
+      ).length + issueCount
+    )
+  }
+
+  // 关闭抽屉（四条路径都走这里：Esc / 点遮罩 / 右上 × / 底部取消）
+  const closeDrawer = () => {
+    setConfirmClose(0)
+    setEditing(null)
+    setPreviewDirText("")
+    setDirImportError("")
+    setDirImportNote("")
+    setReplaceGallery(false)
+  }
+
+  // 打开某个已保存项目的抽屉：清掉新建模板基线（否则 items 里查不到这一行时会拿错基线）
+  const openProject = (item: Project) => {
+    setNewDraftBase(null)
+    setConfirmClose(0)
+    setEditing(item)
+  }
+
+  const requestClose = () => {
+    if (!editing) return
+    const count = dirtyColumnCount()
+    if (count === 0) {
+      closeDrawer()
+      return
+    }
+    // 不直接丢：先让用户在「继续编辑 / 放弃并关闭」之间选一次
+    setConfirmClose(count)
+  }
+
+  // 抽屉打开时支持 Esc 关闭（键盘可达性；抽屉本身已是 role=dialog + aria-modal）。
+  // 确认条展开时 Esc 只收起确认条——此时用户刚点过关闭，不该再叠加一次动作。
   useEffect(() => {
     if (!editing) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setEditing(null)
+      if (event.key !== "Escape") return
+      if (confirmClose > 0) {
+        setConfirmClose(0)
+        return
+      }
+      requestClose()
     }
     document.addEventListener("keydown", onKeyDown)
     return () => document.removeEventListener("keydown", onKeyDown)
-  }, [editing])
+  }, [editing, confirmClose, featuresText, metricsText, timelineText, previewImagesText, items])
 
   // 每次打开抽屉（切换项目或新建）时，把数组字段摊平成可编辑文本
   useEffect(() => {
@@ -2246,30 +2540,146 @@ function AdminPage({
   const saveProject = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!editing) return
-    // 数组字段以逐行文本编辑，保存前统一解析回结构化数据
-    const previewImages = textToFeatures(previewImagesText)
-    const payload: Project = {
-      ...editing,
-      features: textToFeatures(featuresText),
-      metrics: textToMetrics(metricsText),
-      timeline: textToTimeline(timelineText),
-      preview_images_json: JSON.stringify(previewImages),
-      preview_image_url: previewImages[0] ?? "",
+    // 指标/时间线有坏行时拒绝保存：这些行解析不进结构化字段，静默丢弃再报"没改动"是假状态
+    if (metricsIssues.length || timelineIssues.length) {
+      setNoticeError("指标或时间线有格式不正确的行（已在对应输入框下逐行标出），修正后再保存。")
+      return
     }
-    const isNew = !items.some((item) => item.id === payload.id)
-    setNotice("正在持久化到 Cloudflare D1 边缘数据库...")
+    const draft = buildDraft(editing)
+    const isNew = !items.some((item) => item.id === draft.id)
+    // PUT 只提交**改动过的列**。整行全量回写会把抽屉打开期间后台同步/导入刚写进库的字段
+    // （stars、version、README、时间线…）用陈旧值悄悄盖回去——那是另一种"显示成功但库里被改坏"。
+    // POST 新建仍提交全量（要落所有列的默认值）。
+    // 判据与「未保存改动」提示共用 changedColumns，所以两边不会互相打脸。
+    let payload: Project = draft
+    if (!isNew) {
+      const baseline = items.find((item) => item.id === draft.id)
+      if (baseline) {
+        const changed = changedColumns(
+          baseline as unknown as Record<string, unknown>,
+          draft as unknown as Record<string, unknown>,
+        )
+        if (Object.keys(changed).length === 0) {
+          setNotice("没有检测到任何改动，未提交保存。")
+          return
+        }
+        payload = { id: draft.id, ...changed } as unknown as Project
+      }
+    }
+    setNoticeBusy("正在保存到线上库...")
     const res = await saveAdminProject(payload, isNew)
-    if (res.success) {
-      onChange(
-        items.some((item) => item.id === payload.id)
-          ? items.map((item) => (item.id === payload.id ? payload : item))
-          : [payload, ...items],
-      )
-      setEditing(null)
-      setNotice("项目资料已成功保存并同步到 Cloudflare D1 数据库。")
-    } else {
-      setNotice(`保存失败: ${res.error || "请检查网络或口令权限"}`)
+    if (!res.success) {
+      setNoticeError(`保存失败: ${res.error || "请检查网络或口令权限"}`)
+      return
     }
+    // 写入成功 ≠ 列表就是对的：保存后重取管理端列表，以库里的行做回显，
+    // 而不是把本地 payload 拼回列表——后者让服务端的规范化结果（演示地址、相册校验）看不见，
+    // 于是出现"保存后与刷新后不一样"。同一文件里的「保存展示顺序」已经是这个模式。
+    const refresh = await verifyAndFetchAdminProjects()
+    if (refresh.success && refresh.data) {
+      onChange(refresh.data)
+      setNewDraftBase(null)
+      closeDrawer()
+      setNotice(`「${draft.name}」已保存到线上库。`)
+      return
+    }
+    // 库已写入但回读失败（口令失效/网络抖动）：退化为本地合成，并把状态说清楚，不假装对齐了库。
+    // 必须**并入**原有行：payload 是"只含改动列"的部分对象，整行替换会把没提交的列一起抹掉，
+    // 于是下一次保存的基线就是残缺的（表现为"改了 A 却把 B 也提交了一遍"）。
+    onChange(
+      items.some((item) => item.id === payload.id)
+        ? items.map((item) => (item.id === payload.id ? { ...item, ...payload } : item))
+        : [payload, ...items],
+    )
+    closeDrawer()
+    setNoticeError(
+      "资料已写入线上库，但列表回读失败（口令失效或网络抖动）。当前显示的是本次提交的内容，刷新页面可与库对齐。",
+    )
+  }
+
+  // 相册上限来自 src/utils/previewRules.ts —— 与 Worker 写侧、400 文案同一份判据（不是本地再抄一个 12）
+
+  // 详情页大图（preview_image_url）与相册是两个字段，不再自动跟随相册第一张；
+  // 这里只给一个"手动带入"的捷径，带过之后两者互不影响
+  const useFirstImageAsProjectImage = () => {
+    if (!editing) return
+    const first = textToFeatures(previewImagesText)[0] ?? ""
+    if (!first) {
+      setNoticeError("相册里还没有地址：先填相册（或用下面的「按目录导入」），再回来填入。")
+      return
+    }
+    setEditing({ ...editing, preview_image_url: first })
+    setNotice("已把相册第一张填入「详情页大图」。之后调整相册顺序不会影响这里。")
+  }
+
+  const importPreviewDir = async () => {
+    if (!editing) return
+    const dir = previewDirText.trim()
+    if (!dir) {
+      setNoticeError("请先填写预览图所在目录地址。")
+      return
+    }
+    setDirImporting(true)
+    setDirImportError("")
+    setDirImportNote("")
+    setNoticeBusy("正在读取目录...")
+    // 带上同步栏里填过的 GitHub 令牌：没有它就只能吃匿名 60 次/小时（多人共享出口会很快 429）
+    const res = await fetchPreviewImagesFromDir(dir, githubToken.trim() || undefined)
+    setDirImporting(false)
+    if (!res.success || !res.images) {
+      // 失败原因留在抽屉里（按钮变「重试」、输入不清空），撞配额时额外说明令牌的用处
+      const reason = res.error || "没有读到该目录"
+      const limited = /频率限制/.test(reason)
+      setDirImportError(reason)
+      setNoticeError(
+        limited
+          ? `目录读取失败：${reason} 稍后点「重试」即可；在「GitHub 同步」里填令牌可绕开匿名限额。`
+          : `目录读取失败：${reason}`,
+      )
+      trackUsage(
+        "dirimport",
+        limited
+          ? "ratelimited"
+          : /没有找到|无法识别|不是合法/.test(reason)
+            ? "notfound"
+            : "error",
+      )
+      return
+    }
+    // 追加 or 整体替换：满 12 张时"只能追加"等于导入无效，所以给一个显式替换开关
+    const merged = replaceGallery ? [] : textToFeatures(previewImagesText)
+    let added = 0
+    let duplicates = 0
+    for (const url of res.images) {
+      if (merged.length >= PREVIEW_IMAGE_LIMIT) break
+      if (merged.includes(url)) {
+        duplicates += 1
+        continue
+      }
+      merged.push(url)
+      added += 1
+    }
+    setPreviewImagesText(merged.join("\n"))
+    const notes = [`${replaceGallery ? "替换为" : "新增"} ${added} 张`]
+    if (duplicates) notes.push(`跳过重复 ${duplicates} 张`)
+    if (res.skippedNonBitmap) notes.push(`过滤非位图 ${res.skippedNonBitmap} 个`)
+    if (res.skippedBadge) notes.push(`过滤徽章 ${res.skippedBadge} 个`)
+    if (res.subDirectories) notes.push(`子目录 ${res.subDirectories} 个未递归`)
+    // 两个不同的"没填入"要分开算：本次返回但被相册上限挤掉的，以及目录里根本没返回的
+    const returned = res.images.length
+    const droppedByCap = Math.max(0, returned - added - duplicates)
+    const neverReturned = Math.max(0, (res.found ?? returned) - returned)
+    if (droppedByCap || neverReturned) {
+      notes.push(
+        `相册上限 ${PREVIEW_IMAGE_LIMIT} 张：${droppedByCap ? `${droppedByCap} 张本次未填` : ""}${droppedByCap && neverReturned ? "，" : ""}${neverReturned ? `目录里还有 ${neverReturned} 张未取回` : ""}`,
+      )
+    }
+    if (!added && !duplicates) notes.push("没有可加入的新地址")
+    trackUsage("dirimport", "ok")
+    setDirImportNote(`${notes.join("，")}（点「保存项目」才会写入线上库）`)
+    setNotice(
+      `从 ${res.dir} 读到 ${res.images.length} 张：${notes.join("，")}。确认后点「保存项目」才会写入线上库。`,
+    )
   }
 
   const createProject = () => {
@@ -2286,7 +2696,7 @@ function AdminPage({
     }
     // 新建项目用空白模板起步：此前是直接展开 projects[0]，
     // 会把标本 001 的简介/挑战/方案/特性/指标/时间线整套复制过来，容易误存成重复内容
-    setEditing({
+    const template: Project = {
       id,
       date: new Date().toISOString().slice(0, 7).replace("-", "."),
       status: "BETA",
@@ -2302,8 +2712,8 @@ function AdminPage({
       version: "v1.0.0",
       updated: new Date().toISOString().slice(0, 10).replace(/-/g, "."),
       repository: "",
-      challenge: "",
-      solution: "",
+      challenge: { en: "", zh: "" },
+      solution: { en: "", zh: "" },
       description: { en: "", zh: "" },
       features: [],
       metrics: [],
@@ -2312,7 +2722,10 @@ function AdminPage({
       demoEnabled: false,
       preview_image_url: "",
       preview_images_json: "[]",
-    })
+    }
+    // 空白模板同时是"未保存改动"的比对基线：新建后一个字没改就直接关，不该弹确认
+    setNewDraftBase(template)
+    setEditing(template)
   }
 
   const toggleStatus = async (id: string) => {
@@ -2326,30 +2739,33 @@ function AdminPage({
       )
       if (!confirmed) return
     }
-    const updated: Project = { ...target, status: nextStatus }
-    setNotice("正在更新状态...")
-    const res = await saveAdminProject(updated, false)
+    setNoticeBusy("正在更新状态...")
+    // 只提交要改的那一列（PUT 是部分更新）：整行回写会把陈旧字段一起写回库
+    const res = await saveAdminProject(
+      { id, status: nextStatus } as unknown as Project,
+      false,
+    )
     if (res.success) {
-      onChange(items.map((item) => (item.id === id ? updated : item)))
+      onChange(items.map((item) => (item.id === id ? { ...item, status: nextStatus } : item)))
       setNotice(`标本状态已更新为 ${nextStatus}。`)
     } else {
-      setNotice(`更新状态失败: ${res.error}`)
+      setNoticeError(`更新状态失败: ${res.error}`)
     }
   }
 
   const removeProject = async (id: string) => {
     if (items.length <= 1) {
-      setNotice("馆藏至少需要保留一个项目。")
+      setNoticeError("馆藏至少需要保留一个项目。")
       return
     }
     if (!window.confirm("确定要从馆藏数据库中永久移除这个标本吗？")) return
-    setNotice("正在从 D1 数据库删除...")
+    setNoticeBusy("正在从线上库删除...")
     const res = await deleteAdminProject(id)
     if (res.success) {
       onChange(items.filter((item) => item.id !== id))
-      setNotice("项目已从 D1 数据库成功移除。")
+      setNotice("项目已从线上库移除。")
     } else {
-      setNotice(`删除失败: ${res.error}`)
+      setNoticeError(`删除失败: ${res.error}`)
     }
   }
 
@@ -2447,7 +2863,7 @@ function AdminPage({
         {settingsLoadError && !settingsLoaded && (
           <div className="admin-banner" role="alert">
             <span>
-              站点文案未能从 D1 载入（{settingsLoadError}）。为避免用内置默认值覆盖线上配置，
+              站点文案未能从线上库载入（{settingsLoadError}）。为避免用内置默认值覆盖线上配置，
               所有保存操作已禁用。
             </span>
             <button type="button" onClick={loadSiteSettings}>
@@ -2457,7 +2873,13 @@ function AdminPage({
         )}
 
         {notice && (
-          <div className="admin-notice" role="status">
+          <div
+            className={`admin-notice${noticeKind === "error" ? " is-error" : ""}`}
+            // 失败提示用 alert + assertive：它常驻，也该被读屏立刻念出来；
+            // 在途/结果类走 status + polite，不打断当前朗读
+            role={noticeKind === "error" ? "alert" : "status"}
+            aria-live={noticeKind === "error" ? "assertive" : "polite"}
+          >
             <span>{notice}</span>
             <button type="button" onClick={() => setNotice("")}>
               CLOSE
@@ -2526,7 +2948,7 @@ function AdminPage({
                     <button
                       type="button"
                       key={item.id}
-                      onClick={() => setEditing(item)}
+                      onClick={() => openProject(item)}
                     >
                       <span className="activity-mark">
                         {String(index + 1).padStart(2, "0")}
@@ -2608,7 +3030,9 @@ function AdminPage({
                 <span className="eyebrow">NAVIGATION ORDER & LABELS</span>
                 <h2>导航项控制</h2>
                 <p style={{ fontSize: "12px", color: "#64685f", marginTop: "-16px", marginBottom: "16px" }}>
-                  通过 ▲ / ▼ 调整顶部栏显示顺序，并自定义各章节的中英文显示文案。
+                  通过 ▲ / ▼ 调整顺序——这一份顺序**同时决定顶部栏导航与首页内容段落的排列**（标本陈列 /
+                  馆藏统计 / 馆长手记 / 馆藏目录）。「显示」开关只影响导航条里那个链接在不在，
+                  不会把对应段落从页面上删掉；段落显隐在「站点设置 → 展示偏好」里单独控制。
                 </p>
 
                 <div className="nav-config-list">
@@ -2731,17 +3155,15 @@ function AdminPage({
                       cursor: "pointer",
                     }}
                     onClick={() => {
+                      // 必须与 DEFAULT_NAV_ITEMS 完全一致：mergeSiteSettings 会把 catalogue 补回列表，
+                      // 少写它会让「重置」在下次加载后又变成 4 项，看起来像没生效
                       setSiteContent({
                         ...siteContent,
-                        navItems: [
-                          { id: "cabinet", labelEn: "Cabinet", labelZh: "标本陈列", visible: true },
-                          { id: "curator", labelEn: "Curator", labelZh: "馆长手记", visible: true },
-                          { id: "index", labelEn: "Index", labelZh: "馆藏目录", visible: true },
-                        ],
+                        navItems: DEFAULT_NAV_ITEMS.map((item) => ({ ...item })),
                       })
                     }}
                   >
-                    重置为推荐顺序 (Cabinet → Curator → Index)
+                    重置为推荐顺序 (Cabinet → Catalogue → Curator → Index)
                   </button>
                 </div>
               </section>
@@ -2792,37 +3214,40 @@ function AdminPage({
                 </label>
 
                 <label>
-                  Logo 图标/图片 URL
+                  Logo 图片地址（留空则用内置品牌标）
                   <input
                     value={siteContent.logoImageUrl || ""}
                     onChange={(e) =>
                       setSiteContent({ ...siteContent, logoImageUrl: e.target.value })
                     }
-                    placeholder="https://... 或 /favicon.ico"
+                    placeholder="留空 = 用内置的深浅两版徽章；填了 = 两个主题都用它"
                   />
-                  <small>支持 SVG 或 PNG 矢量/透明图标，建议高度约 20-30px</small>
+                  <small>
+                    留空时深浅模式各用内置的一张（<code>/brand/logo-mark-dark.png</code> ·{" "}
+                    <code>/brand/logo-mark-light.png</code>，由{" "}
+                    <code>scripts/make-brand-logos.py</code> 从{" "}
+                    <code>frontend/assert/</code> 的原件生成）。填了地址就两个主题共用它。
+                    想用含文字的完整组合标，填 <code>/brand/logo-lockup-dark.png</code> 并把显示模式改成「仅图片」
+                    （整标在 28px 图框里读不出字，所以默认用不带字的徽章）。
+                  </small>
                 </label>
 
                 <div className="logo-preview-box">
                   <span>HEADER LOGO PREVIEW / 标头实时预览</span>
-                  <div className="logo-preview-display">
-                    <a className="wordmark" href="#cabinet" onClick={(e) => e.preventDefault()}>
-                      {siteContent.logoType !== "text" && siteContent.logoImageUrl ? (
-                        <img
-                          src={siteContent.logoImageUrl}
-                          alt="Logo"
-                          className="wordmark-logo-img"
-                        />
-                      ) : null}
-                      {siteContent.logoType !== "image" ? (
-                        <>
-                          {siteContent.logoText || "NESTSPACE"}
-                          {siteContent.logoSubtext ? (
-                            <span> — {siteContent.logoSubtext}</span>
-                          ) : null}
-                        </>
-                      ) : null}
-                    </a>
+                  {/* 两版并排：管理端本身只有一套配色，跟着控制台主题走就永远看不到另一版的实际效果 */}
+                  <div className="logo-preview-pair">
+                    <div className="logo-preview-cell is-dark">
+                      <span className="logo-preview-tag">DARK / 深色</span>
+                      <a className="wordmark" href="#cabinet" onClick={(e) => e.preventDefault()}>
+                        <LogoContent settings={siteContent} dark />
+                      </a>
+                    </div>
+                    <div className="logo-preview-cell is-light">
+                      <span className="logo-preview-tag">LIGHT / 浅色</span>
+                      <a className="wordmark" href="#cabinet" onClick={(e) => e.preventDefault()}>
+                        <LogoContent settings={siteContent} dark={false} />
+                      </a>
+                    </div>
                   </div>
                 </div>
 
@@ -3433,7 +3858,7 @@ function AdminPage({
                         <div className="row-actions">
                           <button
                             type="button"
-                            onClick={() => setEditing(item)}
+                            onClick={() => openProject(item)}
                           >
                             编辑
                           </button>
@@ -3522,15 +3947,17 @@ function AdminPage({
                       border: "1px solid #20241f",
                       background: "transparent",
                       color: "#20241f",
-                      cursor: syncing ? "not-allowed" : "pointer",
+                      cursor: syncing || syncSelected.length === 0 ? "not-allowed" : "pointer",
                       fontSize: "12px",
                       fontFamily: "inherit",
                       fontWeight: "500",
                     }}
-                    disabled={syncing}
+                    disabled={syncing || syncSelected.length === 0}
                     onClick={runGithubSync}
                   >
-                    {syncing ? "正在采集…" : "⚡ 同步已有标本指标"}
+                    {syncing
+                      ? "正在采集…"
+                      : `⚡ 同步选中标本指标 (${syncSelected.length})`}
                   </button>
                 </div>
                 <label className="toggle-row" style={{ marginTop: "14px" }}>
@@ -3549,6 +3976,44 @@ function AdminPage({
                 </label>
               </div>
             </div>
+
+            {/* 同步范围：以前只有"全表同步"一个按钮，GitHub 匿名配额经常是 0，
+                想只刷刚改过的那一两个仓库都做不到（每次都要等整轮跑完或干脆不跑） */}
+            <section className="settings-card sync-scope-card" style={{ marginTop: "20px" }}>
+              <div className="sync-scope-head">
+                <div>
+                  <span className="eyebrow">SYNC SCOPE</span>
+                  <h2>
+                    同步范围 · 已选 {syncSelected.length} / {items.length}
+                  </h2>
+                </div>
+                <div className="sync-scope-quick">
+                  <button type="button" onClick={() => setSyncScopeIds(null)}>
+                    全选
+                  </button>
+                  <button type="button" onClick={invertSyncScope}>
+                    反选
+                  </button>
+                  <button type="button" onClick={() => setSyncScopeIds([])}>
+                    清空
+                  </button>
+                </div>
+              </div>
+              <div className="sync-scope-list" role="group" aria-label="要同步的标本">
+                {items.map((item) => (
+                  <label key={item.id} className="sync-scope-item">
+                    <input
+                      type="checkbox"
+                      checked={syncSelected.includes(item.id)}
+                      onChange={() => toggleSyncId(item.id)}
+                    />
+                    <span className="sync-scope-id">SPEC—{item.id}</span>
+                    <strong>{item.name}</strong>
+                    <small>{item.repository || "未填仓库地址 · 同步会标为跳过"}</small>
+                  </label>
+                ))}
+              </div>
+            </section>
 
             {/* 远程仓库扫描发现列表 */}
             <section className="settings-card" style={{ marginTop: "20px" }}>
@@ -3667,7 +4132,7 @@ function AdminPage({
                 {syncResults === null && (
                   <div className="empty-state">
                     <strong>尚未执行指标同步</strong>
-                    <span>点击上方“⚡ 同步已有标本指标”刷新馆藏各标本的远程数据。</span>
+                    <span>在上方「同步范围」里勾选标本，再点“⚡ 同步选中标本指标”刷新它们的远程数据。</span>
                   </div>
                 )}
                 {syncResults?.map((result, index) => (
@@ -3973,7 +4438,9 @@ function AdminPage({
           className="editor-backdrop"
           role="presentation"
           onMouseDown={(event) =>
-            event.target === event.currentTarget && setEditing(null)
+            // 确认条展开时空白处点击不算"再关一次"，只收起确认条
+            event.target === event.currentTarget &&
+            (confirmClose > 0 ? setConfirmClose(0) : requestClose())
           }
         >
           <form
@@ -3994,7 +4461,7 @@ function AdminPage({
               </div>
               <button
                 type="button"
-                onClick={() => setEditing(null)}
+                onClick={requestClose}
                 aria-label="关闭"
               >
                 ×
@@ -4192,24 +4659,18 @@ function AdminPage({
                   <option value="1">已上线 · 前台显示入口</option>
                 </select>
               </label>
-              <label>
-                挑战 / 背景
-                <textarea
-                  value={editing.challenge}
-                  onChange={(event) =>
-                    setEditing({ ...editing, challenge: event.target.value })
-                  }
-                />
-              </label>
-              <label>
-                解决方案
-                <textarea
-                  value={editing.solution}
-                  onChange={(event) =>
-                    setEditing({ ...editing, solution: event.target.value })
-                  }
-                />
-              </label>
+              <BilingualField
+                label="挑战 / 背景"
+                hint="前台按语言各取一栏；只填中文时，英文站显示中文并标注「中文原文」"
+                value={editing.challenge}
+                onChange={(next) => setEditing({ ...editing, challenge: next })}
+              />
+              <BilingualField
+                label="解决方案"
+                hint="同上。两栏都空则前台显示「尚未记录」"
+                value={editing.solution}
+                onChange={(next) => setEditing({ ...editing, solution: next })}
+              />
               <label>
                 特性列表
                 <textarea
@@ -4221,20 +4682,46 @@ function AdminPage({
               <label>
                 指标
                 <textarea
+                  className={`doc-editor${metricsIssues.length ? " is-invalid" : ""}`}
                   value={metricsText}
                   onChange={(event) => setMetricsText(event.target.value)}
+                  aria-invalid={metricsIssues.length > 0}
                 />
-                <small>每行一条，格式「标签 | 数值」；STARS / FORKS / OPEN ISSUES 会被同步覆盖</small>
+                {metricsIssues.length > 0 ? (
+                  <ul className="row-issues" role="list">
+                    {metricsIssues.map((issue) => (
+                      <li key={`metric-${issue.row}`}>
+                        第 {issue.row} 行：{issue.reason}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                <small>
+                  每行一条，格式「标签 | 数值」；STARS / FORKS / OPEN ISSUES 会被同步覆盖。
+                  格式不对的行会被逐行标出并拒绝保存（不会偷偷丢掉那一行还提示成功）
+                </small>
               </label>
               <label>
                 时间线
                 <textarea
+                  className={`doc-editor${timelineIssues.length ? " is-invalid" : ""}`}
                   value={timelineText}
                   onChange={(event) => setTimelineText(event.target.value)}
+                  aria-invalid={timelineIssues.length > 0}
                 />
+                {timelineIssues.length > 0 ? (
+                  <ul className="row-issues" role="list">
+                    {timelineIssues.map((issue) => (
+                      <li key={`timeline-${issue.row}`}>
+                        第 {issue.row} 行：{issue.reason}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
                 <small>
                   每行一条，格式「日期 | 标题 | 说明」；勾选 GitHub 同步时会被按仓库事实
-                  （建档 / Release / 最近推送）重新生成，手工补充的内容会被覆盖
+                  （建档 / Release / 最近推送）重新生成，手工补充的内容会被覆盖。
+                  格式不对的行会被逐行标出并拒绝保存
                 </small>
               </label>
               <div className="field-row">
@@ -4254,29 +4741,117 @@ function AdminPage({
                 </label>
               </div>
               <label>
-                预览图（每行一个 URL，第一行为封面）
-                <textarea
-                  className="doc-editor"
-                  value={previewImagesText}
-                  onChange={(event) => setPreviewImagesText(event.target.value)}
-                  placeholder={"https://…/shot-1.png\nhttps://…/shot-2.png"}
+                详情页大图（项目图片）
+                <input
+                  type="text"
+                  value={editing.preview_image_url ?? ""}
+                  onChange={(event) =>
+                    setEditing({ ...editing, preview_image_url: event.target.value })
+                  }
+                  placeholder="https://…/cover.png"
                 />
+                <span className="preview-image-actions">
+                  <button type="button" className="button" onClick={useFirstImageAsProjectImage}>
+                    用相册第一张填入
+                  </button>
+                </span>
                 <small>
-                  详情页「PREVIEW / 01」观察台的相册；每行必须是可以直接访问的 http/https 绝对地址。
-                  任一行非法、重复或超过 12 张都会拒绝保存并指出第几行（不会偷偷丢掉坏行还提示成功）。
-                  全部留空则下次同步从 README 自动提取。
+                  这个名字就是它的作用范围：只用于**详情页 hero 的那张大图**。
+                  首页卡片仍用占位标本图，分享图(og:image)仍是构建期静态文件，两者都不读这里。
+                  它不自动等于相册第一张——留空时对外读取会退化到相册首张，但库里保持为空，
+                  只有 README 同步在库里为空时才补；调整相册顺序不会影响这里。
                 </small>
               </label>
-              {textToFeatures(previewImagesText).length > 0 ? (
-                <div className="preview-thumbs preview-thumbs-admin">
-                  {textToFeatures(previewImagesText)
-                    .slice(0, 12)
-                    .map((url, i) => (
-                      <span key={`${url}-${i}`} className="preview-thumb-admin">
-                        <img src={url} alt="" loading="lazy" />
-                        {i === 0 ? <em>封面</em> : null}
-                      </span>
+              <label>
+                预览图（相册，每行一个 URL）
+                <textarea
+                  className={`doc-editor${galleryIssues.length ? " is-invalid" : ""}`}
+                  value={previewImagesText}
+                  onChange={(event) => setPreviewImagesText(event.target.value)}
+                  aria-invalid={galleryIssues.length > 0}
+                  placeholder={"https://…/shot-1.png\nhttps://…/shot-2.png"}
+                />
+                {/* 坏行在点保存之前就点名（判据与 Worker 同一份）；服务端仍然会拒绝，这里只是不让管理员
+                    填完十几行 URL 才知道第 7 行缺协议 */}
+                {galleryIssues.length > 0 ? (
+                  <ul className="row-issues" role="list">
+                    {galleryIssues.map((issue) => (
+                      <li key={`${issue.row}-${issue.code}`}>
+                        第 {issue.row} 行：{issue.reason}
+                      </li>
                     ))}
+                  </ul>
+                ) : null}
+                <small>
+                  详情页「PREVIEW / 01」观察台的相册；每行必须是可以直接访问的 http/https 绝对地址。
+                  任一行非法、重复或超过 {PREVIEW_IMAGE_LIMIT} 张都会拒绝保存并指出第几行
+                  （不会偷偷丢掉坏行还提示成功）。全部留空则下次同步从 README 自动提取。
+                </small>
+              </label>
+              <label>
+                按目录批量导入预览图
+                <span className="preview-dir-row">
+                  <input
+                    type="text"
+                    value={previewDirText}
+                    onChange={(event) => setPreviewDirText(event.target.value)}
+                    placeholder="raw.githubusercontent.com/owner/repo/main/imgs/desktop"
+                  />
+                  <button
+                    type="button"
+                    className="button"
+                    onClick={importPreviewDir}
+                    disabled={dirImporting}
+                  >
+                    {dirImporting ? "读取中..." : dirImportError ? "重试" : "读取目录"}
+                  </button>
+                </span>
+                {/* 结果与失败原因都钉在触发它的控件下面：顶部的通知条只有一条，
+                    被下一次操作冲掉之后，管理员应当还能在这里看到刚才发生了什么 */}
+                {dirImportError ? (
+                  <p className="dir-import-line is-error">上次读取失败：{dirImportError}</p>
+                ) : null}
+                {dirImportNote ? <p className="dir-import-line">{dirImportNote}</p> : null}
+                <label className="preview-dir-mode">
+                  <input
+                    type="checkbox"
+                    checked={replaceGallery}
+                    onChange={(event) => setReplaceGallery(event.target.checked)}
+                  />
+                  <span>整体替换现有相册（不勾就是追加）</span>
+                </label>
+                <small>
+                  地址怎么来：在 GitHub 打开图片所在的那个文件夹，**直接复制浏览器地址栏**即可
+                  （raw.githubusercontent.com/owner/repo/分支/路径 与 github.com/owner/repo/tree/分支/路径都认）。
+                  只列该目录一层：取其中的位图（png/jpg/jpeg/webp/gif/avif/bmp），按文件名排序，跳过徽章与子目录，
+                  读到的地址先并入上面的相册文本框（去重、上限 {PREVIEW_IMAGE_LIMIT} 张），
+                  **点「保存项目」才会写入线上库**。
+                  GitHub 匿名接口配额有限（60 次/小时，共享出口很快用完）；撞限后填好令牌再点「重试」，不必重填地址。
+                </small>
+              </label>
+              {galleryLines.length > 0 ? (
+                <div className="preview-thumbs preview-thumbs-admin">
+                  {galleryLines.slice(0, PREVIEW_IMAGE_LIMIT).map((url, i) => (
+                    <span
+                      key={`${url}-${i}`}
+                      className={`preview-thumb-admin${
+                        galleryIssues.some((issue) => issue.row === i + 1) ? " is-bad" : ""
+                      }`}
+                      title={url}
+                    >
+                      {/* 与详情页同一通道：白名单图源走 /api/img 的缩略图档（webp + 边缘缓存），
+                          名单外原样直连。以前这里是直连原图——抽屉里 12 张几百 KB 的 PNG，
+                          既比公开页慢，看到的又不是访客那一份字节。 */}
+                      <img
+                        src={proxiedImage(url, IMAGE_WIDTH.thumb)}
+                        alt=""
+                        loading="lazy"
+                        onError={trackImageFailure.bind(null, url)}
+                      />
+                      <i>{String(i + 1).padStart(2, "0")}</i>
+                      {url === (editing.preview_image_url || "").trim() ? <em>详情页大图</em> : null}
+                    </span>
+                  ))}
                 </div>
               ) : null}
               <label>
@@ -4335,16 +4910,18 @@ function AdminPage({
                 文档最近抓取：{editing.docs_synced_at || "未记录"}。GitHub 同步只填充空白字段，
                 不会覆盖这里手工整理的内容；单份文档超过 100000 字符会被截断。
               </p>
+              {/* 简介两个语言框都不再 required：同步/导入现在只填"猜得出的那一种语言"
+                  （见 pairFromSingleText），另一种留空是正常状态——读侧会回退并标注「原文」。
+                  留着 required 等于让管理员必须编一段翻译才能保存。 */}
               <label>
                 中文简介
                 <textarea
-                  required
-                  value={editing.description.zh}
+                  value={asBilingual(editing.description).zh}
                   onChange={(event) =>
                     setEditing({
                       ...editing,
                       description: {
-                        ...editing.description,
+                        ...asBilingual(editing.description),
                         zh: event.target.value,
                       },
                     })
@@ -4354,22 +4931,39 @@ function AdminPage({
               <label>
                 英文简介
                 <textarea
-                  required
-                  value={editing.description.en}
+                  value={asBilingual(editing.description).en}
                   onChange={(event) =>
                     setEditing({
                       ...editing,
                       description: {
-                        ...editing.description,
+                        ...asBilingual(editing.description),
                         en: event.target.value,
                       },
                     })
                   }
                 />
+                <small>
+                  两种语言至少填一种即可；只填一种时，另一种语言的站点会显示这段并标注「原文」。
+                </small>
               </label>
             </div>
+            {confirmClose > 0 && (
+              <div className="drawer-confirm" role="alertdialog" aria-labelledby="drawer-confirm-text">
+                <span id="drawer-confirm-text">
+                  有 {confirmClose} 处改动还没保存，关闭就会丢掉（下次打开显示的是库里的内容）。
+                </span>
+                <span>
+                  <button type="button" autoFocus onClick={() => setConfirmClose(0)}>
+                    继续编辑
+                  </button>
+                  <button type="button" className="is-danger" onClick={closeDrawer}>
+                    放弃并关闭
+                  </button>
+                </span>
+              </div>
+            )}
             <footer>
-              <button type="button" onClick={() => setEditing(null)}>
+              <button type="button" onClick={requestClose}>
                 取消
               </button>
               <button type="submit" className="admin-primary">
@@ -4395,6 +4989,26 @@ function detectSystemTheme(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches
 }
 
+// 与 CSS 的 ≤760 断点是同一个值：JS 侧要知道"侧牌本来就不显示"，好连请求都不发。
+// 断点只在这里与 index.css 各写一次数字，改动时两处一起看（组件里没有别的 760 依赖）。
+function useNarrowScreen() {
+  const [narrow, setNarrow] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(max-width: 760px)").matches,
+  )
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return
+    const mq = window.matchMedia("(max-width: 760px)")
+    const sync = () => setNarrow(mq.matches)
+    sync()
+    mq.addEventListener("change", sync)
+    return () => mq.removeEventListener("change", sync)
+  }, [])
+  return narrow
+}
+
 // 详情页预览：左文案栏 + 右「观察台」3D 封面流。
 // 只渲染当前张、左右邻张，以及一张代表「后面还有 N 张」的后牌，避免一次解码十几张原图；
 // 后牌是纯版面，做成不可聚焦的 div，读屏只走下面的编号条。
@@ -4413,6 +5027,12 @@ function PreviewGallery({
 }) {
   const [active, setActive] = useState(0)
   const [ratios, setRatios] = useState<Record<number, number>>({})
+  // 主牌定妆（load 或 error 都算定妆）之后才去取侧牌/后牌：
+  // 冷缓存时首屏只有 1 张 1600 走在前面，而不是 4 张一起抢两跳带宽。
+  // 不做尺寸降档 —— 降档会让同一张图产生两种转换变体，免费的第三方转换服务反而吃更多请求。
+  const [heroReady, setHeroReady] = useState(false)
+  // 放大看图层（存的是要看的那张的下标，null = 未打开）
+  const [zoom, setZoom] = useState<number | null>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const dragX = useRef<number | null>(null)
   const dragged = useRef(false)
@@ -4425,7 +5045,44 @@ function PreviewGallery({
     setActive(0)
     // 上一本相册的宽高比对新一本没有意义，但空对象就别再生成一个新空对象（省一轮无谓重渲染）
     setRatios((prev) => (Object.keys(prev).length === 0 ? prev : {}))
+    setZoom(null)
+    setHeroReady(false)
   }, [albumKey])
+
+  // 「看清截图」是这台观察台的存在理由，所以先给它一次曝光计数：
+  // deck view = 有人真的看到了相册；之后的翻页带方式（thumb/arrow/drag/key/zoom），
+  // 用来回答"缩略图索引有没有让人多看几张"。imgfail 以它为分母算失败率。
+  useEffect(() => {
+    if (!albumKey) return
+    trackUsage("deck", "view")
+  }, [albumKey])
+
+  // 放大层打开时锁住页面滚动（关掉要还原），并把键盘操作接管过来：
+  // Esc 关闭、←/→ 在同一本相册里继续翻（读图时最常做的两件事）
+  useEffect(() => {
+    if (zoom === null) return
+    const previous = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault()
+        setZoom(null)
+        return
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault()
+        const delta = event.key === "ArrowLeft" ? -1 : 1
+        const count = images.length
+        setZoom((value) => (value === null ? value : (value + delta + count) % count))
+        trackUsage("deck", "key")
+      }
+    }
+    document.addEventListener("keydown", onKeyDown)
+    return () => {
+      document.body.style.overflow = previous
+      document.removeEventListener("keydown", onKeyDown)
+    }
+  }, [zoom, albumKey])
 
   // 每张牌的可访问名与图注都要用文件名/目录；相册有 12 张时这是每帧十几次 new URL()，
   // 按相册内容缓存一次。依赖同样是 albumKey 而不是数组引用（理由同上）
@@ -4447,13 +5104,28 @@ function PreviewGallery({
     setRatios((prev) => (prev[index] === ratio ? prev : { ...prev, [index]: ratio }))
   }
 
-  const step = (delta: number) => {
+  // 主牌定妆：load 与 error 都算，失败也必须放行侧牌，否则一次坏图会把整台观察台冻住
+  const settleHero = (position: string) => {
+    if (position === "active") setHeroReady(true)
+  }
+
+  const goTo = (index: number, method: "thumb" | "plate") => {
+    setActive(index)
+    if (method === "thumb") trackUsage("deck", "thumb")
+  }
+
+  const step = (delta: number, method: "arrow" | "drag" | "key") => {
     if (total <= 1) return
+    trackUsage("deck", method)
     setActive((value) => (value + delta + total) % total)
   }
 
   // 哪几张牌、站在哪个位置、往后藏了几张，都在 previewFrames() 里（纯函数，已接进 npm test）
+  // 窄屏（≤760）只留主牌：CSS 里侧牌是 display:none，但**隐藏不等于不请求**——
+  // display:none 的 <img> 照样会发请求，那样"首屏只让一张图抢带宽"就白做了，所以这里直接不渲染。
+  const narrow = useNarrowScreen()
   const frames = previewFrames(total, safeActive)
+  const visibleFrames = narrow ? frames.filter((frame) => frame.position === "active") : frames
   const hidden = hiddenFrameCount(total, safeActive)
 
   const resetTilt = () => {
@@ -4463,14 +5135,19 @@ function PreviewGallery({
     dragged.current = false
   }
 
+  const openZoom = () => {
+    if (zoom === null) trackUsage("deck", "zoom")
+    setZoom(safeActive)
+  }
+
   const hint =
     total > 1
       ? isZh
-        ? `${total} 张实机截图。拖动观察台可连续翻看，也可以点下方编号跳看某一张。`
-        : `${total} recorded screenshots. Drag the viewing table to flip through, or pick a number below.`
+        ? `${total} 张实机截图。拖一拖可以连续翻看，点下面的缩略图直接跳到某一张，点「放大」看清爽度里的字。`
+        : `${total} recorded screenshots. Drag to flip through, pick a thumbnail to jump, or hit Enlarge to read the UI.`
       : isZh
-        ? "1 张实机截图。"
-        : "One recorded screenshot."
+        ? "1 张实机截图，可点「放大」看清细节。"
+        : "One recorded screenshot — hit Enlarge to read the details."
 
   return (
     <section className="detail-section preview-section" aria-labelledby="preview-heading">
@@ -4510,10 +5187,14 @@ function PreviewGallery({
           onKeyDown={(event) => {
             if (event.key === "ArrowLeft") {
               event.preventDefault()
-              step(-1)
+              step(-1, "key")
             } else if (event.key === "ArrowRight") {
               event.preventDefault()
-              step(1)
+              step(1, "key")
+            } else if (event.key === "Enter" || event.key === " ") {
+              // 舞台本身可聚焦（role=group + tabIndex），回车/空格就该做最想做的事：放大
+              event.preventDefault()
+              openZoom()
             }
           }}
           onPointerDown={(event) => {
@@ -4546,13 +5227,13 @@ function PreviewGallery({
             dragged.current = false
             if (startX === null || !wasDrag) return
             const distance = event.clientX - startX
-            if (Math.abs(distance) > 45) step(distance > 0 ? -1 : 1)
+            if (Math.abs(distance) > 45) step(distance > 0 ? -1 : 1, "drag")
           }}
           onPointerCancel={resetTilt}
           onPointerLeave={resetTilt}
         >
           <div className="preview-orbit" aria-hidden="true" />
-          {frames.map(({ index, position }) => {
+          {visibleFrames.map(({ index, position }) => {
             const url = images[index]
             const label = labels[index]
             const frameTag = `FRAME / ${String(index + 1).padStart(2, "0")}`
@@ -4562,27 +5243,44 @@ function PreviewGallery({
                   {frameTag}
                   {position === "back" && hidden > 0 ? ` +${hidden}` : ""}
                 </span>
-                <img
-                  className="frame-shot"
-                  src={proxiedImage(url, IMAGE_WIDTH.plate)}
-                  // 命中缓存时 load 事件可能早于监听器挂载，complete 分支保证首帧就量对方向
-                  ref={(el) => {
-                    if (el?.complete) rememberRatio(index, el)
-                  }}
-                  alt={
-                    position === "active"
-                      ? isZh
-                        ? `${name} 预览图 ${index + 1}`
-                        : `${name} preview ${index + 1}`
-                      : ""
-                  }
-                  // 台上最多 4 张、全都在视口内，所以不写 loading="lazy"：
-                  // 侧牌先以 lazy 挂载、被选中时才改成 eager，属性翻转不一定重新触发加载，
-                  // 会出现「当前张空白 + 量不到方向」；交给浏览器自己按可见性加载
-                  decoding="async"
-                  fetchPriority={position === "active" ? "high" : "auto"}
-                  onLoad={(event) => rememberRatio(index, event.currentTarget)}
-                />
+                {/* 侧牌/后牌要等主牌定妆后才发起请求：冷缓存时首屏只让一张 1600 走在前面，
+                    而不是四张同时抢两跳（Worker→转换服务）的带宽。命中边缘缓存时这一步几乎瞬时，
+                    访客看不出差别。占位 span 保持同样的盒尺寸，免得定妆前后版面跳动。 */}
+                {position === "active" || heroReady ? (
+                  <img
+                    className="frame-shot"
+                    src={proxiedImage(url, IMAGE_WIDTH.plate)}
+                    // 命中缓存时 load 事件可能早于监听器挂载，complete 分支保证首帧就量对方向
+                    ref={(el) => {
+                      if (el?.complete) {
+                        rememberRatio(index, el)
+                        settleHero(position)
+                      }
+                    }}
+                    alt={
+                      position === "active"
+                        ? isZh
+                          ? `${name} 预览图 ${index + 1}`
+                          : `${name} preview ${index + 1}`
+                        : ""
+                    }
+                    // 台上最多 4 张、全都在视口内，所以不写 loading="lazy"：
+                    // 侧牌先以 lazy 挂载、被选中时才改成 eager，属性翻转不一定重新触发加载，
+                    // 会出现「当前张空白 + 量不到方向」；交给浏览器自己按可见性加载
+                    decoding="async"
+                    fetchPriority={position === "active" ? "high" : "auto"}
+                    onLoad={(event) => {
+                      rememberRatio(index, event.currentTarget)
+                      settleHero(position)
+                    }}
+                    onError={() => {
+                      trackImageFailure(url)
+                      settleHero(position)
+                    }}
+                  />
+                ) : (
+                  <span className="frame-shot is-pending" aria-hidden="true" />
+                )}
                 <span className="frame-caption">
                   <strong title={label.title}>{label.title}</strong>
                   {/* 目录只是补充线索：没有目录时 frameLabel 已退回项目名，与页头重复，整行不渲染；
@@ -4615,9 +5313,19 @@ function PreviewGallery({
                 aria-current={position === "active" ? "true" : undefined}
                 // 名字以可见文字「FRAME / 0N」开头再补文件名：既满足 WCAG 2.5.3（名称含可见标签），
                 // 又不把整条 URL 目录塞给读屏（目录那行已 aria-hidden）
-                aria-label={`${frameTag} ${label.title}`}
+                aria-label={
+                  position === "active"
+                    ? isZh
+                      ? `${frameTag} ${label.title}（放大查看）`
+                      : `${frameTag} ${label.title} (enlarge)`
+                    : `${frameTag} ${label.title}`
+                }
                 tabIndex={-1}
-                onClick={() => setActive(index)}
+                // 侧牌=选它；主牌=放大看清爽度里的字。拖拽翻页时指针被舞台接管，click 不会落到牌上，
+                // 所以"拖一下"不会被误判成"点开放大"
+                onClick={() =>
+                  position === "active" ? openZoom() : goTo(index, "plate")
+                }
                 key={`${index}-${url}`}
               >
                 {inner}
@@ -4626,45 +5334,124 @@ function PreviewGallery({
           })}
         </div>
 
-        {total > 1 ? (
-          <div className="preview-controls">
-            <button
-              type="button"
-              onClick={() => step(-1)}
-              aria-label={isZh ? "上一张预览图" : "Previous preview"}
-            >
-              ←
-            </button>
-            {/* 编号条是一组「选哪一张」的开关，给个组名，读屏才知道这一排 01…12 是什么 */}
-            <div role="group" aria-label={isZh ? "预览图编号" : "Preview numbers"}>
-              {images.map((url, index) => {
-                const num = String(index + 1).padStart(2, "0")
-                return (
-                  <button
-                    type="button"
-                    key={`${index}-${url}`}
-                    className={index === safeActive ? "active" : ""}
-                    aria-current={index === safeActive ? "true" : undefined}
-                    // 以可见的编号开头（WCAG 2.5.3），再补文件名；title 留给鼠标
-                    aria-label={`${num} ${labels[index].title}`}
-                    title={labels[index].title}
-                    onClick={() => setActive(index)}
-                  >
-                    {num}
-                  </button>
-                )
-              })}
-            </div>
-            <button
-              type="button"
-              onClick={() => step(1)}
-              aria-label={isZh ? "下一张预览图" : "Next preview"}
-            >
-              →
+        {/* 索引条：编号 + 微缩略图。纯编号（上一版）无法预告"第 7 张是什么"，
+            十几张时只能逐张盲翻；管理端抽屉早就在用同一批 URL 渲染缩略图，前台没理由更弱。
+            缩略图走 /api/img 的小档，与管理端共用同一份边缘缓存。 */}
+        <div className="preview-controls">
+          {total > 1 ? (
+            <>
+              <button
+                type="button"
+                className="preview-arrow is-prev"
+                onClick={() => step(-1, "arrow")}
+                aria-label={isZh ? "上一张预览图" : "Previous preview"}
+              >
+                ←
+              </button>
+              <div
+                className="preview-index"
+                role="group"
+                aria-label={isZh ? "预览图选择" : "Preview picker"}
+              >
+                {images.map((url, index) => {
+                  const num = String(index + 1).padStart(2, "0")
+                  return (
+                    <button
+                      type="button"
+                      key={`${index}-${url}`}
+                      className={index === safeActive ? "active" : ""}
+                      aria-current={index === safeActive ? "true" : undefined}
+                      // 以可见的编号开头（WCAG 2.5.3），再补文件名；title 留给鼠标
+                      aria-label={`${num} ${labels[index].title}`}
+                      title={labels[index].title}
+                      onClick={() => goTo(index, "thumb")}
+                    >
+                      <img
+                        src={proxiedImage(url, IMAGE_WIDTH.thumb)}
+                        alt=""
+                        loading="lazy"
+                        decoding="async"
+                        onError={() => trackImageFailure(url)}
+                      />
+                      <i aria-hidden="true">{num}</i>
+                    </button>
+                  )
+                })}
+              </div>
+              <button
+                type="button"
+                className="preview-arrow is-next"
+                onClick={() => step(1, "arrow")}
+                aria-label={isZh ? "下一张预览图" : "Next preview"}
+              >
+                →
+              </button>
+            </>
+          ) : null}
+          <button
+            type="button"
+            className="preview-enlarge"
+            onClick={openZoom}
+            aria-label={isZh ? "放大当前预览图" : "Enlarge current preview"}
+          >
+            {isZh ? "放大" : "Enlarge"}
+          </button>
+        </div>
+      </div>
+
+      {zoom !== null && images[zoom] ? (
+        <div
+          className="preview-zoom"
+          role="dialog"
+          aria-modal="true"
+          aria-label={isZh ? `${name} 预览图放大` : `${name} preview enlarged`}
+          onClick={(event) => event.target === event.currentTarget && setZoom(null)}
+        >
+          <div className="preview-zoom-bar">
+            <span>{labels[zoom].title}</span>
+            <span className="preview-zoom-count">
+              {String(zoom + 1).padStart(2, "0")} / {String(total).padStart(2, "0")}
+            </span>
+            {total > 1 ? (
+              <span className="preview-zoom-nav">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setZoom((zoom + total - 1) % total)
+                    trackUsage("deck", "arrow")
+                  }}
+                  aria-label={isZh ? "上一张" : "Previous"}
+                >
+                  ←
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setZoom((zoom + 1) % total)
+                    trackUsage("deck", "arrow")
+                  }}
+                  aria-label={isZh ? "下一张" : "Next"}
+                >
+                  →
+                </button>
+              </span>
+            ) : null}
+            {/* 原图直链：代理是为了省流量，但访客有权要未经转换的那一份 */}
+            <a href={images[zoom]} target="_blank" rel="noopener noreferrer">
+              {isZh ? "原图" : "Original"}
+            </a>
+            <button type="button" autoFocus onClick={() => setZoom(null)} aria-label={isZh ? "关闭放大" : "Close zoom"}>
+              ×
             </button>
           </div>
-        ) : null}
-      </div>
+          <img
+            className="preview-zoom-shot"
+            src={proxiedImage(images[zoom], IMAGE_WIDTH.zoom)}
+            alt={isZh ? `${name} 预览图 ${zoom + 1}` : `${name} preview ${zoom + 1}`}
+            onError={() => trackImageFailure(images[zoom])}
+          />
+        </div>
+      ) : null}
     </section>
   )
 }
@@ -4796,6 +5583,11 @@ export default function App() {
   const [dark, setDark] = useState(detectSystemTheme)
   const [route, setRoute] = useState(routeFromHash(window.location.hash))
   const [items, setItems] = useState<Project[]>(projects)
+  // 管理端单独一份行数据：**不能与公开站共用 items**。
+  // /api/projects 是对外投影（camel、不含 readme_zh / compose_* / internal_notes / sort_order /
+  // preview_images_json 这些抽屉要绑的原始列名），而 refreshPublicData 会在标签页重新聚焦时覆盖 items。
+  // 两者共用时，人在后台切出去复制一个 URL 再回来，编辑抽屉就会整片空掉（只有刷新页面才恢复）。
+  const [adminItems, setAdminItems] = useState<Project[]>([])
   const [siteSettings, setSiteSettings] = useState<SiteSettings>(DEFAULT_SITE_SETTINGS)
   // 站点设置是否已从接口返回（无论成功失败），用于决定何时套用展示偏好
   const [settingsResolved, setSettingsResolved] = useState(false)
@@ -4839,6 +5631,33 @@ export default function App() {
       document.removeEventListener("visibilitychange", onWake)
     }
   }, [refreshPublicData])
+
+  // 顶部进度条 = 整页滚动进度。以前它由 cabinet（螺旋段）自己的滚动比例写入，
+  // 而栏目顺序现在可配置：cabinet 一旦被拖到后面，前几段全程读 0，进度条看着是坏的。
+  useEffect(() => {
+    const root = document.documentElement
+    const update = () => {
+      const scrollable = root.scrollHeight - window.innerHeight
+      const ratio = scrollable > 0 ? window.scrollY / scrollable : 0
+      root.style.setProperty("--page-progress", Math.min(1, Math.max(0, ratio)).toFixed(4))
+    }
+    update()
+    window.addEventListener("scroll", update, { passive: true })
+    window.addEventListener("resize", update)
+    return () => {
+      window.removeEventListener("scroll", update)
+      window.removeEventListener("resize", update)
+    }
+  }, [route, items.length, siteSettings])
+
+  // 从后台回到公开站时重读一次公开数据：后台期间的改动要在前台立刻可见。
+  // 挂在路由变化上而不是"退出按钮"上——直接改 hash、浏览器前进后退同样会离开后台。
+  const wasOnAdminRoute = useRef(route === "admin")
+  useEffect(() => {
+    const onAdmin = route === "admin"
+    if (wasOnAdminRoute.current && !onAdmin) refreshPublicData(true)
+    wasOnAdminRoute.current = onAdmin
+  }, [route, refreshPublicData])
 
   // 套用管理端配置的展示偏好（仅一次）：显式指定语言/主题时覆盖初始值
   useEffect(() => {
@@ -4948,7 +5767,10 @@ export default function App() {
       .querySelectorAll(".section, .site-footer")
       .forEach((element) => observer.observe(element))
     return () => observer.disconnect()
-  }, [route])
+    // 依赖不能只有 route：段落顺序可配置、馆藏统计可被隐藏后再打开（homeStatsVisible），
+    // 那些**之后**才挂载的 .section 若不在这里重新 observe，就永远拿不到 .is-visible，
+    // 里面的 .stat-card 一类初始 opacity:0 的内容会整片看不见。
+  }, [route, items.length, siteSettings, effectiveSettings.navItems])
 
   const navigate = (next: string) => {
     if (next === "home") {
@@ -4967,12 +5789,13 @@ export default function App() {
   if (route === "admin") {
     return (
       <AdminGateway
-        items={items}
-        onChange={setItems}
+        items={adminItems}
+        onChange={setAdminItems}
         onExit={() => {
           if (isAdminHost()) {
             window.location.href = "https://nestspace.online"
           } else {
+            // 回前台后的公开数据重读由路由变化那条 effect 负责（覆盖前进/后退与直接改 hash）
             navigate("home")
           }
         }}
@@ -5010,12 +5833,37 @@ export default function App() {
         setDark={setDark}
         settings={effectiveSettings}
       />
-      <SpiralGallery language={language} items={items} settings={effectiveSettings} onOpen={openProject} />
-      {siteSettings.homeStatsVisible !== false && (
-        <CatalogueStats language={language} items={items} settings={effectiveSettings} />
-      )}
-      <Curator language={language} settings={effectiveSettings} />
-      <SpecimenIndex items={items} onOpen={openProject} />
+      {/* 段落顺序跟着管理端的导航顺序走（orderHomeSections 是纯函数、有闸门测试）。
+          以前这四段写死在 JSX 里，导航条却可拖序——同一个设置只管到一半。
+          馆藏统计的显隐仍由「展示偏好」的 homeStatsVisible 决定：导航项的 visible 只管导航条，
+          两件事刻意不合并（合并后"隐藏一个链接"会顺手把整段内容从页面上弄丢）。 */}
+      {orderHomeSections(effectiveSettings.navItems).map((id) => {
+        switch (id) {
+          case "cabinet":
+            return (
+              <SpiralGallery
+                key={id}
+                language={language}
+                items={items}
+                settings={effectiveSettings}
+                onOpen={openProject}
+              />
+            )
+          case "catalogue":
+            return siteSettings.homeStatsVisible !== false ? (
+              <CatalogueStats
+                key={id}
+                language={language}
+                items={items}
+                settings={effectiveSettings}
+              />
+            ) : null
+          case "curator":
+            return <Curator key={id} language={language} settings={effectiveSettings} />
+          case "index":
+            return <SpecimenIndex key={id} items={items} onOpen={openProject} />
+        }
+      })}
       <SiteFooter
         items={items}
         settings={effectiveSettings}

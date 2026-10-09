@@ -30,8 +30,11 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   // 标头与品牌 Logo 设置
   logoText: 'NESTSPACE',
   logoSubtext: 'ATARAXYECHO',
+  // 留空 = 用内置的深浅两版徽章（public/brand/，见 scripts/make-brand-logos.py）；填了就两个主题共用它
   logoImageUrl: '',
-  logoType: 'text',
+  // 默认「图标 + 文字」：内置图是**不带字的徽章**，站点名仍由排印给出。
+  // 注意：库里已存过 'text' 的话以库为准（内置默认只在为空时兜底），要在后台把显示模式改一次。
+  logoType: 'both',
 
   // 顶部导航栏配置（默认调换 Curator 与 Index）
   navItems: DEFAULT_NAV_ITEMS,

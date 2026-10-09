@@ -112,7 +112,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   text-decoration: none;
 }
 .wordmark .wordmark-logo-img {
-  max-height: 22px;
+  /* 内置图是方形徽章：22px 时圆环里的人像糊成一团，抬到 28px 才认得出形状（标头高 64-72px，放得下） */
+  max-height: 28px;
   width: auto;
   object-fit: contain;
   display: block;
@@ -489,7 +490,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   gap: clamp(36px, 6vw, 96px);
   padding-top: var(--section-pad-dense); padding-bottom: var(--section-pad-dense);
   background:
-    radial-gradient(circle at 70% 48%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 32%),
+    radial-gradient(circle at 70% 48%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 32%),
     linear-gradient(115deg, color-mix(in srgb, var(--bg-surface) 55%, transparent), transparent 55%);
 }
 /* 坐标纸底纹只铺在中间，两侧淡出——铺满会和文案抢对比 */
@@ -538,6 +539,15 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   content: ""; position: absolute; inset: 16%; border: 1px dashed var(--line-default); border-radius: inherit;
 }
 .preview-orbit::after { inset: 33%; }
+/* 装饰层收成一层：窄屏时轨道只留一条椭圆线（内圈虚线与内阴影撤掉），≤760 整台不再用 3D 排布，
+   轨道没有指代对象，直接不画——三层装饰同场会和主牌抢注意力 */
+@media (max-width: 1100px) {
+  .preview-orbit::before, .preview-orbit::after { display: none; }
+  .preview-orbit { box-shadow: none; }
+}
+@media (max-width: 760px) {
+  .preview-orbit { display: none; }
+}
 /* 画框高度固定、宽度随主图方向变：竖图不该被塞进横框裁掉。
    所有牌共用同一尺寸约束，侧牌的 translate 百分比才是同一个基准 */
 .preview-frame {
@@ -588,40 +598,93 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 /* 标题与路径都来自图片 URL，长文件名一律省略号，完整值放 title */
 .frame-caption strong { flex: 1 1 auto; min-width: 0; font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .frame-caption small { flex: 0 1 auto; min-width: 0; font: 10px/1.5 var(--font-mono); letter-spacing: .06em; color: var(--ink-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.preview-controls { min-height: 56px; display: grid; grid-template-columns: 52px 1fr 52px; border: 1px solid var(--line-strong); background: var(--bg-surface); }
+/* 操作条：箭头 | 索引条 | 箭头 | 放大。用 flex 而不是 grid——
+   单张相册只有「放大」一个子元素，固定列数的 grid 会把它塞进第一列 */
+.preview-controls { min-height: 56px; display: flex; align-items: stretch; border: 1px solid var(--line-strong); background: var(--bg-surface); }
 .preview-controls > button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 17px; }
 /* 悬停反馈：底色单提一档（浅 #f0e8d4→#f5eed9）几乎看不出来，必须同时把颜色抬到主墨色。
    不用 color-mix——构建器会为不支持它降级成实心 var(--accent)，而箭头文字正是 accent，降级路径下会糊在底色里 */
 .preview-controls > button:hover { background: var(--bg-elevated); color: var(--ink-primary); }
-.preview-controls > button:first-child { border-right: 1px solid var(--line-default); }
-.preview-controls > button:last-child { border-left: 1px solid var(--line-default); }
-/* 编号条：十几张时换行而不是把格子压到 20px，触控目标保持 ≥44px */
-.preview-controls > div { display: flex; flex-wrap: wrap; }
-.preview-controls > div button {
-  flex: 0 0 auto; min-width: 52px; min-height: 44px; border: 0; border-right: 1px solid var(--line-hair);
-  background: transparent; color: var(--ink-tertiary); cursor: pointer;
-  font: 10px var(--font-mono); letter-spacing: .08em;
+.preview-controls > .preview-arrow { flex: 0 0 52px; }
+/* 分隔线挂在箭头上而不是 :first-child/:last-child——单张相册时"放大"会是唯一的 button，
+   靠位置选择器会把线画错边；显式 is-prev/is-next 与 DOM 顺序无关 */
+.preview-controls > .preview-arrow.is-prev,
+.preview-controls > .preview-arrow.is-next { border-right: 1px solid var(--line-default); }
+/* 放大按钮固定在末端：单张相册时它是唯一子元素，所以不能靠 :last-child 找它。
+   左侧分隔线由 is-next 箭头负责，这里不再补一条（否则中间会出现 2px 双线） */
+.preview-controls > .preview-enlarge {
+  flex: 0 0 auto; min-width: 76px; padding: 0 14px;
+  font: 10px var(--font-mono); letter-spacing: .12em;
 }
-.preview-controls > div button:last-child { border-right: 0; }
-.preview-controls > div button.active { background: var(--accent-dark); color: #f5eed9; }
+/* 索引条：缩略图而不是裸编号——裸编号无法预告"第 7 张是什么"，十几张时只能逐张盲翻。
+   小图仍带编号角标，读屏走「0N + 文件名」；触控目标保持 ≥44px 见 media 段 */
+.preview-index { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; }
+.preview-controls > .preview-index button {
+  position: relative; flex: 0 0 auto; width: 58px; height: 44px; padding: 0;
+  border: 0; border-right: 1px solid var(--line-hair);
+  background: var(--bg-elevated); cursor: pointer; overflow: hidden;
+}
+.preview-controls > .preview-index button img { width: 100%; height: 100%; display: block; object-fit: cover; opacity: .72; }
+.preview-controls > .preview-index button i {
+  position: absolute; left: 3px; bottom: 3px; padding: 0 4px;
+  font: 9px/14px var(--font-mono); font-style: normal; letter-spacing: .06em;
+  background: var(--bg-base); color: var(--ink-secondary);
+}
+.preview-controls > .preview-index button:last-child { border-right: 0; }
+.preview-controls > .preview-index button.active img { opacity: 1; }
+.preview-controls > .preview-index button.active i { background: var(--accent-dark); color: #f5eed9; }
 /* 编号按钮也要有悬停反馈（原来只写在两侧箭头上，12 个编号零反馈）；当前张不反色 */
-.preview-controls > div button:hover:not(.active) { background: var(--bg-elevated); color: var(--ink-primary); }
-/* 管理端抽屉里的相册缩略图（首张标「封面」） */
+.preview-controls > .preview-index button:hover:not(.active) img { opacity: 1; }
+.preview-controls > .preview-index button:hover:not(.active) i { background: var(--bg-elevated); color: var(--ink-primary); }
+/* 侧牌/后牌在主牌定妆前只是占位盒：保持同样的盒尺寸，定妆前后不跳版 */
+.frame-shot.is-pending { background: var(--bg-elevated); box-shadow: inset 0 0 0 1px var(--line-hair); }
+/* 放大层：不压暗半透遮罩，直接用实底页面色——截图本身多为浅色 UI，压暗会把图边缘"吃"进背景里 */
+.preview-zoom { position: fixed; inset: 0; z-index: 260; display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--bg-base); }
+.preview-zoom-bar { display: flex; align-items: center; gap: 16px; padding: 12px var(--gutter); border-bottom: 1px solid var(--line-default); font: 10px var(--font-mono); letter-spacing: .12em; }
+.preview-zoom-bar > span:first-child { flex: 1 1 auto; min-width: 0; color: var(--ink-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-zoom-count { flex: 0 0 auto; color: var(--accent); }
+.preview-zoom-nav { flex: 0 0 auto; display: flex; gap: 6px; }
+.preview-zoom-nav button, .preview-zoom-bar > button {
+  width: 32px; height: 32px; border: 1px solid var(--line-strong); background: transparent;
+  color: var(--accent); cursor: pointer; font-size: 16px;
+}
+.preview-zoom-bar > a { flex: 0 0 auto; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.preview-zoom-shot { min-height: 0; width: 100%; object-fit: contain; padding: 18px var(--gutter) 28px; }
+/* 管理端抽屉里的相册缩略图（当前项目图片标「详情页大图」） */
 .preview-thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
 .preview-thumbs-admin { margin-bottom: 19px; }
 .preview-thumb-admin { position: relative; width: 96px; height: 64px; overflow: hidden; border: 1px solid #c5c5bc; background: #ecebe5; }
 .preview-thumb-admin img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.preview-thumb-admin i {
+  position: absolute; left: 3px; top: 3px; padding: 0 4px;
+  font: 8px/13px var(--font-mono); font-style: normal; letter-spacing: .06em;
+  background: #f4f3ee; color: #5d6a5a;
+}
 .preview-thumb-admin em {
   position: absolute; left: 0; bottom: 0; padding: 1px 5px;
   font: 8px var(--font-mono); font-style: normal; letter-spacing: .1em;
   background: var(--accent); color: var(--bg-base);
 }
+/* 坏行对应的缩略图：与文本框里的行号同一批，所以管理员能一眼看到"是这几行不对" */
+.preview-thumb-admin.is-bad { border-color: #b3543f; box-shadow: inset 0 0 0 1px #b3543f; }
+.row-issues { margin: 8px 0 0; padding: 0 0 0 16px; list-style: none; }
+.row-issues li { position: relative; font: 11px/1.7 var(--font-mono); color: #8f3f2c; }
+.row-issues li::before { content: "—"; position: absolute; left: -14px; color: #b3543f; }
+.doc-editor.is-invalid { border-color: #b3543f; }
+.preview-dir-mode { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; }
+.preview-dir-mode input { width: 15px; height: 15px; accent-color: var(--accent); }
+/* 目录导入的就近结果：12px 等宽小字，贴在按钮组下面（顶部通知条被冲掉后这里还在） */
+.dir-import-line { margin: 8px 0 0; font: 11px/1.6 var(--font-mono); color: #566052; }
+.dir-import-line.is-error { color: #8f3f2c; }
 @media (prefers-reduced-motion: reduce) {
   /* 主牌写回无倾斜的静态变换：JS 设的 --tilt-* 于是完全不生效，翻页只剩位置切换。
      侧牌的 3D 排布保留——那是版面而不是动画，抹掉后就看不见邻牌了。 */
   .preview-frame { transition: none; }
   .preview-frame[data-position="active"] { transform: translate(-50%, -50%); }
   .preview-pagination i::after { transition: none; }
+  /* 轨道椭圆是纯装饰：静止时收成一条线，别和主牌抢注意力 */
+  .preview-orbit::after { display: none; }
+  .preview-orbit::before { opacity: .35; }
 }
 .evolution-section { background: var(--bg-surface); }
 .evolution-list { border-top: 1px solid var(--line-strong); }
@@ -742,6 +805,12 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 
 /* 抽屉里的文档编辑区 */
 .editor-fields textarea.doc-editor { min-height: 240px; font: 12px/1.7 var(--font-mono); white-space: pre-wrap; }
+/* 目录批量导入：地址框与「读取目录」按钮并排，窄屏换行；按钮保持自身宽度不被输入框挤扁 */
+.preview-dir-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+.preview-dir-row input { flex: 1 1 280px; }
+.preview-dir-row .button { flex: 0 0 auto; white-space: nowrap; }
+.preview-dir-row .button:disabled { opacity: .55; cursor: wait; }
+.preview-image-actions { display: flex; margin-top: 8px; }
 .related-grid { display: grid; grid-template-columns: 1fr 1fr; margin-top: 48px; gap: 20px; }
 .related-grid button {
   min-height: 260px; position: relative; padding: 32px; border: 1px solid var(--line-strong);
@@ -833,8 +902,19 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .distribution-panel dl { margin: 0 24px; border-top: 1px solid #d4d2ca; }
 .distribution-panel dl div { display: flex; justify-content: space-between; padding: 11px 0; font-size: 11px; }
 .distribution-panel dt i { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: #647b60; }.distribution-panel dl div:last-child dt i { background: #c6c9bf; }
-.admin-notice { position: fixed; top: 108px; right: 28px; z-index: 50; min-width: 320px; padding: 15px 17px; display: flex; justify-content: space-between; border: 1px solid #91a18c; background: #f4f3ee; box-shadow: 5px 5px 0 rgba(38,49,38,.15); font-size: 12px; }
+/* z-index 必须高于编辑抽屉的遮罩（.editor-backdrop 是 100）：
+   原先 50 时，抽屉打开状态下的保存失败 400、目录导入结果、"用相册第一张填入"提示全部不可见 */
+.admin-notice { position: fixed; top: 108px; right: 28px; z-index: 220; min-width: 320px; padding: 15px 17px; display: flex; justify-content: space-between; border: 1px solid #91a18c; background: #f4f3ee; box-shadow: 5px 5px 0 rgba(38,49,38,.15); font-size: 12px; }
 .admin-notice button { border: 0; background: none; cursor: pointer; font: 7px var(--font-mono); color: #62705f; }
+/* 失败与在途/结果在视觉与生命周期上都分开：错误常驻（role=alert）并被红边标出，
+   普通结果 6 秒自动让位（JS 里定时），不再出现"上一条提示被冲掉"或"常驻不动"两种极端 */
+.admin-notice.is-error { border-color: #b3543f; background: #f7ece7; }
+.admin-notice.is-error button { color: #8f3f2c; }
+.admin-notice { animation: notice-in 180ms var(--ease-enter); }
+@keyframes notice-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .admin-notice { animation: none; }
+}
 .admin-banner {
   padding: 14px 42px; display: flex; align-items: center; justify-content: space-between; gap: 16px;
   border-bottom: 1px solid #d8b6a2; background: #f7ece5; color: #7c3f22; font-size: 12px; line-height: 1.6;
@@ -866,6 +946,22 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .settings-grid, .content-editor-grid, .sync-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 .settings-card { padding: 28px; border: 1px solid #c8c7bf; background: #f4f3ee; }
 .settings-card h2 { margin: 7px 0 28px; font-size: 24px; }
+/* 同步范围勾选卡：默认全选（等价于以前的"全表同步"），但把"只刷这几个"变成可能 */
+.sync-scope-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.sync-scope-head h2 { margin: 4px 0 0; font-size: 19px; }
+.sync-scope-quick { display: flex; gap: 6px; flex: 0 0 auto; }
+.sync-scope-quick button { min-height: 30px; padding: 0 12px; border: 1px solid #bfc0b8; background: transparent; cursor: pointer; font-size: 11px; }
+.sync-scope-quick button:hover { background: #eeeee8; }
+.sync-scope-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; margin-top: 16px; }
+.sync-scope-item { display: grid; grid-template-columns: 18px auto 1fr; align-items: center; gap: 4px 8px; min-height: 44px; padding: 8px 10px; border: 1px solid #dedcd5; cursor: pointer; }
+.sync-scope-item:hover { background: #eeeee8; }
+.sync-scope-item input { width: 15px; height: 15px; accent-color: var(--accent); }
+.sync-scope-id { font: 9px var(--font-mono); letter-spacing: .08em; color: #85887f; }
+.sync-scope-item strong { grid-column: 2 / 4; font-size: 13px; }
+.sync-scope-item small { grid-column: 2 / 4; font: 10px var(--font-mono); color: #898c84; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) {
+  .sync-scope-item, .sync-scope-quick button { transition: none; }
+}
 .settings-card > label:not(.toggle-row), .editor-fields label { display: block; margin-bottom: 19px; color: #64685f; font-size: 11px; }
 .settings-card input:not([type="checkbox"]), .settings-card textarea, .settings-card select, .editor-fields input, .editor-fields textarea, .editor-fields select {
   width: 100%; margin-top: 7px; padding: 11px 12px; border: 1px solid #c5c5bc; background: #ecebe5; color: #292b26; font-family: inherit;
@@ -897,8 +993,36 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .editor-drawer > header { min-height: 95px; padding: 22px 27px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #cfcdc4; }
 .editor-drawer h2 { margin: 6px 0 0; font-size: 25px; }.editor-drawer > header button { width: 38px; height: 38px; border: 1px solid #c8c7bf; background: transparent; cursor: pointer; font-size: 20px; }
 .editor-fields { overflow-y: auto; padding: 28px; }.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+/* 双语字段（挑战 / 解决方案）：两栏并排，中文在左。窄屏收成单列，
+   否则两个 textarea 各剩 160px 宽，中文一行放不下几个字 */
+.bilingual-field { margin-bottom: 19px; }
+.bilingual-title { display: block; margin-bottom: 8px; color: #64685f; font-size: 11px; }
+.bilingual-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.bilingual-pair label { display: block; margin-bottom: 0; }
+.bilingual-pair label > small { display: block; margin: 0 0 5px; color: #898c84; font: 10px var(--font-mono); letter-spacing: .08em; }
+.bilingual-hint { display: block; margin-top: 7px; color: #898c84; font-size: 10px; line-height: 1.5; }
+@media (max-width: 760px) {
+  .bilingual-pair { grid-template-columns: 1fr; }
+}
+/* 前台「中文原文 / ENGLISH 原文」标注：跟在正文后面，不抢版面 */
+.lang-fallback {
+  display: inline-block; margin-left: 8px; font-style: normal;
+  font: 10px var(--font-mono); letter-spacing: .08em; color: var(--ink-tertiary);
+}
 .editor-drawer > footer { min-height: 76px; padding: 16px 28px; display: flex; justify-content: flex-end; align-items: center; gap: 10px; border-top: 1px solid #cfcdc4; }
 .editor-drawer > footer > button:not(.admin-primary) { min-height: 42px; padding: 0 20px; border: 1px solid #bfc0b8; background: transparent; cursor: pointer; }
+/* 未保存改动的确认条：贴在页脚上方，四个关闭入口（Esc / 遮罩 / × / 取消）都收敛到它。
+   不用浏览器原生 confirm——那会脱离抽屉的焦点上下文，读屏也听不到抽屉里的说明 */
+.drawer-confirm {
+  min-height: 60px; padding: 14px 28px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  border-top: 1px solid #b3543f; background: #f7ece7; font-size: 13px;
+}
+.drawer-confirm > span:first-child { flex: 1 1 220px; color: #6f3a2b; }
+.drawer-confirm > span:last-child { display: flex; gap: 8px; margin-left: auto; }
+.drawer-confirm button { min-height: 38px; padding: 0 16px; border: 1px solid #bfc0b8; background: transparent; cursor: pointer; font-size: 12px; }
+.drawer-confirm button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.drawer-confirm button.is-danger { border-color: #b3543f; color: #8f3f2c; }
+.drawer-confirm button.is-danger:hover { background: #b3543f; color: #f7ece7; }
 
 /* Admin Nav & Logo & Stats Manager Components */
 .nav-config-list { display: flex; flex-direction: column; gap: 12px; margin: 18px 0; }
@@ -928,10 +1052,16 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   display: flex; flex-direction: column; gap: 10px;
 }
 .logo-preview-box > span { font: 7px var(--font-mono); letter-spacing: .16em; color: #788073; }
-.logo-preview-display {
-  display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 12px 18px;
-  background: var(--bg-base, #e8e0cb); border: 1px solid var(--line-hair, rgba(42,38,32,0.14));
+.logo-preview-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* 深浅两版并排：底色用站点自己的两个 --bg-base 值（字面量与 :root / [data-theme] 里的一致），
+   管理端只有一套配色，跟着控制台主题走就永远看不到另一版的实际效果 */
+.logo-preview-cell {
+  display: flex; flex-direction: column; gap: 8px; min-height: 76px; padding: 12px 18px;
+  border: 1px solid var(--line-hair, rgba(42,38,32,0.14));
 }
+.logo-preview-cell.is-dark { background: #1a1814; color: #e8e0cb; }
+.logo-preview-cell.is-light { background: #e8e0cb; color: #1a1814; }
+.logo-preview-tag { font: 8px var(--font-mono); letter-spacing: .16em; opacity: .62; }
 
 .settings-card-note {
   margin: 18px 0 0; padding-top: 14px; border-top: 1px dashed #c5c5bc;
@@ -1075,22 +1205,32 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .detail-tabs { overflow-x: auto; }
   .detail-tabs button { min-width: 125px; padding: 0 16px; }
   .detail-section-label { margin-bottom: 42px; }
-  /* 观察台在手机上收成整幅：画框变矮、主图收窄一点好把侧牌露出来，编号条保持 44px 触控目标。
+  /* 手机上换一套交互，而不是把桌面 3D 封面流缩小：主牌占 78% 时两侧残片只剩 20–30px，
+     「后面还有图」这个线索基本读不出来，十几个格子还会换 3 排挤占正文。
+     改成「一张主牌 + 左右箭头 + 放大」在一行，缩略图索引单独一行横向滚——
+     邻位信息交给索引条（它是确定可见的），舞台只留当前张。
      .preview-section 这里保持 1100 断点那套单列 grid 不动（改成 block 会让 gap:40px 失效，文案与舞台贴死）；
      下面把 .preview-copy 从两栏 grid 还原成 block 是另一回事——它自己不再需要左右分栏 */
   .preview-copy { display: block; }
   .preview-copy h2 { font-size: 40px; margin: 14px 0 16px; }
   .preview-copy > p { font-size: 14px; }
   .preview-pagination { margin: 22px 0 0; }
-  .preview-stage { height: 380px; }
-  .preview-frame { width: 78%; height: min(70%, 320px); }
-  .preview-stage.is-portrait .preview-frame { width: 50%; }
-  .preview-frame[data-position="previous"] { transform: translate(-78%, -44%) rotateY(42deg) translateZ(-180px) scale(.72); }
-  .preview-frame[data-position="next"] { transform: translate(-22%, -44%) rotateY(-42deg) translateZ(-160px) scale(.74); }
+  .preview-stage { height: 340px; }
+  .preview-frame { width: 86%; height: min(74%, 320px); }
+  .preview-stage.is-portrait .preview-frame { width: 62%; }
+  .preview-frame[data-position="previous"],
+  .preview-frame[data-position="next"],
+  .preview-frame[data-position="back"] { display: none; }
+  .preview-frame[data-position="active"] { transform: translate(-50%, -50%); }
   .frame-caption { min-height: 46px; padding: 8px 12px; }
   .frame-caption small { display: none; }
-  .preview-controls { grid-template-columns: 44px 1fr 44px; }
-  .preview-controls > div button { min-width: 44px; }
+  .preview-controls { flex-wrap: wrap; }
+  .preview-controls > .preview-arrow.is-prev { order: 1; }
+  .preview-controls > .preview-arrow.is-next { order: 2; border-right: 0; }
+  .preview-controls > .preview-enlarge { order: 3; margin-left: auto; border-left: 1px solid var(--line-default); }
+  /* 索引条：整幅一行横向滚，保持 44px 触控目标，12 张时不再换 3 排 */
+  .preview-index { order: 4; flex: 1 0 100%; flex-wrap: nowrap; overflow-x: auto; border-top: 1px solid var(--line-hair); }
+  .preview-controls > .preview-index button { width: 58px; min-width: 58px; height: 44px; }
   .detail-narrative { grid-template-columns: 1fr; gap: 58px; }
   .detail-narrative h2 { font-size: 42px; }
   .capability-grid { grid-template-columns: 1fr; }
