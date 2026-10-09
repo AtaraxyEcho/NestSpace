@@ -234,7 +234,9 @@ admin.use('*', async (c, next) => {
   // 防线 1：Bearer 密钥（常量时间比较，防时序侧信道）
   const authHeader = c.req.header('Authorization') ?? ''
   const provided = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
-  if (provided && c.env.ADMIN_SECRET_KEY && timingSafeEqual(provided, c.env.ADMIN_SECRET_KEY)) {
+  // timingSafeEqual 是 async（内部先做 SHA-256 抹平长度），**必须 await**——
+  // 漏掉 await 会拿一个 Promise 当布尔判断，等于鉴权直接放行。
+  if (provided && c.env.ADMIN_SECRET_KEY && (await timingSafeEqual(provided, c.env.ADMIN_SECRET_KEY))) {
     await next()
     return
   }
@@ -380,8 +382,10 @@ export default function App() {
 
 ## 6. 管理端零信任防护落地（Cloudflare Zero Trust 实操）
 
-当前实现中，管理界面是公开 SPA 内的 `#admin` 哈希路由（每个访客都能下载到管理界面代码，
-但其中不含任何密钥），因此安全边界完全落在**管理 API（`/api/admin/*`）**上，由三层防线组成：
+当前实现里管理界面有两种进入形态：**公开 SPA 内的 `#admin` 哈希路由**（每个访客都能下载到管理界面代码，
+但其中不含任何密钥），以及**受 Access 保护的专属子域** `admin.<域名>`（生产环境下访问主站的 `#admin`
+会被直接跳转过去；代码里的 `isAdminHost()` 与那条跳转 effect 就是为它准备的）。
+两种形态的安全边界都完全落在**管理 API（`/api/admin/*`）**上，由三层防线组成：
 边缘 Access 拦截 + 代码层 Bearer 密钥（常量时间比较）+ 代码层 Access JWT 签名校验。
 配置步骤见 `DEPLOYMENT_GUIDE.md` 第三节，要点如下：
 
@@ -389,8 +393,10 @@ export default function App() {
 2. 点击 **Access** -> **Applications** -> **Add an Application**：
    - 类型选择：**Self-hosted（自托管）**。
    - Application Name：`NestSpace Admin Console`。
-   - Application Domain：输入你的自定义域名，Path 填 `/api/admin*`
-     （`/admin*` 对哈希路由无意义——`#` 之后的部分不会发送到服务器）。
+   - Application Domain：两种绑法任选其一——绑到主域名的 `/api/admin*` 路径
+     （`/admin*` 对哈希路由无意义——`#` 之后的部分不会发送到服务器），
+     或直接绑到专用管理子域 `admin.<域名>`（部署手册第三节用的就是这一种）。
+     二者可同时存在，代码层都会照常校验 Bearer / JWT，不依赖边缘是否拦住。
 3. **配置策略（Policy）**：
    - Action：`Allow`。
    - Rule type：`Include`。
@@ -417,13 +423,20 @@ compatibility_date = "2026-10-01"
 
 [assets]
 directory = "./dist"
+# binding 必须有：Worker 要取首页 HTML 做 SEO 注入（删掉首页会 503）
+binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*"]
+run_worker_first = ["/api/*", "/", "/index.html"]
 
 [[d1_databases]]
 binding = "DB"
 database_name = "nestspace-prod"
 database_id = "<你的_D1_DATABASE_ID>"
+
+# 匿名使用度量：绑定缺失时埋点整条降级为 no-op（不需要为它做迁移）
+[[analytics_engine_datasets]]
+binding = "METRICS"
+dataset = "nestspace_usage"
 ```
 
 ### 7.2 部署步骤命令链

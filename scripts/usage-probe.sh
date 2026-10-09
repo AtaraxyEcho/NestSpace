@@ -29,7 +29,7 @@ cleanup() {
     for (\$i = 0; \$i -lt 3; \$i++) {
       \$hit = @(Get-CimInstance Win32_Process | Where-Object {
         (\$_.Name -eq 'workerd.exe' -or \$_.CommandLine -match 'wrangler') -and
-        (\$_.CommandLine -like \"*--port $PORT*\" -or \$_.CommandLine -like \"*:$PORT*\")
+        (\$_.CommandLine -like \"*--port $PORT*\" -or \$_.CommandLine -like \"*127.0.0.1:$PORT*\")
       })
       \$pids = @(\$hit | ForEach-Object { \$_.ProcessId })
       \$kids = @(Get-CimInstance Win32_Process | Where-Object { \$pids -contains \$_.ParentProcessId })

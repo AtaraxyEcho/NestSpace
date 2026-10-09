@@ -15,6 +15,7 @@ NestSpace/
 │   │   └── tsconfig.json
 │   ├── public/
 │   │   ├── _headers              # 严格 CSP 策略、防 iframe 钓鱼、防运营商劫持 HSTS、静态资产缓存
+│   │   ├── brand/                # 站点 logo（make-brand-logos.py 生成；直出、刻意不走 LFS）
 │   │   └── robots.txt            # 搜索引擎收录规则（允许全站，屏蔽 /api/）
 │   ├── src/
 │   │   ├── api/                  # 前端客户端 API (client.ts & adminClient.ts)
@@ -25,8 +26,14 @@ NestSpace/
 │   │   │                         #   previewRules.ts 相册判据（与 Worker 写侧同一份）、
 │   │   │                         #   projectDiff.ts 抽屉改动列判定、usage.ts 匿名埋点、
 │   │   │                         #   navOrder.ts 首页栏目顺序、bilingual.ts 双语读侧规则
-│   │   └── App.tsx               # 动态数据渲染与安全管理端
+│   │   ├── App.tsx               # 动态数据渲染与安全管理端
+│   │   ├── main.tsx              # React 入口（挂载 #root，引入 index.css）
+│   │   └── index.css             # 全局样式与设计 token（Tailwind v4 导入 + 主题变量）
 │   ├── .dev.vars.example         # 本地开发环境变量模板（复制为 .dev.vars 使用，不入 Git）
+│   ├── index.html                # Vite HTML 壳（figma 插件在构建期注入 title / description / og；另含 canonical）
+│   ├── vite.config.ts            # Vite + Tailwind v4 + Figma Make 插件；dev 下把 /api 代理到本地 wrangler
+│   ├── tsconfig.json             # 前端 TS 配置（worker/tsconfig.json 单独一套）
+│   ├── .figma/make/site.json     # 站点标题 / 描述 / 收录开关（构建期注入 HTML 头部）
 │   ├── jwt_verify.test.mjs       # JWT 校验与 Access 白名单单元测试（pnpm test 依次跑以下十个文件）
 │   ├── demo_url.test.mjs         # 演示地址规范化单元测试
 │   ├── sync_update.test.mjs      # GitHub 同步字段归属 / 时间线生成单元测试
@@ -42,7 +49,7 @@ NestSpace/
 │
 ├── migrations/                   # Cloudflare D1 边缘数据库建表与种子数据
 │   ├── 0001_create_projects.sql  # 表结构定义（字段脱敏、草稿状态、版本时间戳）
-│   ├── 0002_seed_initial_data.sql# 初始 4 个标本数据（Aperture, Lumen, Fjord, Meridian）
+│   ├── 0002_seed_initial_data.sql # 初始 4 个标本数据（Aperture, Lumen, Fjord, Meridian）
 │   ├── 0003_create_site_settings.sql # 站点文案与备案号配置表（管理端可编辑）
 │   ├── 0004_add_nav_and_logo_settings.sql # 顶部导航顺序、Logo 与统计指标扩展表结构
 │   ├── 0005_add_footer_settings.sql # 公开站点底部栏中英文案（管理端「底部栏」视图）
@@ -120,8 +127,8 @@ bash scripts/d1-migrate.sh remote
 > **先 `bash scripts/d1-migrate.sh remote` → 再 push/部署**。
 > 反序的实际表现（本轮实测，不是推测）：`no such column: challenge_json` →
 > `GET /api/projects` 与详情接口 500 → 首页不报错，但公开列表变为空并显示一句
-> 「馆藏尚未公开任何标本」的空状态（内置演示标本只作首屏占位、接口失败时兜底；
-> 一旦服务端**明确回报**空馆藏，就显示这条空状态而不是拿演示数据顶着说"有数据"），
+> 「馆藏尚未公开任何标本」的空状态（内置演示标本只作**首屏占位**，接口不可达时也继续显示；
+> 只有当服务端**明确回报**空馆藏（200 + `[]`）时，才显示这条空状态而不是拿演示数据顶着说"有数据"），
 > 详情页里已发布 id 仍显示陈旧内容、其它 id 显示"未找到标本"，管理端保存项目直接 500。
 > 这类"接口全 500 但页面还在跑"的形态比白屏更难发现，所以 `sync_update.test.mjs` 的 case 17f 已经把
 > **代码引用的列 ⊆ migrations/ 声明的列** 钉成闸门（含反向验证：喂一个不存在的列会红）。
@@ -288,7 +295,6 @@ bash scripts/usage-probe.sh
 > Windows/Git Bash 实测坑：`wrangler dev` 的父进程被杀后 **workerd 子进程可能仍占着端口**，
 > 后续探针会打到"旧代码的幽灵"上（表现：路由明明存在却 404，或 D1 报 `no such table`）。
 > 怀疑时先看 `netstat -ano | grep :<端口>`，只清理自己起的那些 PID。
-```
 
 ---
 
