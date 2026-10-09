@@ -144,3 +144,11 @@
 *.stl                filter=lfs diff=lfs merge=lfs -text
 *.nc                 filter=lfs diff=lfs merge=lfs -text
 *.mat                filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# 部署关键资源：不走 LFS
+# Cloudflare Workers Builds 的 git clone 不解 LFS 指针，命中的话 dist/brand/*.png
+# 会变成 ~130 字节的指针文本，标头 logo 静默坏图（img-src 'self' 下连报错都没有）。
+# 原件（frontend/assert/）继续走 LFS 无妨——它不参与构建。
+# ---------------------------------------------------------------------------
+public/brand/*.png     -filter -diff -merge -text
