@@ -1,4 +1,4 @@
-"""从 frontend/assert/ 的完整组合标生成站点用的派生图（原件不动）。
+"""从 frontend/design/ 的完整组合标生成站点用的派生图（原件不动）。
 
 产出（frontend/public/brand/，随 dist 部署）：
   logo-mark-on-dark.png     纯徽章 → 标头用（深色主题），旁边仍是站点自己的排印文字
@@ -8,8 +8,8 @@
   favicon.ico / apple-touch-icon.png   浏览器图标（同日生成；favicon 透明，iOS 图标带底）
 
 **文件名按"用在哪种背景上"命名，不按原件的底色**——这是踩过一次的坑：
-  assert/logo_light.png 是浅底 + 浅发人物，抠掉底色后主体是**浅色**，只适合深色背景；
-  assert/logo_dark.png  是深底 + 深发人物，抠掉底色后主体是**深色**，只适合浅色背景。
+  design/logo_light.png 是浅底 + 浅发人物，抠掉底色后主体是**浅色**，只适合深色背景；
+  design/logo_dark.png  是深底 + 深发人物，抠掉底色后主体是**深色**，只适合浅色背景。
 早期按原件底色命名（logo-mark-dark = 深底那版）并直接把"dark"喂给深色主题，结果深色标头拿到
 深发主体 → 头发与背景糊成一片、头像看着是破的。判定依据是"抠图后主体与背景的明暗关系"。
 
@@ -26,7 +26,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1] / "frontend"
-SRC = ROOT / "assert"
+SRC = ROOT / "design"
 OUT = ROOT / "public" / "brand"
 
 TOL = 32            # 与底色的绝对色差和阈值：底色有轻微噪点（30,31,23 ↔ 31,32,23）
@@ -201,6 +201,6 @@ for _src_theme, dest, bg in VARIANTS:
     canvas.save(SRC / f"preview-{dest}.png")
 
 print("\n".join(report))
-print("核对图: frontend/assert/preview-on-<dark|light>.png（左=120px 徽章，右=150px 整标）")
+print("核对图: frontend/design/preview-on-<dark|light>.png（左=120px 徽章，右=150px 整标）")
 print("图标: frontend/public/brand/favicon.ico (16/32/48) + apple-touch-icon.png (180)")
 

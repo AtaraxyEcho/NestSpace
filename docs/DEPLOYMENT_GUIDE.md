@@ -17,6 +17,7 @@ NestSpace/
 │   │   ├── _headers              # 严格 CSP 策略、防 iframe 钓鱼、防运营商劫持 HSTS、静态资产缓存
 │   │   ├── brand/                # 站点 logo（make-brand-logos.py 生成；直出、刻意不走 LFS）
 │   │   └── robots.txt            # 搜索引擎收录规则（允许全站，屏蔽 /api/）
+│   ├── design/                   # 品牌原件（logo 源图，make-brand-logos.py 的输入；走 LFS、不参与构建）
 │   ├── src/
 │   │   ├── api/                  # 前端客户端 API (client.ts & adminClient.ts)
 │   │   ├── data/                 # 内置默认值与回退数据 (fallbackProjects / defaultSiteSettings)
@@ -66,9 +67,14 @@ NestSpace/
 │   ├── d1-migrate.sh             # 一键按序执行全部 D1 迁移（local / remote，可反复执行）
 │   ├── usage-probe.sh            # 接口探针：起 8898 的本地 Worker，自收进程（埋点 / 图片 / 双语写读）
 │   ├── probe-bilingual-payload.mjs # 生成双语写读往返的请求载荷（供探针第 4 节 --data-binary 用）
-│   └── make-brand-logos.py       # 由 frontend/assert/ 原件派生 frontend/public/brand/ 两套 logo
+│   └── make-brand-logos.py       # 由 frontend/design/ 原件派生 frontend/public/brand/ 的 logo 与浏览器图标
 │
-└── ARCHITECTURE_PLAN.md          # 详细架构与审查设计文档
+└── docs/                         # 文档
+    ├── DEPLOYMENT_GUIDE.md       # 本文件：部署与运维手册
+    ├── ARCHITECTURE_PLAN.md      # 架构方案与审查设计文档
+    └── plans/                    # 历史规划记录（已完成的迭代过程，留作备查）
+        ├── DEMO_ENTRY_PLAN_001.md
+        └── DEMO_ENTRY_PLAN_002.md
 ```
 
 ---
@@ -663,14 +669,14 @@ bash scripts/usage-probe.sh
 
 ## 八、 品牌标 / 栏目顺序 / 双语叙述 / 同步范围
 
-- **品牌标按"用在哪种背景上"各一张，且可被管理端替换**：原件是 `frontend/assert/logo_dark.png` 与 `logo_light.png`
+- **品牌标按"用在哪种背景上"各一张，且可被管理端替换**：原件是 `frontend/design/logo_dark.png` 与 `logo_light.png`
   （882×882 的**完整组合标**：徽章 + `OmniNest` + `ATARRAYECHO`，各带不透明底色）。
   站点用的是 `python scripts/make-brand-logos.py` 生成的派生图（原件不动）：
   - `public/brand/logo-mark-on-{dark,light}.png`（160px，只有徽章）→ 标头默认图；
   - `public/brand/logo-lockup-on-{dark,light}.png`（320px，整标）→ 想要整标时在管理端填这个路径；
   - `public/brand/favicon.ico`（16/32/48）+ `apple-touch-icon.png`（180）→ 浏览器图标，同一脚本产出、跟着一起更新。
   ⚠️ **后缀指的是"用在哪种背景上"，不是原件的底色**：原件的底色会被抠掉，决定可读性的是抠图后**主体**与背景的明暗——
-  `assert/logo_light.png` 是浅底 + 浅发主体，抠完只剩浅色主体，**只能**用在深色主题；`logo_dark.png` 反之。
+  `design/logo_light.png` 是浅底 + 浅发主体，抠完只剩浅色主体，**只能**用在深色主题；`logo_dark.png` 反之。
   早期按原件底色命名（`logo-mark-dark` = 深底那版）并直接喂给深色主题，结果深色标头拿到深发主体 ⇒
   头发与背景糊成一片、头像看着是破的。**换标或改名时不要退回按底色命名的老习惯。**
   派生图**从四边泛洪抠背景**而不是全局阈值——浅色版的头发/皮肤本身就接近底色，全局阈值会在人脸上打出洞。
@@ -688,7 +694,7 @@ bash scripts/usage-probe.sh
     配上 `not_found_handling=single-page-application`（缺失路径返回 200 + index.html）与 CSP
     `img-src 'self'`，logo 与 favicon 都会**静默坏图**，控制台什么都不报。
     已在 `.gitattributes` 里给 `public/brand/*.png` 单独关掉 filter/diff/merge/text
-    （`git check-attr` 实测四项均 unset）；原件 `frontend/assert/` 继续走 LFS 无妨，它不参与构建。
+    （`git check-attr` 实测四项均 unset）；原件 `frontend/design/` 继续走 LFS 无妨，它不参与构建。
   - ⚠️ **内置默认不会覆盖已存的偏好**：`logo_type` 在生产库里已经是 `'text'`（当年保存过一次），
     代码里的默认值 `'both'` 只对"该列为空"的情况生效。要让标头出图，去
     「导航与标头 → 显示模式」选「图标 + 文字」保存一次即可（这是一次生产写，由你执行）。

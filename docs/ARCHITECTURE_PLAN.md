@@ -94,8 +94,10 @@ NestSpace/
 │   └── 0002_seed_initial_data.sql
 │
 ├── wrangler.toml                 # Cloudflare 边缘计算与 D1 绑定配置（实际位于 frontend/ 下，见下方落地差异说明）
-├── ARCHITECTURE_PLAN.md          # 架构方案说明文档
-└── package.json                  # 全局构建与脚本调度
+└── docs/                         # 文档
+    ├── DEPLOYMENT_GUIDE.md       # 部署与运维手册
+    ├── ARCHITECTURE_PLAN.md      # 本文件：架构方案与审查设计文档
+    └── plans/                    # 历史规划记录
 ```
 
 > **落地差异说明**：实际工程将 Worker 入口（`worker/index.ts`，`export default app`）

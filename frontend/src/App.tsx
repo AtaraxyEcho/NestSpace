@@ -324,7 +324,7 @@ function routeFromHash(hash: string) {
 
 /**
  * 内置品牌标（深浅模式各一张），由 `python scripts/make-brand-logos.py` 从
- * `frontend/assert/logo_*.png` 的完整组合标生成：mark = 只有徽章（标头用），
+ * `frontend/design/logo_*.png` 的完整组合标生成：mark = 只有徽章（标头用），
  * lockup = 徽章 + OmniNest + ATARRAYECHO 整标（想整标换上去时用，见管理端那条说明）。
  * 整标不直接进标头是因为图框只有 28px 高，里面的字会被压到读不出，还会和站点自己的
  * NESTSPACE 文字重复。public/ 下的文件按根路径引用，不能被 JS import（Vite 会报错）。
@@ -332,7 +332,7 @@ function routeFromHash(hash: string) {
 const BRAND_LOGO = {
   // 文件名按**目标背景**命名（on-dark / on-light），不是按原件的底色——
   // 原件的底色会被脚本抠掉，留下的是"主体"，决定可读性的是主体与背景的明暗：
-  // assert/logo_light.png 是浅底 + 浅发主体 → 只能用在深色主题；logo_dark.png 反之。
+  // design/logo_light.png 是浅底 + 浅发主体 → 只能用在深色主题；logo_dark.png 反之。
   mark: { onDark: "/brand/logo-mark-on-dark.png", onLight: "/brand/logo-mark-on-light.png" },
   lockup: { onDark: "/brand/logo-lockup-on-dark.png", onLight: "/brand/logo-lockup-on-light.png" },
 } as const
@@ -3268,7 +3268,7 @@ function AdminPage({
                     留空时按主题各用内置的一张（深色主题 <code>/brand/logo-mark-on-dark.png</code> ·{" "}
                     浅色主题 <code>/brand/logo-mark-on-light.png</code>，由{" "}
                     <code>scripts/make-brand-logos.py</code> 从{" "}
-                    <code>frontend/assert/</code> 的原件生成，后缀指"用在哪种背景上"）。
+                    <code>frontend/design/</code> 的原件生成，后缀指"用在哪种背景上"）。
                     填了地址就两个主题共用它。
                     想用含文字的完整组合标，填 <code>/brand/logo-lockup-on-dark.png</code>（或 on-light）并把显示模式改成「仅图片」
                     （整标在标头图框里读不出字，所以默认用不带字的徽章）。
