@@ -508,9 +508,11 @@ export function isAccessIdentityAllowed(
     .split(',')
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean)
-  // 名单未配置时**拒绝**（fail-closed）：这条防线一旦"没配就放行"，凡被 Access 应用放行的身份
-  // 都能进管理端——多应用共用一份 Access 政策时，第二层就等于不存在。想用 JWT 免口令进入就必须显式填名单。
-  if (allowList.length === 0) return false
+  // 名单未配置时**放行**：这条防线是"可选收紧"，不是主闸门——主闸门是 Access 应用策略，
+  // 而 JWT 的 RS256 签名 + aud 已经保证身份确实来自**本应用**（伪造不了）。
+  // 只有当 Access 应用比管理端更宽（一份政策盖多个应用 ⇒ 同一个 aud 下还有非管理员）时才需要填名单；
+  // 否则填了只是同一份名单写两处，还多一个能把自己锁在外面的开关。
+  if (allowList.length === 0) return true
   const email = String(identity?.email ?? '').trim().toLowerCase()
   const sub = String(identity?.sub ?? '').trim().toLowerCase()
   return Boolean((email && allowList.includes(email)) || (sub && allowList.includes(sub)))
@@ -558,18 +560,9 @@ adminApp.use('*', async (c, next) => {
       if (verdict.valid) {
         const identity = readJwtIdentity(jwt)
         if (!isAccessIdentityAllowed(identity, c.env.ACCESS_ALLOWED_EMAILS)) {
-          // 名单没配时给出可操作的提示：这是"配置缺了"，不是"这个人不在名单里"
-          const allowListConfigured = String(c.env.ACCESS_ALLOWED_EMAILS ?? '').trim() !== ''
           console.warn('Admin auth rejected: identity not in allowlist:', identity?.email)
           noteAuthFailure(key, now)
-          return c.json(
-            {
-              error: allowListConfigured
-                ? '403 Forbidden: 该身份不在管理端允许名单内'
-                : '403 Forbidden: 未配置 ACCESS_ALLOWED_EMAILS（该白名单现在是必填项）；也可改用 Bearer 口令进入',
-            },
-            403,
-          )
+          return c.json({ error: '403 Forbidden: 该身份不在管理端允许名单内' }, 403)
         }
         authFailures.delete(key)
         await next()
