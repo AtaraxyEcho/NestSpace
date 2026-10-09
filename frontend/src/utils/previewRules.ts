@@ -3,7 +3,7 @@
  *
  * 为什么要在 src/ 下而不是只写在 worker 里：管理端需要「填的时候就说哪一行不对」，
  * 而判据一旦在两处各写一遍，就会出现「前端说不违法、保存却 400」或反过来——
- * 那是本项目在管理端明令禁止的假状态。frontend/preview_rules.test.mjs 会逐条比对
+ * 那是本项目在管理端明令禁止的假状态。frontend/test/preview_rules.test.mjs 会逐条比对
  * 这里与 worker 的 validatePreviewInput 是否在同一批输入上给出同样的结论。
  */
 

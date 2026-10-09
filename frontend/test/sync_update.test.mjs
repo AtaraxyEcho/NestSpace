@@ -7,9 +7,10 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
-const ROUTE_URL = pathToFileURL(
-  join(dirname(fileURLToPath(import.meta.url)), 'worker', 'index.ts'),
-).href
+// 本文件在 frontend/test/ 下：模块与源码都在上一级 frontend/，而迁移目录再往上一级（仓库根）
+const FRONTEND = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+const ROUTE_URL = pathToFileURL(join(FRONTEND, 'worker', 'index.ts')).href
 
 const {
   buildProjectSyncUpdate,
@@ -607,10 +608,7 @@ assert.deepEqual(adminRow.features, ['f1'], 'case 17c: JSON 列在投影里已�
 assert.equal(adminRow.readme_zh, '值-readme_zh', 'case 17d: 原始列名保留是刻意为之（抽屉绑的就是它）')
 // 上面的守卫看不到 SQL：如果哪天把 SELECT * 换成显式列清单并漏掉一列，投影守卫仍然全绿
 // （种子是我们在测试里手工造的，压根没走 SQL）。这条直接把"仍取全列"钉在源码上。
-const workerSrc = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), 'worker', 'index.ts'),
-  'utf8',
-)
+const workerSrc = readFileSync(join(FRONTEND, 'worker', 'index.ts'), 'utf8')
 assert.match(
   workerSrc,
   /SELECT \* FROM projects ORDER BY sort_order/,
@@ -623,7 +621,7 @@ assert.match(
 // 公开接口 500，而前端会把接口失败**静默退化成内置的 4 条 fallback 标本**（App.tsx 的
 // `if (projects && projects.length > 0) setItems(projects)`），于是线上不是报错页、是内容悄悄变少。
 // 这条闸门把"代码列 ⊆ 迁移列"钉住，顺序错了在 CI 就红，不必等到部署后才发现。
-const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations')
+const MIGRATIONS_DIR = join(FRONTEND, '..', 'migrations')
 const migrationFiles = readdirSync(MIGRATIONS_DIR)
   .filter((f) => f.endsWith('.sql'))
   .sort()

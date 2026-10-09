@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROUTE_URL = pathToFileURL(
-  join(dirname(fileURLToPath(import.meta.url)), 'src', 'utils', 'navOrder.ts'),
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'utils', 'navOrder.ts'),
 ).href
 
 const { HOME_SECTION_IDS, orderHomeSections } = await import(ROUTE_URL)

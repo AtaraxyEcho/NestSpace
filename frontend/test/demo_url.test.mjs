@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROUTE_URL = pathToFileURL(
-  join(dirname(fileURLToPath(import.meta.url)), 'worker', 'index.ts'),
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'index.ts'),
 ).href
 
 const { normalizeDemoUrl } = await import(ROUTE_URL)

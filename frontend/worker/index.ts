@@ -940,7 +940,7 @@ async function isRateLimited(res: Response): Promise<boolean> {
 /**
  * 仓库查重用的 LIKE 模式：**只转义 owner/repo 里的通配符，两端留作通配**。
  * 把两端的 % 也一起转义会得到字面量 `\%owner/repo\%`，命中 0 行、查重彻底失效
- * （踩过一次：重复导入检测形同虚设）。sync_update.test.mjs 有闸门盯着这个形状。
+ * （踩过一次：重复导入检测形同虚设）。frontend/test/sync_update.test.mjs 有闸门盯着这个形状。
  */
 export function buildRepoLikePattern(owner: string, repo: string): string {
   const escaped = `${owner}/${repo}`.replace(/[\\%_]/g, (ch) => `\\${ch}`)

@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROUTE_URL = pathToFileURL(
-  join(dirname(fileURLToPath(import.meta.url)), 'src', 'utils', 'previewFrames.ts'),
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'utils', 'previewFrames.ts'),
 ).href
 
 const { previewFrames, hiddenFrameCount, frameLabel } = await import(ROUTE_URL)

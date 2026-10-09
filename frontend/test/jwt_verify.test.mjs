@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROUTE_URL = pathToFileURL(
-  join(dirname(fileURLToPath(import.meta.url)), 'worker', 'index.ts'),
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'index.ts'),
 ).href
 
 // 通过追加查询参数导入全新模块实例，隔离各用例的模块级证书缓存状态

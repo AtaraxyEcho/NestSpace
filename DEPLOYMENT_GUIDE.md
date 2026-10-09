@@ -34,16 +34,17 @@ NestSpace/
 │   ├── vite.config.ts            # Vite + Tailwind v4 + Figma Make 插件；dev 下把 /api 代理到本地 wrangler
 │   ├── tsconfig.json             # 前端 TS 配置（worker/tsconfig.json 单独一套）
 │   ├── .figma/make/site.json     # 站点标题 / 描述 / 收录开关（构建期注入 HTML 头部）
-│   ├── jwt_verify.test.mjs       # JWT 校验与 Access 白名单单元测试（pnpm test 依次跑以下十个文件）
-│   ├── demo_url.test.mjs         # 演示地址规范化单元测试
-│   ├── sync_update.test.mjs      # GitHub 同步字段归属 / 时间线生成单元测试
-│   ├── image_proxy.test.mjs      # 图片代理：宽度夹取 / 图源白名单 / 转换地址构造单元测试
-│   ├── preview_frames.test.mjs   # 观察台：在场张数 / 环形去重 / +N 口径 / URL 解析兜底单元测试
-│   ├── preview_dir.test.mjs      # 预览图目录导入：地址解析 / 位图筛选 / 排序 / 拼接 / 异常兜底单元测试
-│   ├── preview_rules.test.mjs    # 相册判据前后端一致性 / 坏行行号 / 抽屉改动列判定 / 埋点事件白名单
-│   ├── nav_order.test.mjs        # 首页栏目顺序 = 导航顺序（缺项兜底 / 脏输入退化）
-│   ├── bilingual.test.mjs        # 挑战/方案双语读侧：新列优先、旧列中文兜底、坏 JSON 不抛错、回退标注
-│   ├── sync_scope.test.mjs       # 同步范围 ids：省略=全表、空数组=拒绝、形态与上限、去重
+│   ├── test/                     # 单元测试（纯函数 / 前后端判据一致性；npm test 依次跑这十个文件）
+│   │   ├── jwt_verify.test.mjs   # JWT 校验与 Access 白名单
+│   │   ├── demo_url.test.mjs     # 演示地址规范化
+│   │   ├── sync_update.test.mjs  # GitHub 同步字段归属 / 时间线生成 / 代码列 ⊆ 迁移列（17f）
+│   │   ├── image_proxy.test.mjs  # 图片代理：宽度夹取 / 图源白名单 / 转换地址构造
+│   │   ├── preview_frames.test.mjs # 观察台：在场张数 / 环形去重 / +N 口径 / URL 解析兜底
+│   │   ├── preview_dir.test.mjs  # 预览图目录导入：地址解析 / 位图筛选 / 排序 / 拼接 / 异常兜底
+│   │   ├── preview_rules.test.mjs # 相册判据前后端一致性 / 坏行行号 / 抽屉改动列判定 / 埋点白名单
+│   │   ├── nav_order.test.mjs    # 首页栏目顺序 = 导航顺序（缺项兜底 / 脏输入退化）
+│   │   ├── bilingual.test.mjs    # 挑战/方案双语读侧：新列优先、旧列中文兜底、坏 JSON 不抛错、回退标注
+│   │   └── sync_scope.test.mjs   # 同步范围 ids：省略=全表、空数组=拒绝、形态与上限、去重
 │   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（Analytics Engine 数据集默认注释、按需开启）
 │   └── package.json
 │
@@ -130,7 +131,7 @@ bash scripts/d1-migrate.sh remote
 > 「馆藏尚未公开任何标本」的空状态（内置演示标本只作**首屏占位**，接口不可达时也继续显示；
 > 只有当服务端**明确回报**空馆藏（200 + `[]`）时，才显示这条空状态而不是拿演示数据顶着说"有数据"），
 > 详情页里已发布 id 仍显示陈旧内容、其它 id 显示"未找到标本"，管理端保存项目直接 500。
-> 这类"接口全 500 但页面还在跑"的形态比白屏更难发现，所以 `sync_update.test.mjs` 的 case 17f 已经把
+> 这类"接口全 500 但页面还在跑"的形态比白屏更难发现，所以 `test/sync_update.test.mjs` 的 case 17f 已经把
 > **代码引用的列 ⊆ migrations/ 声明的列** 钉成闸门（含反向验证：喂一个不存在的列会红）。
 
 ---
@@ -427,7 +428,7 @@ bash scripts/usage-probe.sh
     命中缓存的图可能先于 `load` 监听器就绪，所以挂载时还查一次 `img.complete`，否则竖图首帧会先套横框。
   - **相册交互**：只渲染**当前张 + 左邻 + 右邻**，总数 >3 时再多渲染一张代表「往后还有」的后牌
     （编号牌上标 `+N`，N = 未显示的张数）——一张 12 图的相册不会同时解码 12 张大图。
-    2 张时左右邻会绕回同一张，`previewFrames()`（`src/utils/previewFrames.ts`，纯函数 + `preview_frames.test.mjs` 闸门）
+    2 张时左右邻会绕回同一张，`previewFrames()`（`src/utils/previewFrames.ts`，纯函数 + `test/preview_frames.test.mjs` 闸门）
     去重只留一张侧牌；1 张时不渲染翻页控件，舞台 `tabindex="-1"`（不可 Tab 停留）。
     下方是**缩略图索引条**（每张 58×44 的小图 + 左上角 `0N` 角标，可换行，触控目标 ≥44px），两侧 ←/→ 翻页，
     末端一个「放大」按钮。为什么不是裸编号：`01…12` 无法预告"第 7 张是什么"，十几张时访客只能逐张盲翻；
@@ -504,7 +505,7 @@ bash scripts/usage-probe.sh
     不必重填地址；导入的失败原因与统计（新增/替换几张、跳过重复、过滤非位图与徽章、被上限挤掉几张）
     **就近显示在按钮下面**，不只放在顶部那条会被冲掉的通知里。
   - **抽屉的四个关闭入口都有未保存保护**：Esc / 点遮罩 / 右上角 × / 底部「取消」全部收敛到 `requestClose()`。
-    判据与保存路径**共用同一个 `changedColumns()`**（`src/utils/projectDiff.ts`，纯函数 + `preview_rules.test.mjs` 闸门），
+    判据与保存路径**共用同一个 `changedColumns()`**（`src/utils/projectDiff.ts`，纯函数 + `test/preview_rules.test.mjs` 闸门），
     所以不会出现"关闭时说没改动、保存却写进去"的分裂；有改动时在页脚上方展开一条确认条
     （「继续编辑」/「放弃并关闭」，`role="alertdialog"`，不用浏览器原生 confirm 以免脱离抽屉焦点）。
     新建项目拿 `createProject` 生成的空白模板当基线——**一个字没改的新草稿可以直接关**，不弹确认。
@@ -513,7 +514,7 @@ bash scripts/usage-probe.sh
   - **相册坏行在点保存之前就被点名**：文本框下面按行列出问题（`第 7 行：不是有效的 http/https 绝对地址…`），
     对应的缩略图描红边。判据不是前端另写一份，而是与 Worker 写侧**同一份** `src/utils/previewRules.ts`
     （`sanitizeImageUrl` / `PREVIEW_IMAGE_LIMIT` 由 Worker 再导出，`galleryRowIssues` 是它的逐行诊断视图）；
-    `preview_rules.test.mjs` 把同一批输入喂给前后端两侧，要求**结论必须一致**。服务端仍是最终裁决。
+    `test/preview_rules.test.mjs` 把同一批输入喂给前后端两侧，要求**结论必须一致**。服务端仍是最终裁决。
   - **后台通知分三种生命周期**：结果类（`info`）6 秒自动让位，失败类（`error`）常驻、带关闭按钮并用
     `role="alert"` + 红边，在途类（`busy`，如「正在读取目录…」）不自动消失——抓取可能超过 10 秒，
     自动消失会让人觉得没反应。以前只有一条永不消失、新消息覆盖旧消息的通知位。
@@ -633,7 +634,7 @@ bash scripts/usage-probe.sh
   **要真正收数**：控制台启用 Analytics Engine（免费，10 万写入/天）后把三行取消注释再部署。
 - **为什么用 Analytics Engine 而不是新开 D1 表**：免费额度每天 10 万个数据点（约合每月 300 万）足够、**不需要数据库迁移**
   （因此不涉及生产写库）、数据天然按时间分桶。数据集 `nestspace_usage`，绑定名 `METRICS`。
-- **收什么**（白名单在 `worker/index.ts` 的 `USAGE_EVENTS`，白名单外一律 **400**，`preview_rules.test.mjs` 会核对这份表）：
+- **收什么**（白名单在 `worker/index.ts` 的 `USAGE_EVENTS`，白名单外一律 **400**，`test/preview_rules.test.mjs` 会核对这份表）：
   | 事件 | 方式（`m`） | 回答的问题 |
   | --- | --- | --- |
   | `deck` | `view` / `thumb` / `plate` / `arrow` / `drag` / `key` / `zoom` | 观察台有没有让人看图、翻图；缩略图索引与放大被用到没有 |
@@ -696,19 +697,19 @@ bash scripts/usage-probe.sh
   改在 `App` 顶层按 `scrollY / (scrollHeight - innerHeight)` 计算，与段落顺序无关；
   螺旋段自己的投影动画仍用段内比例，没有改。
 - **首页内容栏目顺序 = 管理端导航顺序**：`src/utils/navOrder.ts` 的 `orderHomeSections(navItems)` 是纯函数
-  （闸门：`nav_order.test.mjs`），首页四段按它渲染；导航里没有的段落**排到末尾而不是消失**，
+  （闸门：`test/nav_order.test.mjs`），首页四段按它渲染；导航里没有的段落**排到末尾而不是消失**，
   外链/未知 id 不参与排版。`visible` 开关只管导航条上那个链接在不在，**不会**把对应段落从页面上删掉——
   段落显隐仍由「站点设置 → 展示偏好」的 `homeStatsVisible` 单独控制（两件事刻意不合并）。
 - **挑战 / 解决方案改为中英双语**（迁移 `0011`）：库里新增 `challenge_json` / `solution_json`（`{en, zh}`），
   沿用 `description_json` 那一套（`EDITABLE_JSON_COLUMNS` + 管理端投影守卫）。
   - **旧单列降级为只读兜底，不双写**：新列为空时把旧列的值当中文（历史内容确实都是中文写的），
-    所以老标本不会因为这次改动整段变空；`bilingual.test.mjs` 锁住这条退化路径。
+    所以老标本不会因为这次改动整段变空；`test/bilingual.test.mjs` 锁住这条退化路径。
   - **"没写过"与"被清空"必须分得开**（本轮实测到反例，早期版本写成两者都回退，会让删除永远不生效）：
     抽屉保存的永远是完整一对，清空后写入 `{"en":"","zh":""}` = **显式空记录，不再回退旧列**；
     只有 `''`、`'{}'`、坏 JSON，以及 `'[]'` / `'null'` / `'0'` / `'"abc"'` 这类垃圾形状才算"没写过"，
     继续用旧列兜底（垃圾形状**不会**被当成正文渲染，页面上不会出现引号或字面量 null）。
     判据只看"整串是不是 JSON"，不看开头是不是数字——否则"3 天内完成迁移"这类正文会被吞掉。
-    闸门：`bilingual.test.mjs`（含 POST/PUT 同一 body 落库一致）。
+    闸门：`test/bilingual.test.mjs`（含 POST/PUT 同一 body 落库一致）。
   - 前台规则与 README 一致：当前语言没有内容时显示另一种语言并标注「中文原文 / ENGLISH 原文」
     （`pickBilingual` 的 `fallback` 标志），两栏都空才显示「尚未记录」。
   - 管理端抽屉里是「中文 / English」两个并排输入框（`BilingualField`），窄屏收成单列。
@@ -722,11 +723,11 @@ bash scripts/usage-probe.sh
     **连「原文」标注都不给**，那是对访客撒谎。猜错的代价只是标注方向反了，可见内容不变。
   - **抽屉里两个简介框去掉了 `required`**：单语填充现在是正常状态，留着 required 等于
     逼管理员编一段翻译才能保存；改为框下说明"至少填一种"。
-  - 闸门：`bilingual.test.mjs`（读侧统一 / 单语配对器 / POST-PUT 同 body 同落库）、
-    `sync_update.test.mjs` case 4a/4a2（英文描述只进 en、中文描述只进 zh）。
+  - 闸门：`test/bilingual.test.mjs`（读侧统一 / 单语配对器 / POST-PUT 同 body 同落库）、
+    `test/sync_update.test.mjs` case 4a/4a2（英文描述只进 en、中文描述只进 zh）。
 - **同步可以只挑几个标本**：`POST /api/admin/github-sync` 现在接受可选 `ids`（参数化 `IN` 列表）。
   - 语义：**省略 = 全表**（老行为不变）；**空数组 = 400 拒绝**，绝不退化成全表——
-    那会变成"界面显示选了 0 个、实际把整个馆藏都刷了一遍"的假状态（闸门：`sync_scope.test.mjs`）。
+    那会变成"界面显示选了 0 个、实际把整个馆藏都刷了一遍"的假状态（闸门：`test/sync_scope.test.mjs`）。
   - 未知 id 只是匹配不到，返回 200 + 空结果，不报错；一次上限 500 条（与 `QUERY_ROW_LIMIT` 同值）。
   - 管理端「GitHub 同步」新增「同步范围」勾选卡：默认全选（等价于以前点一下按钮的效果），
     另有全选 / 反选 / 清空，按钮上直接写「(${N})」，一个都没选时按钮禁用并说明原因。

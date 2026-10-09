@@ -8,7 +8,7 @@ import { strict as assert } from 'node:assert'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 
-const HERE = dirname(fileURLToPath(import.meta.url))
+const HERE = join(dirname(fileURLToPath(import.meta.url)), '..')
 const url = (...parts) => pathToFileURL(join(HERE, ...parts)).href
 
 const rules = await import(url('src', 'utils', 'previewRules.ts'))
