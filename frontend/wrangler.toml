@@ -18,9 +18,13 @@ binding = "DB"
 database_name = "nestspace-prod"
 database_id = "5e61e41e-0554-4ec4-8516-ee5f66a5f11d"
 
-# 匿名使用度量（POST /api/usage 写入；事件白名单见 worker 的 USAGE_EVENTS）
-# 用 Analytics Engine 而不是新开 D1 表：免费额度内、无需迁移、不存个人数据。
+# 匿名使用度量（POST /api/usage 写入；事件白名单见 worker 的 USAGE_EVENTS）。
+# **刻意不声明 [[analytics_engine_datasets]] 绑定**：该绑定要求账号先启用 Analytics Engine，
+# 未启用时 wrangler deploy 会直接失败（code 10089: You need to enable Analytics Engine），
+# 而本地 wrangler dev 是模拟绑定、测不出这个问题（只在 deploy 时炸）。
+# 代码侧把它当可选（Env.METRICS? + try/catch），绑定缺失时 /api/usage 降级为 no-op，不影响访客。
+# 要真正收数：在控制台启用 Analytics Engine（免费，10 万写入/天）后把下面三行加回来再部署：
+#   [[analytics_engine_datasets]]
+#   binding = "METRICS"
+#   dataset = "nestspace_usage"
 # 查询：npx wrangler analytics query nestspace_usage --since 7d
-[[analytics_engine_datasets]]
-binding = "METRICS"
-dataset = "nestspace_usage"

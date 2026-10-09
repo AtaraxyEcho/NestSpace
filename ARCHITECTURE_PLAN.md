@@ -433,10 +433,11 @@ binding = "DB"
 database_name = "nestspace-prod"
 database_id = "<你的_D1_DATABASE_ID>"
 
-# 匿名使用度量：绑定缺失时埋点整条降级为 no-op（不需要为它做迁移）
-[[analytics_engine_datasets]]
-binding = "METRICS"
-dataset = "nestspace_usage"
+# 匿名使用度量：**默认不声明**该绑定——它要求账号先启用 Analytics Engine，否则
+# wrangler deploy 会失败（code 10089）；启用后取消注释即可收数，缺省时埋点降级为 no-op。
+# [[analytics_engine_datasets]]
+# binding = "METRICS"
+# dataset = "nestspace_usage"
 ```
 
 ### 7.2 部署步骤命令链

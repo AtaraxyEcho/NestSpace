@@ -44,7 +44,7 @@ NestSpace/
 │   ├── nav_order.test.mjs        # 首页栏目顺序 = 导航顺序（缺项兜底 / 脏输入退化）
 │   ├── bilingual.test.mjs        # 挑战/方案双语读侧：新列优先、旧列中文兜底、坏 JSON 不抛错、回退标注
 │   ├── sync_scope.test.mjs       # 同步范围 ids：省略=全表、空数组=拒绝、形态与上限、去重
-│   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定 + Analytics Engine 数据集（本地与 Git 构建共用）
+│   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（Analytics Engine 数据集默认注释、按需开启）
 │   └── package.json
 │
 ├── migrations/                   # Cloudflare D1 边缘数据库建表与种子数据
@@ -621,12 +621,17 @@ bash scripts/usage-probe.sh
   并标注「原文」；DEPLOYMENT tab 展示 dev/prod Compose 原文并可复制。详情页由 `ProjectRoute` 按 id 自行
   拉取，深链或刷新时先显示骨架、查不到则给出「未找到标本」页，不再闪回首页。
 
-## 七、 匿名使用度量（Analytics Engine，免费、无迁移）
+## 七、 匿名使用度量（Analytics Engine，免费、无迁移；默认关闭）
 
 改版前先回答一句"怎么知道有没有变好"。此前整站**零度量**，所有判断只能靠专家走查，所以这轮补了三个聚合事件。
 
+- ⚠️ **默认不挂绑定（重要）**：`frontend/wrangler.toml` 里的 `[[analytics_engine_datasets]]` 是**注释掉的**。
+  该绑定要求账号先启用 Analytics Engine，未启用时 `wrangler deploy` 会直接失败
+  （`code 10089: You need to enable Analytics Engine`）——而本地 `wrangler dev` 是模拟绑定，测不出这个问题，
+  只在部署时才炸（本项目已踩过一次）。默认部署因此不带它，`/api/usage` 降级为 no-op、站点行为不变。
+  **要真正收数**：控制台启用 Analytics Engine（免费，10 万写入/天）后把三行取消注释再部署。
 - **为什么用 Analytics Engine 而不是新开 D1 表**：免费额度每天 10 万个数据点（约合每月 300 万）足够、**不需要数据库迁移**
-  （因此不涉及生产写库）、数据天然按时间分桶。数据集 `nestspace_usage`，绑定名 `METRICS`（见 `frontend/wrangler.toml`）。
+  （因此不涉及生产写库）、数据天然按时间分桶。数据集 `nestspace_usage`，绑定名 `METRICS`。
 - **收什么**（白名单在 `worker/index.ts` 的 `USAGE_EVENTS`，白名单外一律 **400**，`preview_rules.test.mjs` 会核对这份表）：
   | 事件 | 方式（`m`） | 回答的问题 |
   | --- | --- | --- |
