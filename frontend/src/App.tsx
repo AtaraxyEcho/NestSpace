@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { Language, Project, ProjectStatus } from "./types/project"
 import { fallbackProjects as projects } from "./data/fallbackProjects"
 import { DEFAULT_SITE_SETTINGS, DEFAULT_NAV_ITEMS } from "./data/defaultSiteSettings"
@@ -2550,12 +2550,12 @@ function AdminPage({
   // 每次打开抽屉（切换项目或新建）时，把数组字段摊平成可编辑文本
   useEffect(() => {
     if (!editing) return
-    setFeaturesText(editing.features.join("\n"))
+    setFeaturesText((editing.features ?? []).join("\n"))
     setMetricsText(
-      editing.metrics.map((metric) => `${metric.label} | ${metric.value}`).join("\n"),
+      (editing.metrics ?? []).map((metric) => `${metric.label} | ${metric.value}`).join("\n"),
     )
     setTimelineText(
-      editing.timeline
+      (editing.timeline ?? [])
         .map((event) => `${event.date} | ${event.title} | ${event.note}`)
         .join("\n"),
     )
@@ -5066,6 +5066,9 @@ function PreviewGallery({
   const [zoom, setZoom] = useState<number | null>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const zoomRef = useRef<HTMLDivElement>(null)
+  // 打开放大层的那个元素：必须在这里（打开时）记，不能等 effect 里读 document.activeElement
+  // ——放大层里的关闭按钮带 autoFocus，effect 跑到时焦点已经不在调用方身上了。
+  const zoomOpenerRef = useRef<HTMLElement | null>(null)
   const dragX = useRef<number | null>(null)
   const dragged = useRef(false)
 
@@ -5095,8 +5098,6 @@ function PreviewGallery({
   useEffect(() => {
     if (zoom === null) return
     const previous = document.body.style.overflow
-    // 记下打开它的那张牌，关闭后把焦点还回去（键盘用户不会掉回页面顶部）
-    const opener = document.activeElement as HTMLElement | null
     document.body.style.overflow = "hidden"
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -5139,7 +5140,8 @@ function PreviewGallery({
     return () => {
       document.body.style.overflow = previous
       document.removeEventListener("keydown", onKeyDown)
-      opener?.focus?.()
+      // 关闭后把焦点还给打开它的那张牌（键盘用户不会掉回页面顶部）
+      zoomOpenerRef.current?.focus?.()
     }
   }, [zoom, albumKey])
 
@@ -5196,6 +5198,7 @@ function PreviewGallery({
 
   const openZoom = () => {
     if (zoom === null) trackUsage("deck", "zoom")
+    zoomOpenerRef.current = document.activeElement as HTMLElement | null
     setZoom(safeActive)
   }
 
@@ -5767,7 +5770,9 @@ export default function App() {
     document.documentElement.lang = language === "zh" ? "zh-CN" : "en"
   }, [language])
 
-  useEffect(() => {
+  // useLayoutEffect 而不是 useEffect：这个跳转必须在**首次绘制之前**发生，
+  // 否则生产站点访问 #admin 会先闪一下公开首页再跳走（routeFromHash 如今只做纯解析、不再在渲染期跳转）。
+  useLayoutEffect(() => {
     // 生产环境中，若在公开主站通过 #admin 访问后台，平滑跳转到受 Zero Trust 保护的专属子域名
     const checkRedirect = () => {
       if (

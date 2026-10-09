@@ -119,6 +119,7 @@ export async function fetchAdminSiteSettings(): Promise<{ success: boolean; data
       headers: getAuthHeaders(),
     })
 
+    clearTokenIfUnauthorized(res.status)
     if (!res.ok) {
       return { success: false, error: `服务器响应异常: ${res.status}` }
     }
