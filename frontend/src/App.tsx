@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { Language, Project, ProjectStatus } from "./types/project"
+import { fallbackProjects as projects } from "./data/fallbackProjects"
 import { DEFAULT_SITE_SETTINGS, DEFAULT_NAV_ITEMS } from "./data/defaultSiteSettings"
 import { fetchPublicProjects, fetchSiteSettings, fetchPublicProjectById } from "./api/client"
 import {
@@ -5641,9 +5642,9 @@ export default function App() {
   const [language, setLanguage] = useState<Language>(detectBrowserLanguage)
   const [dark, setDark] = useState(detectSystemTheme)
   const [route, setRoute] = useState(routeFromHash(window.location.hash))
-  // 公开列表**从空开始**：以前用内置的 4 条示例标本当初始值，首屏就先渲染假数据，
-  // 接口 500 或后台把项目全下架（合法的空结果）时那批假标本会一直留着。
-  const [items, setItems] = useState<Project[]>([])
+  // 内置演示标本：首屏立即有内容（不等接口），接口不可达时也仍有东西可看。
+  // 注意它只是**占位/兜底**，不是「接口返回空就当非空」——成功响应（含空数组）一律采纳，见 refreshPublicData。
+  const [items, setItems] = useState<Project[]>(projects)
   // 管理端单独一份行数据：**不能与公开站共用 items**。
   // /api/projects 是对外投影（camel、不含 readme_zh / compose_* / internal_notes / sort_order /
   // preview_images_json 这些抽屉要绑的原始列名），而 refreshPublicData 会在标签页重新聚焦时覆盖 items。
@@ -5888,8 +5889,9 @@ export default function App() {
   }
 
   const homeSections = orderHomeSections(effectiveSettings.navItems)
-  // 馆藏为空（后台把项目全下架 / 首次加载）时不再拿内置示例顶替：
+  // 接口**明确回报空馆藏**时（后台把项目全下架）不再拿内置示例顶着说"有数据"：
   // 只留下不依赖数据的「馆长手记」，并给一句明确的空状态说明。
+  // 接口失败时 items 保持不动（首屏的内置示例继续显示），所以空状态只代表"服务端说空"。
   const collectionEmpty = settingsResolved && items.length === 0
   const shownSections = collectionEmpty
     ? homeSections.filter((id) => id === "curator")
