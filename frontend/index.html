@@ -9,6 +9,11 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300..800;1,300..800&display=swap" rel="stylesheet" />
     <!-- figma:head-end -->
+    <!-- 规范地址与社交卡片：单域名站点，写死生产 origin（与 App.tsx 里 admin 子域跳转、部署手册一致）。
+         放在 figma 标记之外，构建插件不会覆盖。 -->
+    <link rel="canonical" href="https://nestspace.online/" />
+    <meta property="og:url" content="https://nestspace.online/" />
+    <meta property="og:type" content="website" />
   </head>
   <body>
     <!-- figma:body-start -->

@@ -328,7 +328,7 @@ app.get('/img', async (c) => {
 // ==========================================
 // 为什么要这一条：本轮改版（观察台 + 批量导入）此前没有任何度量，"有没有让人多看几张图"
 // "批量导入是否真的减少了手工粘贴"都无法回答。这里只收三类聚合事件，**不落 D1、不需要迁移、
-// 不存 IP/UA/cookie/项目 id 以外的任何个人数据**，免费额度（每月 1000 万行）远够用。
+// 不存 IP/UA/cookie/项目 id 以外的任何个人数据**，免费额度每天 10 万个数据点（约合每月 300 万）远够用。
 // 查询：npx wrangler analytics query nestspace_usage（或在 Cloudflare 控制台 Analytics Engine 看）。
 // 绑定缺失时整条降级为 no-op——埋点永远不该让一次页面访问失败。
 
@@ -374,9 +374,14 @@ app.post('/usage', async (c) => {
     }
   }
 
-  // 先量体积再解析：这是个公开无鉴权端点，不能让人用大 body 把 CPU/内存买走
+  // 这是个公开无鉴权端点，不能让人用大 body 把 CPU/内存买走：
+  // 有 Content-Length 就直接按声明拒（连读都不读），没声明才退回按真实字节数判断
+  const declaredLength = Number(c.req.header('Content-Length') ?? '')
+  if (Number.isFinite(declaredLength) && declaredLength > USAGE_BODY_MAX) {
+    return c.json({ error: `请求体过大（上限 ${USAGE_BODY_MAX} 字节）` }, 413)
+  }
   const text = await c.req.text()
-  if (text.length > USAGE_BODY_MAX) {
+  if (new TextEncoder().encode(text).byteLength > USAGE_BODY_MAX) {
     return c.json({ error: `请求体过大（上限 ${USAGE_BODY_MAX} 字节）` }, 413)
   }
   let raw: unknown
@@ -517,7 +522,11 @@ adminApp.use('*', async (c, next) => {
   const authHeader = c.req.header('Authorization') ?? ''
   const providedSecret = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
   const expectedSecret = c.env.ADMIN_SECRET_KEY ?? ''
-  if (providedSecret && expectedSecret && timingSafeEqual(providedSecret, expectedSecret)) {
+  if (
+    providedSecret &&
+    expectedSecret &&
+    (await timingSafeEqual(providedSecret, expectedSecret))
+  ) {
     authFailures.delete(key)
     await next()
     return
@@ -657,9 +666,10 @@ adminApp.post('/projects', async (c) => {
       normalizeJsonValue('challenge', body.challenge),
       normalizeJsonValue('solution', body.solution),
       normalizeJsonValue('description', body.description),
-      JSON.stringify(body.features || []),
-      JSON.stringify(body.metrics || []),
-      JSON.stringify(body.timeline || []),
+      // 与 PUT 共用同一份判据（列表列缺失/非数组都落成 "[]"，两条写路径不再落不同 JSON）
+      normalizeJsonValue('features', body.features),
+      normalizeJsonValue('metrics', body.metrics),
+      normalizeJsonValue('timeline', body.timeline),
       body.internal_notes || '',
       body.sort_order || 0,
       previewImageUrl,
@@ -737,9 +747,16 @@ export const EDITABLE_JSON_COLUMNS: Record<string, string> = {
  * （同一请求体在两条路径落库不同）。双语两列尤其不能直接 stringify：
  * 脚本/curl 传一个纯字符串过来时，原样存成 `"abc"`，下次读出来会带着一对引号进 UI。
  */
+/** 列表型 JSON 列：合法值必须是数组，其余（undefined / null / 标量）一律落成空数组 */
+const LIST_JSON_FIELDS = new Set(['features', 'metrics', 'timeline'])
+
 export function normalizeJsonValue(field: string, value: unknown): string {
   if (field === 'challenge' || field === 'solution' || field === 'description') {
     return JSON.stringify(asBilingual(value))
+  }
+  // 与 POST 同一份判据：列表列不允许落成 "null"（读侧 JSON.parse 出来是 null 会让前端 .length 崩）
+  if (LIST_JSON_FIELDS.has(field)) {
+    return JSON.stringify(Array.isArray(value) ? value : [])
   }
   return JSON.stringify(value ?? null)
 }
@@ -1992,8 +2009,14 @@ adminApp.post('/github-import', async (c) => {
     }
     const repoData: any = await repoRes.json()
 
-    // 检查是否已收录
-    const existing: any = await c.env.DB.prepare('SELECT id FROM projects WHERE repository LIKE ?').bind(`%${owner}/${repo}%`).first()
+    // 检查是否已收录。LIKE 的通配符必须先转义：仓库名里的 `_` 是合法字符，
+    // 不转义就会把 my_repo 当成 myXrepo 匹配（误判"已收录"）。
+    const likePattern = `%${owner}/${repo}%`.replace(/[\\%_]/g, (ch) => `\\${ch}`)
+    const existing: any = await c.env.DB.prepare(
+      `SELECT id FROM projects WHERE repository LIKE ? ESCAPE '\\'`,
+    )
+      .bind(likePattern)
+      .first()
     if (existing) {
       return c.json({ error: `该仓库已作为标本 SPEC—${existing.id} 收录，无需重复导入` }, 400)
     }
@@ -2328,15 +2351,21 @@ function safeJsonParse(jsonStr: string | null | undefined, fallback: any) {
   }
 }
 
-/** 常量时间字符串比较（仅在长度一致时执行全长度异或比对） */
-function timingSafeEqual(a: string, b: string): boolean {
-  const bufA = new TextEncoder().encode(a)
-  const bufB = new TextEncoder().encode(b)
-  if (bufA.byteLength !== bufB.byteLength) return false
+/**
+ * 常量时间字符串比较：先各自 SHA-256 再逐字节异或。
+ * 不能"长度不等就提前 return"——那会让攻击者用响应时间量出口令长度（长度旁路）。
+ * 摘要长度固定 32 字节，比较循环长度恒定，长度信息被抹平。
+ */
+async function timingSafeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder()
+  const [da, db] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(a)),
+    crypto.subtle.digest('SHA-256', enc.encode(b)),
+  ])
+  const va = new Uint8Array(da)
+  const vb = new Uint8Array(db)
   let diff = 0
-  for (let i = 0; i < bufA.byteLength; i++) {
-    diff |= bufA[i] ^ bufB[i]
-  }
+  for (let i = 0; i < va.length; i++) diff |= va[i] ^ vb[i]
   return diff === 0
 }
 
@@ -2420,6 +2449,10 @@ export async function verifyAccessJwt(
   if (typeof payload.iat !== 'number' || payload.iat > now + 60) {
     return { valid: false, reason: 'bad_iat' }
   }
+  // nbf（not-before，可选声明）：出现且明显领先于当前时间时拒绝，同样留 30 秒时钟偏移
+  if (typeof payload.nbf === 'number' && payload.nbf > now + 30) {
+    return { valid: false, reason: 'not_yet_valid' }
+  }
 
   let jwks = await fetchAccessCerts(teamName)
   let jwk = jwks[header.kid]
@@ -2490,23 +2523,24 @@ function escapeHtmlAttribute(value: string): string {
 
 function injectSeoOverrides(html: string, seo: SeoOverrides): string {
   let out = html
+  // 一律用替换函数、不用替换串：文案里出现 $& / $' / $1 时，替换串会把它当成"引用匹配到的内容"改写坏
   if (seo.title) {
     const title = escapeHtmlAttribute(seo.title)
-    out = out.replace(/<title>[\s\S]*?<\/title>/i, `<title>${title}</title>`)
+    out = out.replace(/<title>[\s\S]*?<\/title>/i, () => `<title>${title}</title>`)
     out = out.replace(
       /<meta property="og:title"[^>]*>/i,
-      `<meta property="og:title" content="${title}" />`,
+      () => `<meta property="og:title" content="${title}" />`,
     )
   }
   if (seo.description) {
     const description = escapeHtmlAttribute(seo.description)
     out = out.replace(
       /<meta name="description"[^>]*>/i,
-      `<meta name="description" content="${description}" />`,
+      () => `<meta name="description" content="${description}" />`,
     )
     out = out.replace(
       /<meta property="og:description"[^>]*>/i,
-      `<meta property="og:description" content="${description}" />`,
+      () => `<meta property="og:description" content="${description}" />`,
     )
   }
   return out
