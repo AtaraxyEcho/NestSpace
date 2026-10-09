@@ -1,21 +1,51 @@
 #!/usr/bin/env bash
-# 一次性把本地 Worker 起在 8899（用默认 .wrangler/state 副本，绝不碰生产），
-# 探完 /api/usage 的接受与拒绝、/api/img 的缩略图档，然后关掉**我自己**启的进程。
+# 一次性把本地 Worker 起在 8898（用默认 .wrangler/state，绝不碰生产），探完
+# /api/usage 的接受与拒绝、/api/img 的缩略图档、管理端写路径与双语写读往返，
+# 最后把**我自己**起的进程连同子进程收干净（并把探针写过的种子行复原）。
 set -u
 export LANG=C.UTF-8
-cd "D:/Development/Project Collection/NestSpace/frontend" || exit 1
+# 路径全部相对脚本自身解析，不再写死本机绝对路径（换机器/换用户名都能跑）
+ROOT="$(cd "$(dirname "$0")/.." && pwd -W 2>/dev/null || pwd)"
+cd "$ROOT/frontend" || exit 1
+# 中间文件统一放仓库根的 .tmp-probe/（已被 .gitignore 的 .tmp-* 覆盖）。
+# 注意别用 /tmp：原生 node 读不懂 MSYS 的 /tmp 路径
+WORK="$ROOT/.tmp-probe"
+mkdir -p "$WORK"
 
 echo "== build（dist 必须是最新的，否则 wrangler 报 no such asset）=="
 npm run build >/dev/null 2>&1 || { echo "BUILD FAILED"; exit 1; }
 
-PORT=8898
-LOG="C:/Users/Ataraxy/AppData/Local/Temp/wrangler-usage.log"
+PORT="${PROBE_PORT:-8898}"
+LOG="$WORK/wrangler-usage.log"
 npx wrangler dev --port "$PORT" --log-level warn > "$LOG" 2>&1 &
-DEV_PID=$!
 cleanup() {
-  kill "$DEV_PID" >/dev/null 2>&1 || true
-  wait "$DEV_PID" 2>/dev/null || true
-  echo "== dev worker (pid $DEV_PID) stopped =="
+  # Windows 下 wrangler dev 的进程树是 bash→cmd→node→node→workerd 多层，
+  # 而且 $! 抓到的外层 PID 常常不是这棵树的根（实测收不干净、workerd 会被 supervisor 重新拉起）。
+  # 所以主收路径交给 PowerShell：按**端口**精确匹配这一支
+  #   - wrangler 的 node 进程命令行含 `--port <PORT>`
+  #   - workerd 的进程命令行含 `<127.0.0.1:PORT>`
+  # 再连带它们的子进程一并收，循环三轮吃掉被重新拉起的子进程。只匹配本端口，不动别人的服务。
+  powershell.exe -NoProfile -Command "
+    for (\$i = 0; \$i -lt 3; \$i++) {
+      \$hit = @(Get-CimInstance Win32_Process | Where-Object {
+        (\$_.Name -eq 'workerd.exe' -or \$_.CommandLine -match 'wrangler') -and
+        (\$_.CommandLine -like \"*--port $PORT*\" -or \$_.CommandLine -like \"*:$PORT*\")
+      })
+      \$pids = @(\$hit | ForEach-Object { \$_.ProcessId })
+      \$kids = @(Get-CimInstance Win32_Process | Where-Object { \$pids -contains \$_.ParentProcessId })
+      \$all = @(\$pids + (\$kids | ForEach-Object { \$_.ProcessId })) | Sort-Object -Unique
+      if (\$all.Count -eq 0) { break }
+      \$all | ForEach-Object { Stop-Process -Id \$_ -Force -ErrorAction SilentlyContinue }
+      Start-Sleep -Milliseconds 600
+    }
+  " >/dev/null 2>&1 || true
+  sleep 1
+  if netstat -ano 2>/dev/null | tr -d '\r' | grep -i LISTENING | grep -q ":$PORT "; then
+    echo "!! 警告：端口 $PORT 仍被占用，请手动清理后再跑"
+  else
+    echo "== dev worker 已停止，端口 $PORT 已释放 =="
+  fi
+  rm -rf "$WORK"
 }
 trap cleanup EXIT
 
@@ -28,8 +58,8 @@ done
 probe() {
   local label="$1"; shift
   local code
-  code=$(curl -s -D "C:/Users/Ataraxy/AppData/Local/Temp/usage-head.txt" \
-    -o "C:/Users/Ataraxy/AppData/Local/Temp/usage-body.bin" -w '%{http_code}' "$@")
+  code=$(curl -s -D "$WORK/usage-head.txt" \
+    -o "$WORK/usage-body.bin" -w '%{http_code}' "$@")
   # 响应体可能是二进制图片：只留可打印字符（含中文，Git Bash 的 [:print:] 会把 CJK 全滤掉）
   local peek ctype
   peek=$(node -e '
@@ -37,8 +67,8 @@ probe() {
     process.stdout.write(
       b.toString("utf8").replace(/[^\x20-\x7E\u3000-\u9fff\uff00-\uffef]/g, "").slice(0, 160),
     )
-  ' "C:/Users/Ataraxy/AppData/Local/Temp/usage-body.bin" 2>/dev/null)
-  ctype=$(tr -d '\r' < "C:/Users/Ataraxy/AppData/Local/Temp/usage-head.txt" | grep -ai '^content-type:' | head -1 | cut -d' ' -f2-)
+  ' "$WORK/usage-body.bin" 2>/dev/null)
+  ctype=$(tr -d '\r' < "$WORK/usage-head.txt" | grep -ai '^content-type:' | head -1 | cut -d' ' -f2-)
   echo "$label -> HTTP $code | ${ctype:-无Content-Type} | ${peek:0:140}"
 }
 
@@ -61,7 +91,7 @@ probe "白名单外方式(要400) " -X POST "http://127.0.0.1:$PORT/api/usage" \
 probe "非 JSON（要 400）   " -X POST "http://127.0.0.1:$PORT/api/usage" \
   -H 'Content-Type: text/plain' --data-raw 'hello'
 # 公开无鉴权端点必须有体积上限：先量体积再解析，否则一个大 body 就能把 CPU 买走
-BIG="C:/Users/Ataraxy/AppData/Local/Temp/probe-big.txt"
+BIG="$WORK/probe-big.txt"
 node -e 'require("fs").writeFileSync(process.argv[1], "x".repeat(4096))' "$BIG"
 probe "超大 body（要 413）  " -X POST "http://127.0.0.1:$PORT/api/usage" \
   -H 'Content-Type: text/plain' --data-binary "@$BIG"
@@ -72,11 +102,11 @@ SRC="https://raw.githubusercontent.com/AtaraxyEcho/OmniNest/main/imgs/desktop/ad
 ENC=$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$SRC")
 for W in 200 1600 2000; do
   probe "w=$W" "http://127.0.0.1:$PORT/api/img?w=$W&src=$ENC"
-  tr -d '\r' < "C:/Users/Ataraxy/AppData/Local/Temp/usage-head.txt" | grep -ai '^location:\|^x-image-source:\|^cache-control:' | sed 's/^/      /'
+  tr -d '\r' < "$WORK/usage-head.txt" | grep -ai '^location:\|^x-image-source:\|^cache-control:' | sed 's/^/      /'
 done
 echo "      跟随一跳看真实取回（-L，最多 3 跳）："
 for W in 200 1600; do
-  code=$(curl -sL --max-redirs 3 -o "C:/Users/Ataraxy/AppData/Local/Temp/img-$W.bin" -w '%{http_code} %{content_type} %{size_download}B %{time_total}s' \
+  code=$(curl -sL --max-redirs 3 -o "$WORK/img-$W.bin" -w '%{http_code} %{content_type} %{size_download}B %{time_total}s' \
     "http://127.0.0.1:$PORT/api/img?w=$W&src=$ENC")
   echo "      w=$W -> $code"
 done
@@ -93,7 +123,7 @@ if [ -z "$TOKEN" ]; then
   probe "PUT 无鉴权（要 401）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
     -H 'Content-Type: application/json' --data-raw '{"preview_images_json":"[]"}'
 else
-  BODY="C:/Users/Ataraxy/AppData/Local/Temp/admin-body.json"
+  BODY="$WORK/admin-body.json"
   # 管理端列表返回的是裸数组（没有 {success,data} 包装），也没有 GET /projects/:id
   admin_list() {
     curl -s "http://127.0.0.1:$PORT/api/admin/projects" -H "Authorization: Bearer $TOKEN"
@@ -209,8 +239,8 @@ if [ -n "$TOKEN" ]; then
 
   # 载荷由 scripts/probe-bilingual-payload.mjs 生成（UTF-8 源文件），不在 bash 里内联中文：
   # Git Bash 会按本地码页改写命令行里的 CJK，内联写法会让探针自己造出乱码再误判接口。
-  PAIRFILE="C:/Users/Ataraxy/AppData/Local/Temp/probe-pair.json"
-  node "D:/Development/Project Collection/NestSpace/scripts/probe-bilingual-payload.mjs" "$PAIRFILE" >/dev/null
+  PAIRFILE="$WORK/probe-pair.json"
+  node "$ROOT/scripts/probe-bilingual-payload.mjs" "$PAIRFILE" >/dev/null
   probe "PUT 双语对（要 200）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/$TARGET" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     --data-binary "@$PAIRFILE"
@@ -231,7 +261,7 @@ if [ -n "$TOKEN" ]; then
   # 码页改写，含中文的 JSON 走 `--data-raw "$VAR"` 出去时已成乱码（实测把乱码写进了本地 001 的简介，
   # 已用 repair SQL 修回）。变量/管道里的字节是安全的，只有 argv 不是。
   # 复原写的是"探针前解析后的可见内容"（expect）而不是空对：新语义下显式空对 = 主动清空。
-  RESTORE_FILE="C:/Users/Ataraxy/AppData/Local/Temp/probe-restore.json"
+  RESTORE_FILE="$WORK/probe-restore.json"
   node -e '
     const r = JSON.parse(process.argv[1])
     require("fs").writeFileSync(process.argv[2], JSON.stringify({
@@ -266,7 +296,7 @@ if [ -n "$TOKEN" ]; then
     const ok = ids.length === 1 && ids[0] === process.argv[2]
     console.log(`  返回 ${ids.length} 条 [${ids.join(",")}]：`, ok ? "只跑了选中的那个" : "范围不对",
       `（status=${(j.results || [])[0]?.status}，配额/skipped 不影响范围判定）`)
-  ' "C:/Users/Ataraxy/AppData/Local/Temp/usage-body.bin" "$ONE"
+  ' "$WORK/usage-body.bin" "$ONE"
   probe "ids 为空数组（要 400，不能退化成全表）" -X POST "http://127.0.0.1:$PORT/api/admin/github-sync" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' --data-raw '{"ids":[]}'
   probe "ids 形态不对（要 400）" -X POST "http://127.0.0.1:$PORT/api/admin/github-sync" \
@@ -276,7 +306,7 @@ if [ -n "$TOKEN" ]; then
   node -e '
     const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
     console.log("  未知 id 返回条数：", (j.results || []).length, "（应为 0；参数化 IN 不该报错）")
-  ' "C:/Users/Ataraxy/AppData/Local/Temp/usage-body.bin"
+  ' "$WORK/usage-body.bin"
 fi
 
 echo
