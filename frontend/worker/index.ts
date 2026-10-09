@@ -391,7 +391,9 @@ app.post('/usage', async (c) => {
     return c.json({ error: '请求体不是合法的 JSON' }, 400)
   }
   const event = (raw as Record<string, unknown>)?.e
-  if (typeof event !== 'string' || !USAGE_EVENTS[event]) {
+  // hasOwnProperty 而不是直接取下标：USAGE_EVENTS 是普通对象字面量，
+  // 用下标判白名单会让 __proto__ / constructor / toString 这类原型键混进来（后者.includes 还会抛 500）
+  if (typeof event !== 'string' || !Object.prototype.hasOwnProperty.call(USAGE_EVENTS, event)) {
     return c.json({ error: `未知事件：${String(event).slice(0, 32)}` }, 400)
   }
   const method = (raw as Record<string, unknown>)?.m
@@ -920,6 +922,16 @@ async function isRateLimited(res: Response): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/**
+ * 仓库查重用的 LIKE 模式：**只转义 owner/repo 里的通配符，两端留作通配**。
+ * 把两端的 % 也一起转义会得到字面量 `\%owner/repo\%`，命中 0 行、查重彻底失效
+ * （踩过一次：重复导入检测形同虚设）。sync_update.test.mjs 有闸门盯着这个形状。
+ */
+export function buildRepoLikePattern(owner: string, repo: string): string {
+  const escaped = `${owner}/${repo}`.replace(/[\\%_]/g, (ch) => `\\${ch}`)
+  return `%${escaped}%`
 }
 
 /** 星数展示口径的唯一实现点：≥1000 用一位小数的 k，否则原样 */
@@ -2009,9 +2021,8 @@ adminApp.post('/github-import', async (c) => {
     }
     const repoData: any = await repoRes.json()
 
-    // 检查是否已收录。LIKE 的通配符必须先转义：仓库名里的 `_` 是合法字符，
-    // 不转义就会把 my_repo 当成 myXrepo 匹配（误判"已收录"）。
-    const likePattern = `%${owner}/${repo}%`.replace(/[\\%_]/g, (ch) => `\\${ch}`)
+    // 检查是否已收录（模式构造见 buildRepoLikePattern：两端留通配、只转义中间的通配符）
+    const likePattern = buildRepoLikePattern(owner, repo)
     const existing: any = await c.env.DB.prepare(
       `SELECT id FROM projects WHERE repository LIKE ? ESCAPE '\\'`,
     )

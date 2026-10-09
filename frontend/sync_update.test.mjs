@@ -26,6 +26,7 @@ const {
   EDITABLE_COLUMNS,
   EDITABLE_JSON_COLUMNS,
   resolveRepoAssetUrl,
+  buildRepoLikePattern,
 } = await import(ROUTE_URL)
 
 // 封面 = 相册第一张（生产代码只维护 extractPreviewImages 一处实现）
@@ -193,6 +194,14 @@ assert.equal(parseGithubRepo('https://github.com/../etc/passwd'), null, 'case 6j
 assert.equal(isNonGithubHost('gitlab.com/o/r'), true, 'case 7a: 识别非 GitHub 主机')
 assert.equal(isNonGithubHost('o/r'), false, 'case 7b: 无主机名不算')
 assert.equal(isNonGithubHost('github.com/o/r'), false, 'case 7c: github.com 不算')
+
+// 查重用的 LIKE 模式形状：两端必须是**真通配符**，只转义中间的 owner/repo。
+// 反例（曾写错）：连两端一起转义 → `\%o/r\%`，LIKE 变成字面量匹配，命中 0 行、查重失效。
+const likePattern = buildRepoLikePattern('AtaraxyEcho', 'my_repo')
+assert.equal(likePattern, '%AtaraxyEcho/my\\_repo%', 'case 7d: 两端留通配符，中间的 _ 被转义')
+assert.ok(likePattern.startsWith('%') && !likePattern.startsWith('\\%'), 'case 7e: 开头的 % 不能被转义')
+assert.ok(likePattern.endsWith('%') && !likePattern.endsWith('\\%'), 'case 7f: 结尾的 % 不能被转义')
+assert.equal(buildRepoLikePattern('o', 'a%b'), '%o/a\\%b%', 'case 7g: 中间出现的 % 也要转义')
 
 // ============================================
 // 5. 时间线：由 GitHub 事实生成（建档 / Release / 最近推送）
