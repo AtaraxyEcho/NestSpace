@@ -2,9 +2,11 @@
  * 双语文本（{en, zh}）的读侧规则。Worker 的三个投影与管理端/前台都用这一份，
  * 免得"库里怎么存"在两侧各解释一遍。
  *
- * 为什么需要兜底：`challenge` / `solution` 以前是**单列纯文本**，历史内容基本是中文写的。
- * 0011 加了 `challenge_json` / `solution_json` 之后旧列不再双写，只作只读兜底：
- * 新列"从来没写过"时把旧列当中文，于是老标本不会因为这次改动整段变空。
+ * 为什么需要兜底：`challenge` / `solution` 以前是**单列纯文本**。0011 加了
+ * `challenge_json` / `solution_json` 之后旧列不再双写，只作只读兜底：
+ * 新列"从来没写过"时用旧列，老标本不会因为这次改动整段变空。
+ * 旧列的文字**按内容猜语言**（种子里的挑战/方案是英文，后台手工填的基本是中文）——
+ * 一律当中文会让英文文案在中文视图里冒充中文，猜错的代价只是「原文」标的朝向。
  *
  * "没写过"与"被清空"必须能区分，否则删除永远不生效（本轮实测到的假状态）：
  * 抽屉保存的是完整的一对 → 清空后写入 `{"en":"","zh":""}`（带 en/zh 键）= 明确的空记录，不再回退；
@@ -62,7 +64,7 @@ function classify(raw: unknown): Classified {
 
 /**
  * @param value   新列的值：{en, zh} 对象、它的 JSON 字符串，或空
- * @param legacy  旧单列的纯文本（按中文解释）
+ * @param legacy  旧单列的纯文本（按内容猜语言，见 pairFromSingleText）
  */
 export function asBilingual(value: unknown, legacy?: unknown): BilingualText {
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -71,22 +73,22 @@ export function asBilingual(value: unknown, legacy?: unknown): BilingualText {
   } else if (typeof value === "string") {
     const c = classify(value)
     if (c.kind === "pair") return c.pair
-    if (c.kind === "text") return { en: "", zh: c.text }
+    if (c.kind === "text") return pairFromSingleText(c.text)
   }
   // 旧列走**同一套**判据：历史上有人可能把 JSON 直接写进了旧列
   const fallback = classify(legacy)
   if (fallback.kind === "pair") return fallback.pair
-  if (fallback.kind === "text") return { en: "", zh: fallback.text }
+  if (fallback.kind === "text") return pairFromSingleText(fallback.text)
   return { ...EMPTY }
 }
 
 const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/
 
 /**
- * 仓库只有一句 GitHub description（不分语言）。同塞进两种语言 = 对访客撒谎：
- * 中文站会把英文简介当成"中文文案"显示，且因为"当前语言有内容"而不标原文。
- * 所以按内容猜一种语言填进去，另一种留空 → 由 pickBilingual 回退并标注「原文」。
- * 猜错的代价只是标注方向反了，可见内容不变。
+ * 只有一句、不分语言的文本（仓库的 GitHub description、旧单列兜底）该落到哪一栏。
+ * 同塞进两种语言 = 对访客撒谎：中文站会把英文简介当成"中文文案"显示，
+ * 且因为"当前语言有内容"而不标原文。所以按内容猜一种语言填进去，另一种留空 →
+ * 由 pickBilingual 回退并标注「原文」。猜错的代价只是标注方向反了，可见内容不变。
  */
 export function pairFromSingleText(text: unknown): BilingualText {
   const value = str(text)

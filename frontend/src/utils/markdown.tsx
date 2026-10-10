@@ -1,6 +1,10 @@
 import { Fragment } from 'react'
 import type { ReactNode } from 'react'
-import { joinParagraphLines, splitParagraphLines } from './markdownLines'
+import {
+  exceedsInlineParseLimit,
+  joinParagraphLines,
+  splitParagraphLines,
+} from './markdownLines'
 
 // 极简 Markdown 渲染器：只解析本项目 README 会用到的语法，全程产出 React 元素，
 // 既不解析也不透传任何原始 HTML，因此不存在 HTML 注入面。
@@ -67,6 +71,8 @@ function isBlockStart(line: string): boolean {
 // 因此只对**围栏代码块之外**的行做清理，代码块内的内容一字不动。
 // 行内代码（反引号片段）同样要先摘出来：它常用来演示 <标签> 用法，不能被顺手删掉。
 function stripHtmlNoise(line: string): string {
+  // 超长行直接原样放过：这里的正则在"一长串没有 > 的 <"上会平方级退化（见 markdownLines.ts 的上限说明）
+  if (exceedsInlineParseLimit(line)) return line
   const codeSpans: string[] = []
   const masked = line.replace(/`[^`]*`/g, (span) => {
     codeSpans.push(span)
@@ -257,6 +263,8 @@ function safeUrl(raw: string): string | null {
 const INLINE = /(`[^`]+`)|(!?\[[^\]]*\]\([^)\s]+(?:\s"[^"]*")?\))|(\*\*[^*]+\*\*)|(\*[^*]+\*)/g
 
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
+  // 同上：行内正则对没有闭合符的 [ / * 是平方级扫描，超长段直接按纯文本交出去
+  if (exceedsInlineParseLimit(text)) return [text]
   const nodes: ReactNode[] = []
   let last = 0
   let index = 0

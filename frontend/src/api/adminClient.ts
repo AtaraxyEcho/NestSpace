@@ -1,18 +1,19 @@
 import type { Project } from '../types/project'
 import type { SiteSettings } from '../types/siteSettings'
 import { mergeSiteSettings } from '../data/defaultSiteSettings'
+import { readSession, writeSession, clearSession } from '../utils/safeStorage'
 
 const TOKEN_KEY = 'nestspace_admin_secret'
 
 export function getAdminToken(): string {
-  return sessionStorage.getItem(TOKEN_KEY) || ''
+  return readSession(TOKEN_KEY)
 }
 
 export function setAdminToken(token: string) {
   if (token) {
-    sessionStorage.setItem(TOKEN_KEY, token)
+    writeSession(TOKEN_KEY, token)
   } else {
-    sessionStorage.removeItem(TOKEN_KEY)
+    clearSession(TOKEN_KEY)
   }
 }
 
@@ -111,9 +112,16 @@ export async function saveAdminProject(project: Project, isNew = false): Promise
 }
 
 /**
- * 管理端获取站点文案设置（与默认值合并，空字段以默认文案呈现便于编辑）
+ * 管理端获取站点文案设置（与默认值合并，空字段以默认文案呈现便于编辑）。
+ * `updatedAt` 是单行表的版本戳，不进 SiteSettings（mergeSiteSettings 只遍历内置默认有的键），
+ * 单独返回给保存路径当乐观锁用。
  */
-export async function fetchAdminSiteSettings(): Promise<{ success: boolean; data?: SiteSettings; error?: string }> {
+export async function fetchAdminSiteSettings(): Promise<{
+  success: boolean
+  data?: SiteSettings
+  updatedAt?: string
+  error?: string
+}> {
   try {
     const res = await fetch('/api/admin/site-settings', {
       headers: getAuthHeaders(),
@@ -123,8 +131,8 @@ export async function fetchAdminSiteSettings(): Promise<{ success: boolean; data
     if (!res.ok) {
       return { success: false, error: `服务器响应异常: ${res.status}` }
     }
-    const raw = (await res.json()) as Partial<SiteSettings>
-    return { success: true, data: mergeSiteSettings(raw) }
+    const raw = (await res.json()) as Partial<SiteSettings> & { updatedAt?: string }
+    return { success: true, data: mergeSiteSettings(raw), updatedAt: raw.updatedAt ?? '' }
   } catch (err: any) {
     return { success: false, error: `网络连接失败: ${err.message}` }
   }
@@ -134,24 +142,33 @@ export async function fetchAdminSiteSettings(): Promise<{ success: boolean; data
  * 管理端保存站点文案设置到 D1 数据库。
  * 这个接口本来就是**部分更新**（只写请求体里出现、且在白名单映射里的字段），
  * 所以调用方传"改动的那几列"即可——不要图省事传整份，那会把内置默认抄进库（见 App.tsx saveSettings）。
+ * `expectedUpdatedAt` 是读取时拿到的版本戳；服务端发现库里已被别处写过就返回 409（conflict），
+ * 避免两个标签页互相把对方的改动写回旧值。
  */
 export async function saveAdminSiteSettings(
   settings: Partial<SiteSettings>,
-): Promise<{ success: boolean; error?: string }> {
+  expectedUpdatedAt?: string,
+): Promise<{ success: boolean; error?: string; conflict?: boolean; updatedAt?: string }> {
   try {
     const res = await fetch('/api/admin/site-settings', {
       method: 'PUT',
       headers: getAuthHeaders(),
-      body: JSON.stringify(settings),
+      body: JSON.stringify(
+        expectedUpdatedAt ? { ...settings, expectedUpdatedAt } : settings,
+      ),
     })
 
     clearTokenIfUnauthorized(res.status)
+    const json: any = await res.json().catch(() => ({}))
     if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}))
-      return { success: false, error: (errJson as any).error || `保存失败: HTTP ${res.status}` }
+      return {
+        success: false,
+        conflict: res.status === 409 || json?.conflict === true,
+        error: json?.error || `保存失败: HTTP ${res.status}`,
+      }
     }
 
-    return { success: true }
+    return { success: true, updatedAt: json?.updatedAt ?? '' }
   } catch (err: any) {
     return { success: false, error: `网络异常: ${err.message}` }
   }

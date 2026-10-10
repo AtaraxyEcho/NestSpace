@@ -1,4 +1,3 @@
-@import url("https://fonts.googleapis.com/css2?family=Caveat:wght@500;600&family=EB+Garamond:ital,wght@0,400;0,600;0,700;1,400;1,600&family=JetBrains+Mono:ital,wght@0,300..800;1,300..800&family=Noto+Serif+SC:wght@400;600;700&display=swap");
 @import "tailwindcss";
 
 :root {
@@ -15,6 +14,9 @@
   --line-hair: rgba(42, 38, 32, 0.14);
   --accent: #5a7052;
   --accent-dark: #3a4a38;
+  /* 承载文字的 accent 单独一档：#5a7052 对 bg-base 只有 4.12、对 bg-surface 4.44，不到 AA 的 4.5；
+     这一档 #526649 在三档背景上分别是 4.76 / 5.13 / 5.40。描边与底色仍用 --accent（非文字内容只要 3:1）。 */
+  --accent-text: #526649;
   --red: #a33b2e;
   --tape-a: rgba(218, 204, 170, 0.9);
   --tape-b: rgba(198, 182, 144, 0.75);
@@ -44,10 +46,39 @@
   --line-hair: rgba(232, 223, 208, 0.1);
   --accent: #7a9072;
   --accent-dark: #2c382b;
+  /* 同上：#7a9072 在 bg-elevated 上只有 4.23，文字档取 4.86 的这一步 */
+  --accent-text: #849b7c;
   --red: #c45a48;
   --tape-a: rgba(130, 115, 82, 0.68);
   --tape-b: rgba(101, 88, 62, 0.62);
   color-scheme: dark;
+}
+
+/* 首帧还没打标记时按系统偏好直接上深色。
+   冷启动时 JS 尚未执行，<html> 上还没有 data-theme（App 的 effect 之后才写），
+   只有 CSS 能决定第一帧 —— 光靠 JS 会让系统深色的访客先看到一片浅色。
+   两份深色取值必须一模一样，闸门 shell_guards.test.mjs 会逐项比对（改一处忘另一处就红）。
+   显式设成"日/夜"的站点由 Worker 在 HTML 上注入 data-theme，那时本块不生效（:not([data-theme])）。 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg-base: #1a1814;
+    --bg-surface: #232019;
+    --bg-elevated: #2c2820;
+    --ink-primary: #e8dfd0;
+    --ink-secondary: #b8ab98;
+    --ink-tertiary: #9f9279;
+    --ink-quaternary: #6f6555;
+    --line-default: rgba(232, 223, 208, 0.16);
+    --line-strong: rgba(232, 223, 208, 0.3);
+    --line-hair: rgba(232, 223, 208, 0.1);
+    --accent: #7a9072;
+    --accent-dark: #2c382b;
+    --accent-text: #849b7c;
+    --red: #c45a48;
+    --tape-a: rgba(130, 115, 82, 0.68);
+    --tape-b: rgba(101, 88, 62, 0.62);
+    color-scheme: dark;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -120,7 +151,19 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .wordmark span { color: var(--ink-tertiary); font-weight: 400; }
 .site-header nav { display: flex; height: 100%; align-items: center; gap: 32px; }
-.site-header nav a, .site-header nav .nav-button {
+/* 公开侧降级提示：贴在固定标头下沿，一条小字 + 重试；不遮罩、不动画、不用新颜色 */
+.source-notice {
+  position: fixed; top: 72px; left: 0; right: 0; z-index: 890;
+  display: flex; gap: 14px; align-items: center; justify-content: center;
+  padding: 7px 16px; border-bottom: 1px solid var(--line-strong);
+  background: var(--bg-surface); color: var(--ink-secondary);
+  font: 10px var(--font-mono); letter-spacing: .12em;
+}
+.source-notice button {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: inherit; font: inherit; text-decoration: underline;
+}
+.site-header nav a {
   height: 100%;
   display: grid;
   place-items: center;
@@ -135,11 +178,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .site-header nav a:hover, .site-header nav a.active {
   color: var(--ink-primary);
 }
-.site-header nav a::after, .site-header nav .nav-button::after {
+.site-header nav a::after {
   content: ""; position: absolute; left: 0; right: 0; bottom: 19px; height: 1.5px;
   background: var(--accent); transform: scaleX(0); transition: transform 250ms var(--ease-hover);
 }
-.site-header nav a:hover::after, .site-header nav a.active::after, .site-header nav .nav-button:hover::after {
+.site-header nav a:hover::after, .site-header nav a.active::after {
   transform: scaleX(1);
 }
 .header-tools { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
@@ -149,13 +192,18 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   background: transparent; font: inherit; font-size: 10.5px; letter-spacing: 0.14em; cursor: pointer;
   transition: color 200ms ease;
 }
-.header-tools button:hover { color: var(--accent); }
+.header-tools button:hover { color: var(--accent-text); }
 .page-progress {
   position: absolute; height: 1px; background: var(--accent); left: 0; bottom: -1px; width: 100%;
   transform-origin: left; transform: scaleX(var(--page-progress));
 }
 
-.spiral-scroll { height: 560vh; position: relative; }
+.spiral-scroll {
+  /* 高度跟着件数走：以前固定 560vh 是给 4 件定的，件数一多每件分到的行程被摊薄（40 件时只剩 ~14vh，
+     翻起来就像滑过去而不是翻过去）。步数由 React 给（--spiral-steps = 件数-1），4 件时算出 559.9vh 与改造前逐字相同；
+     上限挡住极端件数下的无意义长滚，动画读的是真实 offsetHeight，所以封顶后映射仍然正确。 */
+  height: calc(100vh + 153.3vh * var(--spiral-steps, 3)); max-height: 1600vh; position: relative;
+}
 .spiral-sticky {
   height: 100vh; position: sticky; top: 0; overflow: hidden;
   isolation: isolate;
@@ -178,12 +226,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .ambient-mark span, .ambient-mark small {
   display: block; font: 8px/1.6 var(--font-mono); letter-spacing: .2em;
 }
-.ambient-mark strong {
+.ambient-mark .ambient-title {
   display: block; margin: 8px 0 0; color: var(--ink-primary);
   font-size: 30px; line-height: .95; letter-spacing: -.03em;
 }
 .ambient-mark em {
-  display: block; margin: 4px 0 12px; color: var(--accent); font-size: 13px; font-style: normal;
+  display: block; margin: 4px 0 12px; color: var(--accent-text); font-size: 13px; font-style: normal;
 }
 .ambient-mark small { padding-top: 10px; border-top: 1px solid var(--line-default); font-size: 8px; }
 .perspective-grid {
@@ -247,7 +295,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
    「View specimen / GitHub」挤出卡片框（实测 4K 档溢出 43px）。所以桌面各档也给简介
    加行数裁剪——与移动端同一套写法，只是行数更多；完整简介在详情页。 */
 .project-copy { padding: 28px 40px 20px; min-width: 0; }
-.latin { margin: 0 0 2px; color: var(--accent); font-size: 17px; font-style: italic; overflow-wrap: anywhere; }
+.latin { margin: 0 0 2px; color: var(--accent-text); font-size: 17px; font-style: italic; overflow-wrap: anywhere; }
 /* 项目名来自仓库/后台填写，长度不受我们控制：一个不换行的长词会横向溢出卡片（卡片没有 overflow:hidden，
    字会爬出边框），而硬把它折成多行又会把下面的按钮顶出去（就是首页那次按钮溢出的同一族）。
    所以两件事一起做：允许在任意处断词 + 名称最多两行，多出来的用省略号收掉。 */
@@ -290,7 +338,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .specimen-rail button::before { content: ""; width: 10px; height: 1px; background: currentColor; position: absolute; left: 0; top: 50%; transition: width 400ms var(--ease-hover); }
 .specimen-rail button span { display: none; }
-.specimen-rail button.active { color: var(--accent); }
+.specimen-rail button.active { color: var(--accent-text); }
 .specimen-rail button.active::before { width: 16px; }
 .gallery-footer {
   position: absolute; z-index: 300; bottom: 24px; left: 40px; right: 40px; display: flex; justify-content: space-between;
@@ -298,7 +346,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .gallery-count { color: var(--ink-primary); font-size: 11px; }
 .gallery-count i { display: inline-block; width: 38px; height: 1px; background: var(--line-strong); margin: 0 10px 3px; }
-.scroll-cue b { font-size: 13px; color: var(--accent); margin-left: 10px; }
+.scroll-cue b { font-size: 13px; color: var(--accent-text); margin-left: 10px; }
 
 .section { min-height: 100vh; padding: 128px max(6vw, 40px) 96px; }
 .section-heading { display: flex; justify-content: space-between; align-items: flex-end; padding-bottom: 30px; border-bottom: 1px solid var(--line-strong); }
@@ -309,7 +357,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .section-heading .as-of { flex: 0 0 auto; white-space: nowrap; }
 .eyebrow, .as-of { font: 9px/1.4 var(--font-mono); letter-spacing: .22em; color: var(--ink-tertiary); }
 .section-heading h2, .curator-copy h2 { font-size: clamp(42px, 4.5vw, 64px); line-height: .96; letter-spacing: -.025em; margin: 13px 0 0; }
-.section-heading h2 em, .curator-copy h2 em { font-size: .38em; font-weight: 400; color: var(--accent); letter-spacing: 0; white-space: nowrap; }
+.section-heading h2 em, .curator-copy h2 em { font-size: .38em; font-weight: 400; color: var(--accent-text); letter-spacing: 0; white-space: nowrap; }
 /* 栏目描述行（管理端「栏目与页面文案」的 home.* 槽位）：不填就不渲染，所以默认版式与改造前一致。
    取值口径照 .timeline-copy p（同一区块里的第二种说明文字），不是新造一套。 */
 .section-heading .section-desc { margin: 14px 0 0; max-width: 420px; font-size: 14px; color: var(--ink-secondary); }
@@ -363,7 +411,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .front-sheet svg { width: 72%; height: 78%; }
 .round-stamp {
   position: absolute; width: 118px; height: 118px; left: 1%; bottom: 8%; border: 2px solid var(--accent); border-radius: 50%;
-  display: grid; place-items: center; text-align: center; transform: rotate(-13deg); color: var(--accent);
+  display: grid; place-items: center; text-align: center; transform: rotate(-13deg); color: var(--accent-text);
   font: 8px/1.8 var(--font-mono); letter-spacing: .16em;
 }
 .floating-label { position: absolute; right: 0; top: 12%; padding: 12px 16px; background: var(--bg-elevated); border: 1px solid var(--line-default); transform: rotate(4deg); font: 14px/1.1 "Caveat", cursive; color: var(--ink-tertiary); }
@@ -380,6 +428,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .curator-copy dd b { display: inline-block; width: 6px; height: 6px; background: var(--accent); border-radius: 50%; margin-right: 6px; }
 
 .index-section { min-height: 95vh; }
+/* 目录检索：件数到达阈值才出现（见 App.tsx 的 INDEX_SEARCH_THRESHOLD），小清单上它只是噪音 */
+.index-search { display: flex; align-items: center; gap: 12px; margin: 22px 0 10px; }
+.index-search-label { font: 9px var(--font-mono); letter-spacing: .2em; color: var(--ink-tertiary); text-transform: uppercase; }
+.index-search input {
+  flex: 1 1 auto; min-width: 0; padding: 9px 12px; border: 1px solid var(--line-default);
+  background: var(--bg-surface); color: var(--ink-primary); font: 12px var(--font-mono); letter-spacing: .06em;
+}
+.index-search small { font: 9px var(--font-mono); letter-spacing: .14em; color: var(--ink-tertiary); }
+.index-empty { margin: 8px 0 0; }
 .index-list { margin-top: 40px; border-top: 1px solid var(--line-strong); perspective: 1000px; }
 .index-row {
   min-height: 108px; display: grid; grid-template-columns: 1fr 3fr 1fr 1.4fr 44px; align-items: center; gap: 24px;
@@ -391,12 +448,12 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .index-row:hover { transform: translateX(14px); background: var(--bg-surface); box-shadow: 3px 4px 0 var(--accent); }
 .index-id, .type-tag, .index-meta { font: 9px var(--font-mono); letter-spacing: .14em; }
 .index-id { color: var(--ink-tertiary); }
-.index-name { display: flex; align-items: baseline; gap: 18px; }
-.index-name strong { font-size: 30px; }
-.index-name em { color: var(--accent); font-size: 14px; }
+.index-name { display: flex; align-items: baseline; gap: 18px; min-width: 0; }
+.index-name strong { font-size: 30px; overflow-wrap: anywhere; }
+.index-name em { color: var(--accent-text); font-size: 14px; }
 .type-tag { width: fit-content; border: 1px solid var(--line-default); padding: 5px 8px; }
 .index-meta i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin-right: 10px; }
-.index-arrow { font-size: 21px; color: var(--accent); text-align: right; }
+.index-arrow { font-size: 21px; color: var(--accent-text); text-align: right; }
 
 .site-footer {
   min-height: 68vh; padding: 96px max(6vw, 40px) 32px; color: #e8dfd0; background: var(--accent-dark);
@@ -432,11 +489,11 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   align-self: flex-start; border: 0; border-bottom: 1px solid var(--line-default); padding: 0 0 8px;
   background: transparent; cursor: pointer; font: 10px var(--font-mono); letter-spacing: .14em; color: var(--ink-tertiary);
 }
-.back-link:hover { color: var(--accent); border-color: var(--accent); }
+.back-link:hover { color: var(--accent-text); border-color: var(--accent); }
 .detail-hero-grid { flex: 1; display: grid; grid-template-columns: 1.1fr .9fr; align-items: center; gap: 9vw; padding: 40px 0; }
 .detail-title .latin { font-size: 19px; margin: 20px 0 7px; }
 .detail-title h1 { margin: 0; font-size: clamp(72px, 10vw, 148px); line-height: .9; letter-spacing: -.055em; font-weight: 600; }
-.detail-cn { margin: 24px 0 0; font: italic 18px "Noto Serif SC", serif; color: var(--accent); }
+.detail-cn { margin: 24px 0 0; font: italic 18px "Noto Serif SC", serif; color: var(--accent-text); }
 .detail-intro { max-width: 600px; margin: 24px 0 0; font-size: 19px; line-height: 1.65; color: var(--ink-secondary); }
 .detail-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 34px; }
 .detail-plate {
@@ -481,7 +538,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .detail-section { padding: var(--section-pad-loose) var(--gutter); border-bottom: 1px solid var(--line-default); }
 .detail-section-label { display: flex; justify-content: space-between; margin-bottom: 64px; font: 10px var(--font-mono); letter-spacing: .16em; color: var(--ink-tertiary); }
 .detail-narrative { display: grid; grid-template-columns: 1fr 1fr; gap: 10vw; }
-.detail-narrative article > span { font: 10px var(--font-mono); letter-spacing: .16em; color: var(--accent); }
+.detail-narrative article > span { font: 10px var(--font-mono); letter-spacing: .16em; color: var(--accent-text); }
 /* 标题现在由管理端填写，一个超长不换行的词在 h2 的 max-width 里会被直接裁掉（html 有 overflow-x:clip，
    连滚动条都不给）。anywhere 让这个断行计入固有宽度：实测 900px 容器下轨道宽度从被顶宽的 480 回到 405、
    h2 的 scrollWidth 从 1222 回到 405。单独加 article{min-width:0} 治不了裁字，只加它反而多余，故不加。 */
@@ -538,10 +595,10 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   max-width: 500px; margin: 18px 0 26px;
   font-size: clamp(42px, 4.5vw, 64px); line-height: .96; letter-spacing: -.035em;
 }
-.preview-copy h2 em { display: block; margin-top: 18px; color: var(--accent); font-size: .3em; font-weight: 400; letter-spacing: .03em; }
+.preview-copy h2 em { display: block; margin-top: 18px; color: var(--accent-text); font-size: .3em; font-weight: 400; letter-spacing: .03em; }
 .preview-copy > p { max-width: 390px; font-size: 16px; line-height: 1.75; color: var(--ink-secondary); }
 .preview-pagination { display: flex; align-items: center; gap: 14px; margin-top: 44px; font: 10px var(--font-mono); letter-spacing: .15em; }
-.preview-pagination strong { font-size: 20px; font-weight: 500; color: var(--accent); }
+.preview-pagination strong { font-size: 20px; font-weight: 500; color: var(--accent-text); }
 .preview-pagination i { width: 70px; height: 1px; background: var(--line-strong); position: relative; }
 /* 进度条按真实张数分段（--preview-progress 由组件写入），不是装饰性定长 */
 .preview-pagination i::after {
@@ -635,7 +692,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 /* 操作条：箭头 | 索引条 | 箭头 | 放大。用 flex 而不是 grid——
    单张相册只有「放大」一个子元素，固定列数的 grid 会把它塞进第一列 */
 .preview-controls { min-height: 56px; display: flex; align-items: stretch; border: 1px solid var(--line-strong); background: var(--bg-surface); }
-.preview-controls > button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 17px; }
+.preview-controls > button { border: 0; background: transparent; color: var(--accent-text); cursor: pointer; font-size: 17px; }
 /* 悬停反馈：底色单提一档（浅 #f0e8d4→#f5eed9）几乎看不出来，必须同时把颜色抬到主墨色。
    不用 color-mix——构建器会为不支持它降级成实心 var(--accent)，而箭头文字正是 accent，降级路径下会糊在底色里 */
 .preview-controls > button:hover { background: var(--bg-elevated); color: var(--ink-primary); }
@@ -676,13 +733,19 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .preview-zoom { position: fixed; inset: 0; z-index: 260; display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--bg-base); }
 .preview-zoom-bar { display: flex; align-items: center; gap: 16px; padding: 12px var(--gutter); border-bottom: 1px solid var(--line-default); font: 10px var(--font-mono); letter-spacing: .12em; }
 .preview-zoom-bar > span:first-child { flex: 1 1 auto; min-width: 0; color: var(--ink-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.preview-zoom-count { flex: 0 0 auto; color: var(--accent); }
+.preview-zoom-count { flex: 0 0 auto; color: var(--accent-text); }
 .preview-zoom-nav { flex: 0 0 auto; display: flex; gap: 6px; }
 .preview-zoom-nav button, .preview-zoom-bar > button {
+  position: relative;
   width: 32px; height: 32px; border: 1px solid var(--line-strong); background: transparent;
-  color: var(--accent); cursor: pointer; font-size: 16px;
+  color: var(--accent-text); cursor: pointer; font-size: 16px;
 }
-.preview-zoom-bar > a { flex: 0 0 auto; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+/* 触摸目标：视觉仍是 32×32，命中区用一层不可见的覆盖扩到 44×44。
+   同排 gap 是 6px（导航组）/16px（整条），扩 6px 恰好补齐不重叠。 */
+.preview-zoom-nav button::after, .preview-zoom-bar > button::after {
+  content: ""; position: absolute; inset: -6px;
+}
+.preview-zoom-bar > a { flex: 0 0 auto; color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; }
 .preview-zoom-shot { min-height: 0; width: 100%; object-fit: contain; padding: 18px var(--gutter) 28px; }
 /* 管理端抽屉里的相册缩略图（当前项目图片标「详情页大图」） */
 .preview-thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -787,10 +850,6 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 }
 .code-block-head > button:hover { border-color: #8a8680; }
 .code-block code { font: 13px/1.7 var(--font-mono); }
-.deployment-table { border: 1px solid var(--line-default); }
-.deployment-table div { min-height: 68px; padding: 15px 18px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line-default); }
-.deployment-table div:last-child { border-bottom: 0; }
-.deployment-table span { font: 10px var(--font-mono); letter-spacing: .13em; color: var(--ink-tertiary); }
 
 /* 真实 README / Compose 文档渲染（内容由 utils/markdown.tsx 产出 React 元素，无 HTML 注入面） */
 .document-section > aside .doc-toc-item {
@@ -833,6 +892,9 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .detail-placeholder h1 { font-size: clamp(30px, 4vw, 44px); }
 .detail-placeholder p { margin: 0; color: var(--ink-secondary); font-size: 14px; }
 .detail-placeholder .button { margin-top: 12px; }
+/* 一个占位块里放两个动作（重试 / 返回）：按钮自带的上边距在横排里会变成错位，这里归零 */
+.detail-placeholder-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 12px; }
+.detail-placeholder-actions .button { margin-top: 0; }
 .skeleton-line {
   width: min(520px, 80vw); height: 18px; border-radius: 2px;
   background: linear-gradient(90deg, var(--bg-surface) 0%, var(--line-hair) 50%, var(--bg-surface) 100%);
@@ -858,8 +920,8 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .related-grid button:hover { transform: translate(-5px, -5px); box-shadow: 8px 8px 0 color-mix(in srgb, var(--accent) 28%, transparent); }
 .related-grid span { font: 8px var(--font-mono); letter-spacing: .17em; color: var(--ink-tertiary); }
 .related-grid strong { display: block; margin-top: 66px; font-size: 44px; }
-.related-grid em { margin-left: 16px; color: var(--accent); }
-.related-grid i { position: absolute; right: 30px; bottom: 25px; font-size: 24px; color: var(--accent); }
+.related-grid em { margin-left: 16px; color: var(--accent-text); }
+.related-grid i { position: absolute; right: 30px; bottom: 25px; font-size: 24px; color: var(--accent-text); }
 
 /* Admin */
 .admin-login {
@@ -871,6 +933,12 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .admin-login form > strong { display: block; margin-top: 22px; font: 600 48px/.9 "EB Garamond", serif; }
 .admin-login form > em { display: block; margin-top: 10px; color: #60765c; font-style: normal; }
 .admin-login form > p { margin: 30px 0; color: #6d7168; font-size: 13px; line-height: 1.7; }
+/* 登录卡上的"只有口令这一层"提醒：底色与边框走警示色，别与正文混在一起 */
+.admin-login .login-posture {
+  margin: 0 0 22px; padding: 12px 14px; border: 1px solid #c9a89f; background: #f3e9e5;
+  color: #7a3a2c; font-size: 12px;
+}
+.admin-login .login-posture code { font-family: var(--font-mono); font-size: 11px; }
 .admin-login label { display: block; font: 8px var(--font-mono); letter-spacing: .15em; color: #656b61; }
 .admin-login input { width: 100%; margin: 9px 0 18px; padding: 13px; border: 1px solid #b8bab1; background: #e9e8e2; color: #24251f; font: 13px "Noto Serif SC", serif; }
 .admin-login form > small { display: block; margin-top: 22px; font: 7px var(--font-mono); letter-spacing: .16em; color: #898c84; }
@@ -1023,10 +1091,6 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .sync-log > div { min-height: 69px; display: grid; grid-template-columns: 38px 1fr auto; align-items: center; border-top: 1px solid #d8d6cf; }
 .sync-log p { margin: 0; }.sync-log p strong, .sync-log p small { display: block; }
 .sync-log p strong { font-size: 13px; }.sync-log p small, .sync-log time { margin-top: 4px; color: #81847b; font-size: 9px; }
-.domain-status { margin: 4px 0 24px; padding: 18px; border: 1px solid #cdd1c7; background: #e8ece5; }
-.domain-status span, .domain-status small { display: block; }
-.domain-status span { font-size: 12px; }.domain-status small { margin-top: 6px; color: #767b71; font-size: 9px; }
-.domain-status b { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: #60765c; }
 .editor-backdrop { position: fixed; inset: 0; z-index: 100; display: flex; justify-content: flex-end; background: rgba(24,28,23,.48); backdrop-filter: blur(2px); }
 .editor-drawer { width: min(760px, 96vw); height: 100%; display: grid; grid-template-rows: auto 1fr auto; background: #f4f3ee; box-shadow: -20px 0 60px rgba(21,27,20,.2); }
 .editor-drawer > header { min-height: 95px; padding: 22px 27px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #cfcdc4; }
@@ -1050,7 +1114,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .bilingual-preview ul { list-style: disc; }
 .bilingual-preview ol { list-style: decimal; }
 .bilingual-preview code { padding: 1px 4px; border: 1px solid #e0ded6; background: #f2efe6; font: 11px var(--font-mono); }
-/* 从项目抽屉跳到「07 详情页」那张小标题卡：编辑口只有一个，这里只是可达性 */
+/* 从项目抽屉跳到「04 详情页文案」那张小标题卡：编辑口只有一个，这里只是可达性 */
 .field-link-button { align-self: flex-start; margin: -4px 0 18px; padding: 0; border: 0; background: none; color: #3f6b52; font: 11px var(--font-mono); letter-spacing: .04em; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .field-link-button:hover { color: #2d5340; }
 @media (max-width: 760px) {
@@ -1098,6 +1162,9 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .nav-config-item .nav-id-tag {
   font: 8px var(--font-mono); letter-spacing: .12em; color: #777b70; text-transform: uppercase;
 }
+
+/* 管理端项目表：筛选导致排序按钮停用时，把原因写在计数旁边（tooltip 只在悬停时可见，等于没说） */
+.filter-order-note { display: block; margin-top: 4px; font: 10px var(--font-mono); letter-spacing: .08em; color: #85887f; }
 
 /* 管理端「栏目与页面文案」：一格一行，中英并排；超限的那一格自己标红 */
 .section-slot-row {
@@ -1206,6 +1273,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 
 @media (max-width: 760px) {
   .site-header { height: 64px; grid-template-columns: 1fr auto; }
+  .source-notice { top: 64px; }
   .site-header nav { display: none; }
   .header-tools { gap: 4px; }
   .spiral-card-wrap { width: 92vw; height: 76vh; }
@@ -1233,7 +1301,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .gallery-footer { left: 16px; right: 16px; bottom: 18px; }
   .gallery-footer > span:last-child { display: none; }
   .ambient-mark { right: 16px; top: 82px; width: 180px; }
-  .ambient-mark strong, .ambient-mark em, .ambient-mark small { display: none; }
+  .ambient-mark .ambient-title, .ambient-mark em, .ambient-mark small { display: none; }
   .section { padding: 96px 20px 72px; }
   .section-heading { align-items: flex-start; gap: 20px; }
   .section-heading h2 { font-size: 42px; }
@@ -1434,7 +1502,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
     right: 56px;
     top: 118px;
   }
-  .ambient-mark strong {
+  .ambient-mark .ambient-title {
     font-size: 38px;
   }
   .ambient-mark em {
@@ -1542,7 +1610,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .ambient-mark span, .ambient-mark small {
     font-size: 10px;
   }
-  .ambient-mark strong {
+  .ambient-mark .ambient-title {
     font-size: 48px;
   }
   .ambient-mark em {
@@ -1566,3 +1634,13 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   }
 }
 
+
+/* 移动端浏览器把地址栏/工具栏也算进 100vh，满屏区块于是比可视区高一截（粘性画廊尤其明显）。
+   认识 dvh 的浏览器换成动态视口高度；不认识的整块跳过，继续用上面那几条 vh 声明。
+   刻意不含 .detail-hero：它在 ≤760 时被改成 min-height:auto，放到这里会把它顶回去。 */
+@supports (height: 100dvh) {
+  .spiral-scroll { height: calc(100dvh + 153.3dvh * var(--spiral-steps, 3)); max-height: 1600dvh; }
+  .spiral-sticky { height: 100dvh; }
+  .section { min-height: 100dvh; }
+  .detail-page { min-height: 100dvh; }
+}

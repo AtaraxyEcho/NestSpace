@@ -1,5 +1,5 @@
 // 双语字段（挑战 / 解决方案）读侧规则 + 管理端投影 的闸门（node bilingual.test.mjs）
-// 覆盖：新列优先、旧单列按中文兜底、空对象不算内容、坏 JSON 不抛错、
+// 覆盖：新列优先、旧单列按内容猜语言落栏、空对象不算内容、坏 JSON 不抛错、
 //       按语言取值与「回退到另一种语言」的标注、管理端投影必须把双语对象交出去。
 import { strict as assert } from 'node:assert'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -52,6 +52,24 @@ check('普通正文（含以数字开头的中文）不被误判成 JSON', () =>
 
 check('旧列里若混进 JSON，也按同一套判据解析（不是一律当中文正文）', () => {
   assert.deepEqual(asBilingual('', '{"en":"E","zh":"Z"}'), { en: 'E', zh: 'Z' })
+})
+
+check('旧列是英文时落到 en 栏：中文视图回退并标「原文」，不冒充中文', () => {
+  // 0002 种子把英文写进旧列；若一律当中文，中文视图会把英文当"中文文案"显示且不打标
+  const legacy = 'Creative teams were spending more time maintaining slides than shipping.'
+  assert.deepEqual(asBilingual('', legacy), { en: legacy, zh: '' })
+  assert.deepEqual(pickBilingual('', 'zh', legacy), { text: legacy, fallback: true })
+  assert.deepEqual(pickBilingual('', 'en', legacy), { text: legacy, fallback: false })
+})
+
+check('旧列是中文时仍落 zh 栏（历史后台手工填的那一批不受影响）', () => {
+  assert.deepEqual(asBilingual('', '中文方案'), { en: '', zh: '中文方案' })
+  assert.deepEqual(pickBilingual('', 'en', '中文方案'), { text: '中文方案', fallback: true })
+})
+
+check('新列存的是纯文本（非 JSON）时同样按语言落栏', () => {
+  assert.deepEqual(asBilingual('A single English line.'), { en: 'A single English line.', zh: '' })
+  assert.deepEqual(asBilingual('一句中文'), { en: '', zh: '一句中文' })
 })
 
 check('库里是坏 JSON 或非 JSON 文本时不抛错（读侧宽容，写侧才严格）', () => {
@@ -177,4 +195,4 @@ if (failed) {
   console.error(`bilingual：${failed}/${cases.length} 个用例失败`)
   process.exit(1)
 }
-console.log(`bilingual：全部 ${cases.length} 个用例通过（新列优先 / 旧列中文兜底 / 坏数据不抛错 / 回退标注 / 管理端投影 / 站点小标题口径）✓`)
+console.log(`bilingual：全部 ${cases.length} 个用例通过（新列优先 / 旧列按内容落栏 / 坏数据不抛错 / 回退标注 / 管理端投影 / 站点小标题口径）✓`)

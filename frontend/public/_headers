@@ -1,4 +1,4 @@
-# Cloudflare Pages 生产级安全响应标头（防劫持、防投毒、防暗链挂马、防点击劫持）
+# Cloudflare Workers 生产级安全响应标头（防劫持、防投毒、防暗链挂马、防点击劫持）
 
 /*
   # 1. 严格内容安全策略 (Content Security Policy)
@@ -27,6 +27,8 @@
 
 # 带内容哈希的构建产物（/assets/*）：文件名即指纹，内容一变文件名就变，
 # 可安全设置一年不可变缓存，回访访客零下载直接命中浏览器缓存。
-# index.html 不设置长缓存：由 Pages 默认的 ETag 协商缓存保证发版即时生效。
+# index.html 不设置长缓存：Worker 每次改写正文（注入 canonical/og:url、主题标记或 SEO 覆写）
+# 都会把 ETag 一并摘掉——响应头与正文必须同源，否则会出现"304 让浏览器留着旧正文"。
+# 因此每次导航都取最新的一份，发版即时生效。
 /assets/*
   Cache-Control: public, max-age=31536000, immutable

@@ -92,7 +92,7 @@ export interface SiteSettings extends FooterCopy {
   activityLogMode: 'auto' | 'custom' // "auto" 为按项目历史聚合，"custom" 为手动设置
   customActivityLog: ActivityLogItem[]
 
-  // 馆长手记（Curator）栏目文案（管理端「05 首页 · 手记」可编辑；headline 支持多行）
+  // 馆长手记（Curator）栏目文案（管理端「03 首页栏目」可编辑；headline 支持多行）
   curatorEyebrowEn: string
   curatorEyebrowZh: string
   curatorHeadlineEn: string
@@ -102,7 +102,7 @@ export interface SiteSettings extends FooterCopy {
   curatorHabitat: string
   curatorField: string
 
-  // 详情页「挑战 / 方案」小标题（管理端「07 详情页」可编辑；zh 留空回退英文）
+  // 详情页「挑战 / 方案」小标题（管理端「04 详情页文案」可编辑；zh 留空回退英文）
   challengeHeadlineEn: string
   challengeHeadlineZh: string
   solutionHeadlineEn: string
@@ -112,10 +112,10 @@ export interface SiteSettings extends FooterCopy {
   // 空槽位 = 回退内置默认；首页栏目标题不在这里，它就是导航标签本身。
   sectionCopy: SectionSlotMap
 
-  // 展示偏好（管理端「11 站点设置」，公开站点真实消费）
+  // 展示偏好（管理端「08 站点设置」，公开站点真实消费）
   defaultLanguage: DefaultLanguagePreference // 无手动切换时前台初始语言
   defaultTheme: DefaultThemePreference // 无手动切换时前台初始主题
-  homeStatsVisible: boolean // 是否展示首页统计栏目（开关在「04 首页 · 统计」；导航项 id 仍是 catalogue）
+  homeStatsVisible: boolean // 是否展示首页统计栏目（开关在「03 首页栏目」；导航项 id 仍是 catalogue）
   themeToggleEnabled: boolean // 是否展示前台深浅色切换按钮
   languageToggleEnabled: boolean // 是否展示前台语言切换按钮
 }

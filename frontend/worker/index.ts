@@ -94,6 +94,9 @@ app.use('/projects/*', publicCors)
 
 // 获取公开项目列表（仅已发布的 LIVE 和 BETA）
 app.get('/projects', async (c) => {
+  if (!allowPublicRead(clientIpOf(c), Date.now())) {
+    return c.json({ error: '请求过于频繁，请稍后再试' }, 429, { 'Retry-After': '60' })
+  }
   try {
     // 强制参数化查询，绝不 SELECT *，坚决排除 internal_notes 等敏感管理字段
     const query = `
@@ -155,6 +158,10 @@ app.get('/projects', async (c) => {
 // 查询单个公开项目详情
 app.get('/projects/:id', async (c) => {
   const id = c.req.param('id')
+  // 与列表同一个桶：一次浏览 = 列表 + 站点文案 + 详情 三条，240/分钟留了八十次浏览的余量
+  if (!allowPublicRead(clientIpOf(c), Date.now())) {
+    return c.json({ error: '请求过于频繁，请稍后再试' }, 429, { 'Retry-After': '60' })
+  }
   try {
     const row: any = await c.env.DB.prepare(`
       SELECT
@@ -263,6 +270,10 @@ export function buildWeservUrl(src: string, width: number): string {
 }
 
 app.get('/img', async (c) => {
+  // 未命中缓存时每次都要 Worker 去上游取图并转码，是本站最贵的一个端点——先按 IP 粗拦一层
+  if (!allowImageRequest(clientIpOf(c), Date.now())) {
+    return c.text('Too Many Requests', 429, { 'Retry-After': '60' })
+  }
   const rawSrc = c.req.query('src') ?? ''
   if (!rawSrc || rawSrc.length > IMG_SRC_MAX_LENGTH) {
     return c.text('Invalid image source', 400)
@@ -349,37 +360,93 @@ export const USAGE_EVENTS: Record<string, readonly string[]> = {
   imgfail: [],
   // 后台按目录批量导入的结果
   dirimport: ['ok', 'ratelimited', 'notfound', 'error'],
+  // 转化漏斗三问（本轮产品审查补的：以前连"有没有人点进仓库"都答不了）
+  // 看了哪个页面
+  pageview: ['home', 'detail', 'admin'],
+  // 从哪个位置打开某件标本（r=标本编号）：回答"哪一段在带量"
+  specimen_open: ['card', 'index', 'related', 'footer'],
+  // 真的走出站了吗（r=标本编号）：分子，配 specimen_open 得出转化率
+  outbound: ['github', 'demo'],
 }
+
+/** 允许随事件带的项目引用形态（标本编号，如 001 / my-tool）；不符就当没给 */
+const REFERENCE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/
 
 const USAGE_RATE_LIMIT = 120
 const USAGE_RATE_WINDOW_MS = 60 * 1000
 const USAGE_STORE_MAX = 2000
 const USAGE_BODY_MAX = 1024
-const usageBuckets = new Map<string, { count: number; firstAt: number }>()
 
-const HOSTNAME_RE = /^[a-z0-9.-]{1,63}$/
+/**
+ * 公开端点的按 IP 限流（**尽力而为**）。
+ *
+ * 计数只活在当前 isolate 里：Cloudflare 会把请求散到很多 isolate 与机房，所以它挡的是
+ * "同一来源的脚本化连打"，不是分布式压力——那种只能靠 Cloudflare 侧的速率限制规则（见部署指南）。
+ * 仍然值得有的理由：`/api/img` 每次缓存未命中都要 Worker 去上游取图并转码，被脚本刷就是直接烧配额；
+ * 公开读接口也一样（每次都是 D1 查询）。窗口一到整桶重置，不做滑动窗口：简单、可解释、可测。
+ */
+type RateBucket = { count: number; firstAt: number }
 
-/** 只清过期桶；以前是超容量就 clear() 全清，等于让攻击者用新 IP 把所有人的计数一起抹掉 */
-function evictUsageBuckets(now: number) {
-  for (const [key, bucket] of usageBuckets) {
-    if (now - bucket.firstAt > USAGE_RATE_WINDOW_MS) usageBuckets.delete(key)
+export function createRateLimiter(options: {
+  limit: number
+  windowMs: number
+  storeMax: number
+}): (key: string, now: number) => boolean {
+  const buckets = new Map<string, RateBucket>()
+
+  /** 只清过期桶；以前是超容量就 clear() 全清，等于让攻击者用新 IP 把所有人的计数一起抹掉 */
+  const evictExpired = (now: number) => {
+    for (const [key, bucket] of buckets) {
+      if (now - bucket.firstAt > options.windowMs) buckets.delete(key)
+    }
+  }
+
+  return function allow(key: string, now: number): boolean {
+    const bucket = buckets.get(key)
+    if (!bucket || now - bucket.firstAt > options.windowMs) {
+      if (buckets.size >= options.storeMax) evictExpired(now)
+      // 淘汰后仍然满（极端并发）：放行这一条但不再记账，宁可不限流也不无界增长
+      if (buckets.size < options.storeMax) buckets.set(key, { count: 1, firstAt: now })
+      return true
+    }
+    bucket.count += 1
+    return bucket.count <= options.limit
   }
 }
 
+const allowUsageEvent = createRateLimiter({
+  limit: USAGE_RATE_LIMIT,
+  windowMs: USAGE_RATE_WINDOW_MS,
+  storeMax: USAGE_STORE_MAX,
+})
+
+// 两个公开读接口共用一个桶：一次页面浏览就是两条（列表 + 站点文案），
+// 240/分钟 ≈ 每分钟 120 次浏览，正常访客碰不到，脚本连打几百次就会撞上
+const PUBLIC_READ_RATE_LIMIT = 240
+const PUBLIC_READ_WINDOW_MS = 60 * 1000
+const allowPublicRead = createRateLimiter({
+  limit: PUBLIC_READ_RATE_LIMIT,
+  windowMs: PUBLIC_READ_WINDOW_MS,
+  storeMax: USAGE_STORE_MAX,
+})
+
+// 图片：一页相册要十来张，给得更宽；被限的效果就是那张图裂掉，客户端本来就有 imgfail 埋点兜着
+const IMG_RATE_LIMIT = 300
+const IMG_RATE_WINDOW_MS = 60 * 1000
+const allowImageRequest = createRateLimiter({
+  limit: IMG_RATE_LIMIT,
+  windowMs: IMG_RATE_WINDOW_MS,
+  storeMax: USAGE_STORE_MAX,
+})
+
+const clientIpOf = (c: any): string => c.req.header('CF-Connecting-IP') ?? 'unknown'
+
+const HOSTNAME_RE = /^[a-z0-9.-]{1,63}$/
+
 app.post('/usage', async (c) => {
-  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown'
-  const now = Date.now()
-  const bucket = usageBuckets.get(ip)
-  if (!bucket || now - bucket.firstAt > USAGE_RATE_WINDOW_MS) {
-    if (usageBuckets.size >= USAGE_STORE_MAX) evictUsageBuckets(now)
-    // 淘汰后仍然满（极端并发）：直接放行这一条但不再记账，宁可不限流也不无界增长
-    if (usageBuckets.size < USAGE_STORE_MAX) usageBuckets.set(ip, { count: 1, firstAt: now })
-  } else {
-    bucket.count += 1
-    if (bucket.count > USAGE_RATE_LIMIT) {
-      // 静默丢弃：埋点被刷不该变成给访客的错误，也不该占满数据集
-      return c.body(null, 204)
-    }
+  if (!allowUsageEvent(clientIpOf(c), Date.now())) {
+    // 静默丢弃：埋点被刷不该变成给访客的错误，也不该占满数据集
+    return c.body(null, 204)
   }
 
   // 这是个公开无鉴权端点，不能让人用大 body 把 CPU/内存买走：
@@ -417,10 +484,13 @@ app.post('/usage', async (c) => {
     const lower = subject.trim().toLowerCase()
     if (HOSTNAME_RE.test(lower)) host = lower
   }
+  // r = 项目引用（标本编号）。不是个人数据，且只收安全形态；不给就是空串，绝不收任意字符串
+  const refInput = (raw as Record<string, unknown>)?.r
+  const reference = typeof refInput === 'string' && REFERENCE_RE.test(refInput.trim()) ? refInput.trim() : ''
 
   try {
     c.env.METRICS?.writeDataPoint({
-      blobs: [event, typeof method === 'string' ? method : '', host],
+      blobs: [event, typeof method === 'string' ? method : '', host, reference],
       doubles: [1],
       indexes: [event],
     })
@@ -531,6 +601,18 @@ adminApp.use('*', async (c, next) => {
       429,
       { 'Retry-After': String(Math.ceil(AUTH_FAILURE_WINDOW_MS / 1000)) },
     )
+  }
+
+  // CSRF 纵深：控制台在"已被 Access 放行、没输过口令"时是**纯 Cookie 认证**，
+  // 此时一个跨站页面发出的简单请求（text/plain 属于 CORS 免预检类型）也会带上 CF_Authorization。
+  // 要求写操作显式声明 application/json：跨站表单发不出这个类型，text/plain 的 JSON 走私也一并失效。
+  // 带 Authorization 头的调用天然免疫 CSRF（跨站 JS 设不了这个头），所以两条防线互补。
+  const method = c.req.method.toUpperCase()
+  if (method !== 'GET' && method !== 'HEAD') {
+    const contentType = (c.req.header('Content-Type') ?? '').split(';')[0].trim().toLowerCase()
+    if (contentType !== 'application/json') {
+      return c.json({ error: '写操作需要 Content-Type: application/json' }, 415)
+    }
   }
 
   // 防线 1：Bearer 密钥（常量时间比较）
@@ -697,6 +779,8 @@ adminApp.post('/projects', async (c) => {
 
     return c.json({ success: true, message: '项目创建成功' }, 201)
   } catch (err: any) {
+    const typed = writeColumnErrorResponse(err)
+    if (typed) return typed
     console.error('Admin create error:', err)
     return c.json({ error: 'Create failed' }, 500)
   }
@@ -888,6 +972,8 @@ adminApp.put('/projects/:id', async (c) => {
     }
     return c.json({ success: true, message: '项目更新成功' })
   } catch (err: any) {
+    const typed = writeColumnErrorResponse(err)
+    if (typed) return typed
     console.error('Admin update error:', err)
     return c.json({ error: 'Update failed' }, 500)
   }
@@ -1746,6 +1832,9 @@ adminApp.post('/github-sync', async (c) => {
           note: notes.join('；') || undefined,
         })
       } catch (e: any) {
+        // 缺列这类"服务端坏了"的错误不能被说成"这一行请求失败"——那暗示重试就好
+        const typed = writeColumnErrorResponse(e)
+        if (typed) return typed
         console.error('GitHub sync row error:', row.id, e)
         outcomes.push({ id: row.id, name: row.name, status: 'error', note: '请求失败（GitHub 或网络异常）' })
       }
@@ -1775,7 +1864,12 @@ adminApp.get('/github-repos', async (c) => {
     }
 
     if (!username) {
-      username = 'AtaraxyEcho'
+      // 以前这里兜底到仓库作者本人的账号：换个人部署，扫描就会列出别人的仓库。
+      // 现在要么显式带上账号，要么在站点文案里配好 GitHub 地址，否则点名报错。
+      return c.json(
+        { error: '未指定 GitHub 账号：请填写账号，或先在「03 首页栏目」配置 GitHub 地址' },
+        400,
+      )
     }
 
     // 逐页取回仓库列表（每页 100，最多 3 页）；超出上限时明确告知，而不是静默丢弃
@@ -2028,7 +2122,7 @@ adminApp.post('/github-import', async (c) => {
     const repoFullName = (body.repoFullName || '').trim()
     const customToken = body.token
     if (!repoFullName || !repoFullName.includes('/')) {
-      return c.json({ error: '请提供正确的仓库全名（如 AtaraxyEcho/NestSpace）' }, 400)
+      return c.json({ error: '请提供正确的仓库全名（形如 owner/repo）' }, 400)
     }
 
     // 仓库全名只接受 owner/repo 两段且字符集受限：避免 `../` 之类拼出路径，
@@ -2039,7 +2133,7 @@ adminApp.post('/github-import', async (c) => {
     const isSafeSegment = (value: string) =>
       /^[A-Za-z0-9._-]+$/.test(value) && value !== '.' && value !== '..'
     if (segments.length !== 2 || !isSafeSegment(owner) || !isSafeSegment(repo)) {
-      return c.json({ error: '仓库全名格式不合法，应形如 AtaraxyEcho/NestSpace' }, 400)
+      return c.json({ error: '仓库全名格式不合法，应形如 owner/repo' }, 400)
     }
     const ghHeaders = getGithubHeaders(c, customToken)
 
@@ -2203,6 +2297,8 @@ adminApp.post('/github-import', async (c) => {
       },
     })
   } catch (err: any) {
+    const typed = writeColumnErrorResponse(err)
+    if (typed) return typed
     console.error('GitHub import error:', err)
     return c.json({ error: '导入失败，请稍后重试（服务器内部错误）' }, 500)
   }
@@ -2214,6 +2310,9 @@ adminApp.post('/github-import', async (c) => {
 
 // 公开端：获取站点文案与配置（空字段由前端回退到内置默认值，无敏感信息）
 app.get('/site-settings', async (c) => {
+  if (!allowPublicRead(clientIpOf(c), Date.now())) {
+    return c.json({ error: '请求过于频繁，请稍后再试' }, 429, { 'Retry-After': '60' })
+  }
   try {
     const row: any = await c.env.DB.prepare(`
       SELECT * FROM site_settings WHERE id = 1
@@ -2338,12 +2437,35 @@ adminApp.get('/site-settings', async (c) => {
     if (!row) {
       return c.json({})
     }
-    return c.json(settingsPayloadFromRow(row))
+    // updatedAt 是**写侧的乐观锁版本戳**，不属于可编辑字段（所以不在三份白名单里，
+    // 也不会被前端 mergeSiteSettings 当成文案字段）。只给管理端，不给公开端。
+    return c.json({ ...settingsPayloadFromRow(row), updatedAt: String(row.updated_at ?? '') })
   } catch (err: any) {
     console.error('Admin fetch site settings error:', err)
     return c.json({ error: 'Failed to fetch site settings' }, 500)
   }
 })
+
+/**
+ * 把"代码引用的列在库里不存在"从 500 `Update failed` 翻成能行动的 400。
+ * 这条不是猜测：本仓库的部署顺序要求先跑迁移再 push（Worker 引用新列而远程还没加列时，
+ * 保存会整条失败），而操作者看到的原文只有 `Update failed`，既不知道缺哪列也不知道跑什么。
+ */
+function writeColumnErrorResponse(err: any): Response | null {
+  const message = String(err?.message || err || '')
+  const missing = message.match(/no such column:\s*([A-Za-z0-9_]+)/i)
+  if (missing) {
+    return new Response(
+      JSON.stringify({
+        error:
+          `数据库里没有列 ${missing[1]}：这条代码已部署、对应迁移还没在远程执行。` +
+          `请在仓库根目录跑 bash scripts/d1-migrate.sh remote 后重试。`,
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+  return null
+}
 
 /**
  * 站点设置写侧：把请求体折成"列 + 值"，并在写入边界做两件事——裁首尾空白、按上限拒绝超长值。
@@ -2405,6 +2527,26 @@ adminApp.put('/site-settings', async (c) => {
       return c.json({ error: '请求体不是合法的 JSON 对象' }, 400)
     }
 
+    // 乐观锁：`site_settings` 是单行表，而管理端在挂载时读一次、把基线冻结在内存里，
+    // 保存发的是"与基线不同的整份改动集"。两个标签页各存一次，后存的一方会把自己载入时的
+    // 旧值当改动写回去（不可见，提示还是"已保存"）。带戳就能拒掉这次写入。
+    const expected = typeof body.expectedUpdatedAt === 'string' ? body.expectedUpdatedAt.trim() : ''
+    const before: any = await c.env.DB
+      .prepare('SELECT updated_at FROM site_settings WHERE id = 1')
+      .first()
+    const currentStamp = String(before?.updated_at ?? '')
+    if (expected && currentStamp && expected !== currentStamp) {
+      return c.json(
+        {
+          error:
+            '站点设置在这一页打开之后被别处保存过（另一个标签页或另一次保存）。已拒绝本次写入，' +
+            '否则会把对方那一份悄悄回退成旧值。请点「重新载入」取最新值，再在新页面上重做这次修改。',
+          conflict: true,
+        },
+        409,
+      )
+    }
+
     const { columns, values, error } = buildSiteSettingsWrite(body)
     if (error) {
       return c.json({ error }, 400)
@@ -2419,8 +2561,18 @@ adminApp.put('/site-settings', async (c) => {
        ON CONFLICT(id) DO UPDATE SET ${columns.map((column) => `${column} = excluded.${column}`).join(', ')}, updated_at = CURRENT_TIMESTAMP`,
     ).bind(1, ...values).run()
 
-    return c.json({ success: true, message: '站点设置已保存' })
+    // 回带新戳：连续两次保存之间不重新 GET，客户端得跟着更新手上的版本
+    const after: any = await c.env.DB
+      .prepare('SELECT updated_at FROM site_settings WHERE id = 1')
+      .first()
+    return c.json({
+      success: true,
+      message: '站点设置已保存',
+      updatedAt: String(after?.updated_at ?? ''),
+    })
   } catch (err: any) {
+    const typed = writeColumnErrorResponse(err)
+    if (typed) return typed
     console.error('Admin update site settings error:', err)
     return c.json({ error: 'Update failed' }, 500)
   }
@@ -2582,7 +2734,10 @@ export async function verifyAccessJwt(
 // 因此在边缘取回首页 HTML 并把 <title> / description / og 标签替换为 D1 中的最新值。
 // 取不到静态首页或注入失败时一律回退为原始响应，绝不影响主站可用性。
 // ==========================================
-type SeoOverrides = { title: string; description: string }
+type SeoOverrides = { title: string; description: string; theme: string }
+
+// index.html 里的占位标记：Worker 用它换取按请求 origin 生成的 canonical / og:url
+const SEO_ORIGIN_MARKER = '<!-- seo:origin-tags -->'
 
 const SEO_CACHE_TTL_MS = 60 * 1000
 let seoOverridesCache: { value: SeoOverrides; expiresAt: number } | null = null
@@ -2593,13 +2748,15 @@ async function loadSeoOverrides(db: D1Database): Promise<SeoOverrides> {
     return seoOverridesCache.value
   }
   const row: any = await db
-    .prepare('SELECT seo_title, seo_description FROM site_settings WHERE id = 1')
+    .prepare('SELECT seo_title, seo_description, default_theme FROM site_settings WHERE id = 1')
     .first()
   const value: SeoOverrides = {
     // 按 trim 判定：库里存的是原样字符串，管理端只敲一个空格就会让下面的 `if (seo.title)` 成立，
     // 于是把构建期写好的 <title>/og 整个换成空白。空 = 不覆写，才对。
     title: String(row?.seo_title ?? '').trim(),
     description: String(row?.seo_description ?? '').trim(),
+    // 只有显式 'dark' / 'light' 才往 <html> 上打标记；'' / 'system' 表示跟随访客系统
+    theme: String(row?.default_theme ?? '').trim(),
   }
   seoOverridesCache = { value, expiresAt: now + SEO_CACHE_TTL_MS }
   return value
@@ -2613,7 +2770,7 @@ function escapeHtmlAttribute(value: string): string {
     .replace(/"/g, '&quot;')
 }
 
-function injectSeoOverrides(html: string, seo: SeoOverrides): string {
+function injectSeoOverrides(html: string, seo: SeoOverrides, origin: string): string {
   let out = html
   // 一律用替换函数、不用替换串：文案里出现 $& / $' / $1 时，替换串会把它当成"引用匹配到的内容"改写坏
   if (seo.title) {
@@ -2635,29 +2792,53 @@ function injectSeoOverrides(html: string, seo: SeoOverrides): string {
       () => `<meta property="og:description" content="${description}" />`,
     )
   }
+  // 规范地址与社交卡片：构建产物里只有一个标记、不含任何域名（见 index.html），
+  // 这里按当前请求的 origin 注入——换域名、上 preview 子域都不必重新构建。
+  if (origin && out.includes(SEO_ORIGIN_MARKER)) {
+    const root = escapeHtmlAttribute(`${origin}/`)
+    out = out.replace(
+      SEO_ORIGIN_MARKER,
+      () =>
+        `<link rel="canonical" href="${root}" />\n    <meta property="og:url" content="${root}" />`,
+    )
+  }
+  // 显式设成"日/夜"的站点：把主题打在 <html> 上，第一帧就是对的（不必等 JS 起来）。
+  // 跟随系统时这里不注入，交给 index.css 的 prefers-color-scheme 兜底。
+  const theme = seo.theme === 'dark' || seo.theme === 'light' ? seo.theme : ''
+  if (theme) {
+    out = out.replace(/<html\b[^>]*>/i, (tag) =>
+      tag.replace(/\/?>$/, (close) => ` data-theme="${theme}"${close}`),
+    )
+  }
   return out
 }
 
 async function serveIndexWithSeo(c: any) {
   try {
-    // 先读覆写（60s 缓存）：只有存在覆写时才需要改写正文，
-    // 也才有必要摘掉条件请求头——否则资产层会用旧 ETag 直接回 304，
-    // 客户端就永远拿不到注入后的头部
-    const seo = await loadSeoOverrides(c.env.DB).catch(() => null)
-    const hasOverrides = Boolean(seo && (seo.title || seo.description))
+    // 先读覆写（60s 缓存）；读不到库就当作没有覆写，正文里的构建期标签照旧
+    const seo = (await loadSeoOverrides(c.env.DB).catch(() => null)) ?? {
+      title: '',
+      description: '',
+      theme: '',
+    }
+    let origin = ''
+    try {
+      origin = new URL(c.req.raw.url).origin
+    } catch {
+      origin = ''
+    }
 
     const assetRequest = new Request(c.req.raw.url, {
       method: 'GET',
       headers: new Headers(c.req.raw.headers),
     })
-    if (hasOverrides) {
-      assetRequest.headers.delete('if-none-match')
-      assetRequest.headers.delete('if-modified-since')
-    }
+    // 正文总会被改写（注入按请求 origin 生成的 canonical / og:url），条件请求头一律摘掉：
+    // 否则资产层用旧 ETag 直接回 304，客户端拿到的还是构建期那一份。
+    assetRequest.headers.delete('if-none-match')
+    assetRequest.headers.delete('if-modified-since')
 
     const assetRes = await c.env.ASSETS.fetch(assetRequest)
     if (
-      !hasOverrides ||
       !assetRes.ok ||
       !(assetRes.headers.get('Content-Type') ?? '').includes('text/html')
     ) {
@@ -2672,7 +2853,7 @@ async function serveIndexWithSeo(c: any) {
     headers.delete('etag')
     headers.delete('last-modified')
     headers.delete('content-encoding')
-    return new Response(injectSeoOverrides(html, seo as SeoOverrides), {
+    return new Response(injectSeoOverrides(html, seo, origin), {
       status: assetRes.status,
       headers,
     })

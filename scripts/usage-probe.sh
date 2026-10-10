@@ -13,7 +13,7 @@ WORK="$ROOT/.tmp-probe"
 mkdir -p "$WORK"
 
 echo "== build（dist 必须是最新的，否则 wrangler 报 no such asset）=="
-npm run build >/dev/null 2>&1 || { echo "BUILD FAILED"; exit 1; }
+pnpm run build >/dev/null 2>&1 || { echo "BUILD FAILED"; exit 1; }
 
 PORT="${PROBE_PORT:-8898}"
 LOG="$WORK/wrangler-usage.log"
@@ -152,7 +152,7 @@ else
   echo "001 现值：项目图片长度 $(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).preview_image_url.length))' "$ORIG")，相册项数 $(node -e 'process.stdout.write(String(JSON.parse(JSON.parse(process.argv[1]).preview_images_json).length))' "$ORIG")（值不打印）"
 
   BAD=$(node -e 'process.stdout.write(JSON.stringify(Array.from({length:13},(_,i)=>`https://a.example/${i}.png`)))')
-  probe "PUT 13 张（要 400 点名第 13 行）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
+  probe "PUT 13 张（要 400：服务端点名张数，逐行点名在前端）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     --data-raw "{\"preview_images_json\":$BAD}"
   probe "PUT 含坏行（要 400 点名第 2 行）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \

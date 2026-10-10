@@ -58,14 +58,15 @@ export async function fetchSiteSettings(): Promise<SiteSettings> {
 /**
  * 获取单个公开项目详情
  */
+/**
+ * 获取单个公开项目详情。
+ * **只有 404 返回 null**（那才是"这件标本不存在"）；网络失败与非 404 的 HTTP 错误一律抛出，
+ * 交给调用方显示"暂时取不到 + 重试"——以前这两种情况都吞成 null，于是断网或接口 500 时
+ * 访客看到的是"未找到标本 SPEC—001"，把"我们坏了"说成"这件东西不存在"。
+ */
 export async function fetchPublicProjectById(id: string): Promise<Project | null> {
-  try {
-    const res = await fetch(`/api/projects/${encodeURIComponent(id)}`)
-    if (res.status === 404) return null
-    if (!res.ok) throw new Error(`API error: ${res.status}`)
-    return (await res.json()) as Project
-  } catch (error) {
-    console.error(`Failed to fetch project ${id}:`, error)
-    return null
-  }
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}`)
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`API error: ${res.status}`)
+  return (await res.json()) as Project
 }

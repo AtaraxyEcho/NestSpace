@@ -16,6 +16,15 @@ export default defineConfig(({ mode }) => {
     build: {
       sourcemap: emitSourcemaps ? 'inline' : false,
       minify: !emitSourcemaps,
+      rollupOptions: {
+        output: {
+          // 把 React 单独成 chunk：站点代码每次发版都变，框架那部分不变——
+          // 分开之后回访访客只重下自己那份（约 40KB gzip 留在缓存里）。
+          // 管理端整套仍与前台同包（要拆得把它整体移出 App.tsx，是结构重构，另开一轮）。
+          // rolldown（Vite 8）只认函数形式的 manualChunks，对象形式会直接报错。
+          manualChunks: (id: string) => (id.includes('node_modules/react') ? 'react' : undefined),
+        },
+      },
     },
     plugins: [
 react(),

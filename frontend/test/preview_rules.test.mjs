@@ -5,8 +5,11 @@
 // 就会出现「前端说没问题、保存却 400」或反过来——后者正是本项目在后台明令禁止的假状态。
 // 所以这里不是各测一遍规则，而是**把同一批输入喂给两边，要求结论一致**。
 import { strict as assert } from 'node:assert'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
+
+const FRONTEND = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const HERE = join(dirname(fileURLToPath(import.meta.url)), '..')
 const url = (...parts) => pathToFileURL(join(HERE, ...parts)).href
@@ -19,7 +22,7 @@ const worker = await import(url('worker', 'index.ts'))
 const { PREVIEW_IMAGE_LIMIT, galleryRowIssues, sanitizeImageUrl } = rules
 const { changedColumns } = diff
 const { mergeSiteSettings, DEFAULT_SITE_SETTINGS } = settingsData
-const { validatePreviewInput, USAGE_EVENTS } = worker
+const { validatePreviewInput, USAGE_EVENTS, createRateLimiter } = worker
 
 /** 抽屉的关闭判断就是"改动集是否非空"，这里包一层只为把断言写得像人话 */
 const dirty = (baseline, draft) => Object.keys(changedColumns(baseline, draft)).length > 0
@@ -191,8 +194,32 @@ check('动过的列才发，清空的列发空串（清空=回退默认要能落
 })
 
 // —— 埋点事件白名单：客户端只可能发这些，其余服务端 400 ——
-check('埋点白名单覆盖三类事件与各自的方式', () => {
-  assert.deepEqual(Object.keys(USAGE_EVENTS).sort(), ['deck', 'dirimport', 'imgfail'])
+check('埋点白名单覆盖六个事件与各自的方式', () => {
+  assert.deepEqual(Object.keys(USAGE_EVENTS).sort(), [
+    'deck',
+    'dirimport',
+    'imgfail',
+    'outbound',
+    'pageview',
+    'specimen_open',
+  ])
+  // 转化漏斗那三条的方式集合就是"能回答的问题"的边界，改任何一个都要同步改前端调用点
+  assert.deepEqual([...USAGE_EVENTS.pageview].sort(), ['admin', 'detail', 'home'])
+  assert.deepEqual([...USAGE_EVENTS.specimen_open].sort(), ['card', 'footer', 'index', 'related'])
+  assert.deepEqual([...USAGE_EVENTS.outbound].sort(), ['demo', 'github'])
+  // 客户端的 UsageEvent 联合类型必须与服务端白名单同名：
+  // 两侧各写一遍迟早分叉（前端发了白名单外的事件名会被 400 静默吞掉，等于没埋点）
+  const usageSrc = readFileSync(join(FRONTEND, 'src', 'utils', 'usage.ts'), 'utf8')
+  const unionLine = usageSrc
+    .split('\n')
+    .find((line) => line.startsWith('export type UsageEvent ='))
+  assert.ok(unionLine, 'usage.ts 里找不到 UsageEvent 联合类型，钉子本身失效了')
+  const clientEvents = unionLine
+    .slice(unionLine.indexOf('=') + 1)
+    .split('|')
+    .map((part) => part.trim().replace(/'/g, ''))
+    .sort()
+  assert.deepEqual(clientEvents, Object.keys(USAGE_EVENTS).sort(), '客户端事件类型与服务端白名单不一致')
   for (const m of ['view', 'thumb', 'plate', 'arrow', 'drag', 'key', 'zoom']) {
     assert.equal(USAGE_EVENTS.deck.includes(m), true, `deck 接受方式 ${m}`)
   }
@@ -205,6 +232,35 @@ check('方式取值不重复、都为小写字母串', () => {
     assert.equal(new Set(methods).size, methods.length, `${name} 的方式列表不能有重复`)
     for (const m of methods) assert.match(m, /^[a-z]+$/, `${name} 的方式 ${m} 必须是小写单词`)
   }
+})
+
+// —— 公开端点的按 IP 限流：判据抽成纯函数，靠传 now 而不是靠数真实请求 ——
+check('限流器：第 limit 次放行、第 limit+1 次拒绝，窗口一过整桶重置', () => {
+  const allow = createRateLimiter({ limit: 3, windowMs: 1000, storeMax: 10 })
+  const t = 1_000_000
+  assert.deepEqual([allow('a', t), allow('a', t), allow('a', t)], [true, true, true])
+  assert.equal(allow('a', t), false, '第 4 次必须被拦')
+  assert.equal(allow('b', t), true, '另一个来源不受影响')
+  assert.equal(allow('a', t + 1001), true, '窗口一过就重置（刻意不做滑动窗口）')
+})
+
+check('限流器：容量满只清过期桶，不把所有人的计数一起抹掉', () => {
+  const allow = createRateLimiter({ limit: 1, windowMs: 1000, storeMax: 2 })
+  assert.equal(allow('a', 0), true)
+  assert.equal(allow('b', 0), true)
+  assert.equal(allow('a', 0), false, 'a 已用满')
+  assert.equal(allow('c', 500), true, '容量满时新来源放行，但不清空全表')
+  assert.equal(allow('a', 500), false, 'a 的计数没被新来源清掉')
+  assert.equal(allow('d', 2000), true, '过期之后新来源正常记账')
+})
+
+check('三个公开端点都接了限流（源码钉子）', () => {
+  const workerSrc = readFileSync(join(FRONTEND, 'worker', 'index.ts'), 'utf8')
+  // 读接口是"列表 + 详情 + 站点文案"三条：共用同一个桶，少接一条就是给脚本留了个不设防的口子
+  const readHits = workerSrc.match(/allowPublicRead\(clientIpOf\(c\), Date\.now\(\)\)/g) ?? []
+  assert.ok(readHits.length >= 3, `公开读接口只接了 ${readHits.length} 处（列表/详情/站点文案都要）`)
+  assert.match(workerSrc, /allowImageRequest\(clientIpOf\(c\), Date\.now\(\)\)/, '图片端点没接限流')
+  assert.match(workerSrc, /allowUsageEvent\(clientIpOf\(c\), Date\.now\(\)\)/, '埋点端点没接限流')
 })
 
 let failed = 0
@@ -221,4 +277,4 @@ if (failed) {
   console.error(`preview_rules：${failed}/${cases.length} 个用例失败`)
   process.exit(1)
 }
-console.log(`preview_rules：全部 ${cases.length} 个用例通过（地址判据同源 / 前后端结论一致 / 坏行行号 / 改动列判定 / 埋点白名单）✓`)
+console.log(`preview_rules：全部 ${cases.length} 个用例通过（地址判据同源 / 前后端结论一致 / 坏行行号 / 改动列判定 / 埋点白名单 / 三个公开端点的限流）✓`)

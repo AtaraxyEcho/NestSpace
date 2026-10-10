@@ -180,9 +180,10 @@ export function mergeSiteSettings(data: Partial<SiteSettings> | null | undefined
       if (value.trim() !== '') {
         target[key] = value
       }
-    } else {
-      target[key] = value
     }
+    // 其余类型一律**不采纳**，留着内置默认值：D1/SQLite 是动态类型，列里被写成数字
+    // （手工改库、老写入方）时传进来的就是 number，取它会让下游 `statsSinceYear.trim()`
+    // 抛 TypeError 把整站打白。宁可回退默认文案——这里以前是 `else { target[key] = value }`。
   }
 
   return merged

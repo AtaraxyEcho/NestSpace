@@ -818,6 +818,16 @@ for (const column of mappedSettingsColumns) {
     `case 18b: 站点设置映射指向不存在的列 ${column} —— 部署前必须补迁移，否则保存 500`,
   )
 }
+// 18f：反方向也核一遍（迁移列 ⊆ 映射）。漏一条 ADD COLUMN 在 18b 就会红，
+// 反过来"库里多了列却没人能编辑"只会在迁移之后悄悄堆积 —— 两个方向都钉住，
+// 才配得上文档里"三份清单双向对齐"那句话。id / updated_at 由代码自己维护，不参与映射。
+for (const column of siteSettingsColumns) {
+  if (['id', 'updated_at'].includes(column.toLowerCase())) continue
+  assert.ok(
+    mappedSettingsColumns.some((mapped) => mapped.toLowerCase() === column.toLowerCase()),
+    `case 18f: site_settings.${column} 没有任何 worker 映射 —— 这一列从此没人能编辑（漏加映射，或该补 0015 删列）`,
+  )
+}
 for (const field of defaultSettingsFields) {
   assert.ok(
     mappedSettingsFields.has(field),
@@ -940,8 +950,8 @@ assert.deepEqual(
 const appSrc = readFileSync(join(FRONTEND, 'src', 'App.tsx'), 'utf8')
 assert.match(
   appSrc,
-  /saveAdminSiteSettings\(changed/,
-  'case 22a: 保存必须发改动集，不能退回整份 siteContent',
+  /saveAdminSiteSettings\(\s*changed as Partial<SiteSettings>/,
+  'case 22a: 保存必须发改动集，不能退回整份 siteContent（\s* 允许参数换行，仍要求第一个实参是 changed）',
 )
 assert.match(
   appSrc,
@@ -954,4 +964,35 @@ assert.match(
   'case 22c: 零改动要短路（整份 PUT 的空改动集会打到服务端的 400 分支）',
 )
 
-console.log('sync_update：全部用例通过（字段归属 / 格式口径 / 文档规则 / 地址解析 / 时间线 / 预览图 / 相册 / 写入校验 / 两种拼写冲突 / 管理端投影字段集 / 站点设置三份清单双向对齐 / 空白文案判据 / 站点设置写侧 / 改动集接线）✓')
+// case 23：管理端写路径要求 JSON Content-Type（CSRF 纵深）。
+// 控制台在"已被 Access 放行、没输过口令"时是纯 Cookie 认证，跨站页面发出的 text/plain 简单请求
+// 也会带上 CF_Authorization；要求 application/json 之后，跨站表单发不出这个类型。
+// 这条能真跑：把 Worker 当 Hono app 直接请求，用一个只回 changes=0 的 DB 桩（不碰真库）。
+const app = (await import(ROUTE_URL)).default
+const gateEnv = {
+  ADMIN_SECRET_KEY: 'gate-key',
+  DB: { prepare: () => ({ bind: () => ({ run: async () => ({ meta: { changes: 0 } }) }) }) },
+}
+const put = (contentType) =>
+  app.request(
+    'http://gate/api/admin/projects/001',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': contentType, Authorization: 'Bearer gate-key' },
+      body: '{"name":"x"}',
+    },
+    gateEnv,
+  )
+const plainRes = await put('text/plain')
+assert.equal(plainRes.status, 415, 'case 23a: text/plain 的写请求必须被 415 拦下（跨站表单唯一发得出的类型）')
+const jsonRes = await put('application/json')
+assert.equal(jsonRes.status, 404, 'case 23b: application/json 正常放行到处理器（桩 DB 让 changes=0 ⇒ 404，而不是 415）')
+
+const adminClientSrc = readFileSync(join(FRONTEND, 'src', 'api', 'adminClient.ts'), 'utf8')
+assert.match(
+  adminClientSrc,
+  /'Content-Type': 'application\/json'/,
+  'case 23c: 客户端所有写请求都走 getAuthHeaders()，这个头不能丢（一丢就全变 415）',
+)
+
+console.log('sync_update：全部用例通过（字段归属 / 格式口径 / 文档规则 / 地址解析 / 时间线 / 预览图 / 相册 / 写入校验 / 两种拼写冲突 / 管理端投影字段集 / 站点设置三份清单双向对齐 / 空白文案判据 / 站点设置写侧 / 改动集接线 / 写路径类型闸门）✓')

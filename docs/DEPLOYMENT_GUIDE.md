@@ -1,5 +1,10 @@
 # NestSpace 生产部署与安全运营手册
 
+> 本地跑起来看 [README.md](../README.md)；本文只管**部署、安全与运维**。
+> 文中出现的 `nestspace.online` / `admin.nestspace.online` / `github.com/AtaraxyEcho/NestSpace`
+> 是本项目的实际取值，用作逐步演示；换成你自己的域名与仓库即可，代码与构建产物里都不写死域名
+> （前后台互跳按 hostname 推导，`canonical` / `og:url` 按请求 origin 注入）。
+
 本项目已全面完成**前后端分离**改造，具备 **Cloudflare 全球边缘毫秒级分发**、**D1 边缘 SQLite 持久化**、**防网页劫持（CSP+HSTS）**，以及**管理 API 的三层防线防护**（边缘 Zero Trust 拦截 + 代码层 Bearer 密钥常量时间比较 + Access JWT 签名校验，默认 fail-closed）。
 
 ---
@@ -8,6 +13,7 @@
 
 ```text
 NestSpace/
+├── README.md                     # 三分钟上手：本地跑起来、后台能改什么、检查项与上线顺序
 ├── frontend/
 │   ├── dist/                     # vite 构建产物（含 _headers，作为 Worker 静态资产目录）
 │   ├── worker/                   # Cloudflare Worker（后端边缘 API）
@@ -22,21 +28,22 @@ NestSpace/
 │   │   ├── api/                  # 前端客户端 API (client.ts & adminClient.ts)
 │   │   ├── data/                 # 内置默认值与回退数据 (fallbackProjects / defaultSiteSettings)
 │   │   ├── types/                # 数据类型定义 (project.ts / siteSettings.ts)
-│   │   ├── utils/                # 可独立测试的纯逻辑：markdown.tsx 渲染、stats.ts 统计、
-│   │   │                         #   previewFrames.ts 观察台在场牌与牌面文字、
-│   │   │                         #   previewRules.ts 相册判据（与 Worker 写侧同一份）、
-│   │   │                         #   projectDiff.ts 抽屉改动列判定、usage.ts 匿名埋点、
-│   │   │                         #   navOrder.ts 首页栏目顺序、bilingual.ts 双语读侧规则、
+│   │   ├── utils/                # 可独立测试的纯逻辑：markdown.tsx 渲染、markdownLines.ts 正文折行、
+│   │   │                         #   stats.ts 统计、previewFrames.ts 观察台在场牌与牌面文字、
+│   │   │                         #   previewRules.ts 相册判据（与 Worker 写侧同一份）、projectDiff.ts 抽屉改动列判定、
+│   │   │                         #   usage.ts 匿名埋点、navOrder.ts 首页栏目顺序、bilingual.ts 双语读侧规则、
+│   │   │                         #   safeStorage.ts 浏览器存储的安全读写（存储被禁时不白屏）、
+│   │   │                         #   siteHost.ts 前后台互跳地址推导（admin.X ↔ X，代码里不写死域名）、
 │   │   │                         #   sectionCopy.ts 栏目标题与页面文案的读侧判据（四处消费者同源）
 │   │   ├── App.tsx               # 动态数据渲染与安全管理端
 │   │   ├── main.tsx              # React 入口（挂载 #root，引入 index.css）
 │   │   └── index.css             # 全局样式与设计 token（Tailwind v4 导入 + 主题变量）
 │   ├── .dev.vars.example         # 本地开发环境变量模板（复制为 .dev.vars 使用，不入 Git）
-│   ├── index.html                # Vite HTML 壳（figma 插件在构建期注入 title / description / og；另含 canonical）
+│   ├── index.html                # Vite HTML 壳（figma 插件在构建期注入 title / description / og；canonical 与 og:url 只留 `<!-- seo:origin-tags -->` 标记，由 Worker 按请求 origin 注入绝对地址）
 │   ├── vite.config.ts            # Vite + Tailwind v4 + Figma Make 插件；dev 下把 /api 代理到本地 wrangler
 │   ├── tsconfig.json             # 前端 TS 配置（worker/tsconfig.json 单独一套）
 │   ├── .figma/make/site.json     # 站点标题 / 描述 / 收录开关（构建期注入 HTML 头部）
-│   ├── test/                     # 单元测试（纯函数 / 前后端判据一致性；npm test 依次跑这十一个文件）
+│   ├── test/                     # 单元测试（纯函数 / 前后端判据一致性；pnpm test 依次跑这十五个文件）
 │   │   ├── jwt_verify.test.mjs   # JWT 校验与 Access 白名单
 │   │   ├── demo_url.test.mjs     # 演示地址规范化
 │   │   ├── sync_update.test.mjs  # GitHub 同步字段归属 / 时间线生成 / 代码列 ⊆ 迁移列（17f）/ 站点设置三份清单对齐（18）
@@ -45,10 +52,13 @@ NestSpace/
 │   │   ├── preview_dir.test.mjs  # 预览图目录导入：地址解析 / 位图筛选 / 排序 / 拼接 / 异常兜底
 │   │   ├── preview_rules.test.mjs # 相册判据前后端一致性 / 坏行行号 / 抽屉改动列判定 / 埋点白名单
 │   │   ├── nav_order.test.mjs    # 首页栏目顺序 = 导航顺序（缺项兜底 / 脏输入退化）
-│   ├── section_copy.test.mjs # 栏目标题取文（标签同源）/ 两类槽位判据 / 不烤默认 / 长度点名
-│   │   ├── bilingual.test.mjs    # 挑战/方案双语读侧：新列优先、旧列中文兜底、坏 JSON 不抛错、回退标注
+│   │   ├── section_copy.test.mjs # 栏目标题取文（标签同源）/ 两类槽位判据 / 不烤默认 / 长度点名
+│   │   ├── bilingual.test.mjs    # 挑战/方案双语读侧：新列优先、旧列按内容落栏、坏 JSON 不抛错、回退标注
 │   │   ├── markdown.test.mjs     # 正文两种渲染口径（README 折行 / 后台正文硬换行）+ 零原始 HTML 的源码钉子
-│   │   └── sync_scope.test.mjs   # 同步范围 ids：省略=全表、空数组=拒绝、形态与上限、去重
+│   │   ├── sync_scope.test.mjs   # 同步范围 ids：省略=全表、空数组=拒绝、形态与上限、去重
+│   │   ├── site_host.test.mjs    # 前后台互跳地址推导（admin.X ↔ X）/ 出货源码不写死域名与账号 / canonical 按 origin 补全
+│   │   ├── shell_guards.test.mjs # 首屏主题（深色两份取值一致 + 注入）与浏览器存储不可用时不白屏
+│   │   └── test_chain.test.mjs   # 闸门注册链与 test/ 目录一一对应（漏登记的闸门会在 CI 里静默不跑）
 │   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（Analytics Engine 数据集默认注释、按需开启）
 │   └── package.json
 │
@@ -69,10 +79,12 @@ NestSpace/
 │   │                             # 标本开源协议列（管理端填写；同步只填空白，不覆盖手工值）
 │   ├── 0013_add_detail_headlines.sql
 │   │                             # 详情页「挑战 / 方案」两段小标题（原先写死在组件里，现由管理端配置）
-│   └── 0014_add_section_copy.sql
-│                                 # 栏目与页面文案槽位（section_copy_json：首页描述行 + 详情页三处标题）
+│   ├── 0014_add_section_copy.sql
+│   │                             # 栏目与页面文案槽位（section_copy_json：首页描述行 + 详情页三处标题）
+│   └── 0015_fill_seed_narrative.sql
+│                                 # 纯数据：给种子的「挑战 / 方案」补上双语 JSON（只在列为空、且是种子行时）
 │
-├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十二个闸门 + 构建（见第四节末）
+├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十五个闸门 + 构建（见第四节末）
 │
 ├── scripts/                      # 运维脚本
 │   ├── d1-migrate.sh             # 一键按序执行全部 D1 迁移（local / remote，可反复执行）
@@ -85,7 +97,10 @@ NestSpace/
     ├── ARCHITECTURE_PLAN.md      # 架构方案与审查设计文档
     └── plans/                    # 历史规划记录（已完成的迭代过程，留作备查）
         ├── DEMO_ENTRY_PLAN_001.md
-        └── DEMO_ENTRY_PLAN_002.md
+        ├── DEMO_ENTRY_PLAN_002.md
+        ├── SECTION_CONFIG_PLAN_001.md
+        ├── SECTION_CONFIG_PLAN_002.md
+        └── SECTION_CONFIG_PLAN_003.md
 ```
 
 ---
@@ -128,20 +143,20 @@ bash scripts/d1-migrate.sh remote
 因此可以反复执行**。只有真正的错误（SQL 语法、约束冲突等）才会以非 0 退出并点名失败文件。
 需要指定库名时：`bash scripts/d1-migrate.sh remote nestspace-prod`。
 
-**顺序要求**：迁移必须先于 Worker 代码生效。新版 Worker 引用了这几批新列，任何一批没先落到生产库就部署代码，都会 500：
+**顺序要求**：迁移必须先于 Worker 代码生效。新版 Worker 引用了这几批新列，任何一批没先落到生产库就部署代码都会失败——**写路径由 `writeColumnErrorResponse` 翻成 400 并点名缺的那一列**（项目新建/更新、站点文案、逐仓库导入、同步的逐行失败都接了），**读路径用的是显式列清单，缺列仍是 500**。（`0015` 是纯数据迁移：不引入新列、代码不依赖它，单独跑或补跑都不会让任何请求失败。）
 
 | 缺哪批 | 引用的代码位置 | 表现 |
 |---|---|---|
-| `0005` 底部栏文案 | `site_settings` 写白名单（`footer_*`） | 「站点设置」保存报 500（读侧是 `SELECT *`，只会静默回退默认文案） |
-| `0006` 展示偏好 | `site_settings` 读写白名单 | 「站点设置」保存报 500 |
+| `0005` 底部栏文案 | `site_settings` 写白名单（`footer_*`） | 「站点设置」保存报 **400 并点名缺的那一列**（读侧是 `SELECT *`，只会静默回退默认文案） |
+| `0006` 展示偏好 | `site_settings` 读写白名单 | 「站点设置」保存报 **400 并点名缺的那一列** |
 | `0007` 标本文档 | 公开详情路由的 SELECT（`readme_zh` 等） | `GET /api/projects/:id` 每条都 500，详情页文档区退化为空 |
-| `0008` 演示入口 | 项目的读路径与写路径 | 管理端保存**任何**项目报 500（写路径引用不存在的列） |
-| `0009` 馆长手记 | `site_settings` 写白名单（`curator_*`，`worker/index.ts` 映射表） | 「站点设置」保存报 500（读侧同样静默回退，所以只有保存才暴露） |
+| `0008` 演示入口 | 项目的读路径与写路径 | 管理端保存项目报 **400 并点名该列**（`demo_url` / `demo_enabled`） |
+| `0009` 馆长手记 | `site_settings` 写白名单（`curator_*`，`worker/index.ts` 映射表） | 「站点设置」保存报 **400 并点名缺的那一列**（读侧同样静默回退，所以只有保存才暴露） |
 | `0010` 预览图 | 项目列表/详情的 SELECT 与同步写路径 | `GET /api/projects` 每条都 500（列表 SELECT 引用了不存在的列），首页与陈列整体空白 |
-| `0011` 双语叙述 | 项目列表/详情的 SELECT 与管理端写路径 | 同上两条 500；且「挑战 / 解决方案」保存写不进库（`challenge_json` / `solution_json` 不存在） |
+| `0011` 双语叙述 | 项目列表/详情的 SELECT 与管理端写路径 | 列表/详情仍是 500（读路径用的是显式列清单）；「挑战 / 解决方案」保存报 **400 并点名 `challenge_json` / `solution_json`** |
 | `0012` 标本协议 | 公开列表/详情的显式 SELECT（`license`）、管理端写路径与同步写路径 | `GET /api/projects` 每条都 500（首页与陈列空白），管理端保存项目同样 500 |
-| `0013` 详情页小标题 | `site_settings` 写白名单（`challenge_headline_*` / `solution_headline_*`） | 「07 详情页」保存报 500（读侧 `SELECT *`，只会静默回退内置文案） |
-| `0014` 栏目与页面文案 | `site_settings` 写白名单（`section_copy_json`） | 「04 首页 · 统计」「06 首页 · 目录」「07 详情页」的栏目文案卡保存报 500；读侧同样静默回退内置标题，所以只有保存才暴露 |
+| `0013` 详情页小标题 | `site_settings` 写白名单（`challenge_headline_*` / `solution_headline_*`） | 「04 详情页文案」保存报 **400 并点名缺的那一列**（读侧 `SELECT *`，只会静默回退内置文案） |
+| `0014` 栏目与页面文案 | `site_settings` 写白名单（`section_copy_json`） | 栏目文案卡保存报 **400 并点名 `section_copy_json`**；读侧同样静默回退内置标题，所以只有保存才暴露 |
 
 > ⚠️ **顺序是硬约束，而且 Git 自动构建不会替你把关**：第 4 节的 Workers Builds 是"push 即部署"，
 > 一旦你为了跑迁移而先 push 了代码，部署就已经发生了。正确顺序是
@@ -150,7 +165,7 @@ bash scripts/d1-migrate.sh remote
 > `GET /api/projects` 与详情接口 500 → 首页不报错，但公开列表变为空并显示一句
 > 「馆藏尚未公开任何标本」的空状态（内置演示标本只作**首屏占位**，接口不可达时也继续显示；
 > 只有当服务端**明确回报**空馆藏（200 + `[]`）时，才显示这条空状态而不是拿演示数据顶着说"有数据"），
-> 详情页里已发布 id 仍显示陈旧内容、其它 id 显示"未找到标本"，管理端保存项目直接 500。
+> 详情页里已发布 id 仍显示陈旧内容、其它 id 显示"未找到标本"，管理端保存项目被拒（写路径缺列一律 400 并点名该列）。
 > 这类"接口全 500 但页面还在跑"的形态比白屏更难发现，所以 `test/sync_update.test.mjs` 的 case 17f 已经把
 > **代码引用的列 ⊆ migrations/ 声明的列** 钉成闸门（含反向验证：喂一个不存在的列会红）。
 
@@ -188,7 +203,7 @@ npx wrangler secret put GITHUB_TOKEN
 
 ## 三、 管理端防护：代码层鉴权 + Zero Trust + 暴露面收敛
 
-管理 API（`/api/admin/*`）由三层防线共同保护，完成以下配置后全部生效：
+管理 API（`/api/admin/*`）由三层防线共同保护（下表末行是叠加在上面的失败限流），完成以下配置后全部生效：
 
 | 防线 | 层级 | 拦截对象 |
 |---|---|---|
@@ -197,9 +212,27 @@ npx wrangler secret put GITHUB_TOKEN
 | Zero Trust Access 边缘拦截 | 边缘层 | 让未认证请求根本到不了 Functions |
 | 鉴权失败限流 | 代码层 | 同一来源（按 `CF-Connecting-IP`）连续 10 次鉴权失败后返回 `429` 并带 `Retry-After: 600`，抑制在线口令爆破。计数器存在于 Worker isolate 内存中，属尽力而为的抑制手段，**不能替代强口令**，建议在 Cloudflare 侧叠加 WAF / Rate limiting 规则 |
 
+另有一条**防跨站写入的纵深**：控制台在"已被 Access 放行、没输过口令"时是**纯 Cookie 认证**
+（凭 `CF_Authorization`），此时一个跨站页面发出的简单请求也可能带上它。所以管理端**写操作要求
+`Content-Type: application/json`**，否则一律 `415`（跨站表单发不出这个类型；而带 `Authorization`
+头的调用天然免疫 CSRF，因为跨站 JS 设不了这个头）。这条只有在 `CF_Authorization` 被设为
+`SameSite=None` 时才是必需的——但由于该属性由边缘下发、代码里看不到，索性一直开着。
+
+**代码层的三条按 IP 限流**（`worker/index.ts` 的 `createRateLimiter`）：`/api/usage` 120/分钟（超出静默 204，不打扰访客）、
+公开读接口 `/api/projects`（列表与详情）与 `/api/site-settings` 共用 240/分钟（超出 `429` + `Retry-After: 60`；一次浏览是这三条），
+`/api/img` 300/分钟（图片一页要十来张，给得更宽；被限的表现就是那张图裂掉，客户端有 `imgfail` 埋点兜着）。
+共同前提要说清楚：**计数只活在当前 isolate**——Cloudflare 会把请求散到很多 isolate 与机房，
+所以它挡的是"同一来源的脚本化连打"，不是分布式压力，后者只能靠边缘的速率限制规则（见第三节第 3 条）。
+阈值都留了十倍以上余量，正常访客碰不到。此外，登录页在**没有 `admin.` 兄弟域**的环境
+（本地、IP 直连、`*.workers.dev` 预览域）会多出一条警示：那里没有 Access 那一层，后台只剩口令。
+
 ### 1. 配置独立管理子域名与 Access 应用（主流金标方案）
 
-为彻底杜绝公开主站与管理端的跨站风险，推荐将管理控制台部署在专属子域名 `admin.nestspace.online`：
+为彻底杜绝公开主站与管理端的跨站风险，推荐将管理控制台部署在专属子域名。
+**约定只有一个：管理端是主域的 `admin.` 兄弟域**——代码里不写死域名，
+前后台互跳的地址都按当前访问的 hostname 推导（`admin.X` ↔ `X`，见 `App.tsx` 的
+`publicSiteOrigin()` / `adminSiteOrigin()`），所以下文用本项目的 `nestspace.online` 作示例，
+换成你自己的主域即可，不必改代码重新构建。
 
 1. **添加 DNS 记录**：
    - 进入 Cloudflare 控制台 ➔ `nestspace.online` ➔ **DNS** ➔ **Records**。
@@ -266,9 +299,10 @@ Zero Trust 应用只对**配置的自定义域名**生效。以下入口默认�
    部署而设计（勾选后未认证者无法访问 preview URL）；若当时未勾选，在
    **Settings ➔ Domains & Routes ➔ Preview URLs** 中补开。注意 preview 环境默认连接
    同一个 D1 数据库。
-3. **速率限制（建议）**：在 **Security ➔ WAF ➔ Rate limiting rules** 中对路径
-   `/api/admin/*` 添加规则（例如 1 分钟内每 IP 超过 10 次即拦截或质询），
-   抬高对 Bearer 密钥的在线暴力破解成本。免费版包含基础速率限制规则。
+3. **速率限制（建议，先确认套餐）**：在 **Security ➔ WAF ➔ Rate limiting rules** 里配规则
+   （例：1 分钟内每 IP 超过 60 次就质询或拦截；`/api/admin/*` 可以更严，如 1 分钟 10 次）。
+   免费版**是否包含**这条规则各账号/时期并不一致——控制台里看得到就配上；看不到也不必为此升级套餐：
+   代码层已按 IP 做了尽力而为的限流（见 §三末尾那段，它挡的是脚本连打，不是分布式压力）。
 
 ---
 
@@ -289,7 +323,7 @@ cp .dev.vars.example .dev.vars
 bash scripts/d1-migrate.sh local
 
 # 2. 构建静态资产（Worker 的资产目录指向 dist，必须先构建）
-npm run build
+pnpm run build
 
 # 3. 启动 Worker 本地仿真服务器（自动挂载 dist、.dev.vars 和本地 D1）
 npx wrangler dev
@@ -320,7 +354,7 @@ bash scripts/usage-probe.sh
 
 ### CI（`.github/workflows/ci.yml`）
 
-push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十一个纯函数闸门）、
+push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十五个纯函数闸门）、
 `pnpm run build`。用 **pnpm** 不是风格问题：仓库里只有 `pnpm-lock.yaml`，`npm ci` 会直接 ENOLOCK 失败。
 版本钉在 `frontend/.mise.toml` 的同一套（node 22 / pnpm 10.34.3）。
 
@@ -356,7 +390,7 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
 - `frontend/public/robots.txt`：显式声明允许收录全站、屏蔽 `/api/`（JSON 接口无需进索引）；
 - 未配置 `title` 时会回退为默认值 "Figma Make App"，改标题务必在 site.json 中改。
 
-**收录范围说明**：本项目是哈希路由 SPA（如 `/#/project/001`），搜索引擎只会把根路径
+**收录范围说明**：本项目是哈希路由 SPA（如 `#project/001`），搜索引擎只会把根路径
 作为一个页面收录（Google 会执行 JS 渲染，首页动态内容可被索引）；各项目详情页不会
 成为独立的搜索结果。若未来需要每个项目拥有独立的搜索落地页，需改造为 History 路由
 并配合 sitemap.xml，属于架构级变更，届时再评估。
@@ -371,19 +405,25 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
 主标题、副标题、关于文案、GitHub/邮箱、SEO 标题描述、**页脚备案号**与**底部栏文案**存储在 D1 的
 `site_settings` 表中（迁移 `0003`，页脚文案字段见迁移 `0005`），通过 `#admin` 管理端编辑保存后即时生效，无需重新部署：
 
-**管理端按「页面 / 栏目」分栏**（Phase 4，2026-10-10）：侧栏依次是 `01 总览 · 02 全局 · 标头与导航 · 03 首页 · 陈列 ·
-04 首页 · 统计 · 05 首页 · 手记 · 06 首页 · 目录 · 07 详情页 · 08 底部栏 · 09 项目管理 · 10 GitHub 同步 · 11 站点设置`。
-以前一段栏目的配置散在三个视图里（名称在「导航与标头」、指标在「馆藏统计」、显隐在「站点设置 → 展示偏好」），
-现在按访客看到的那一段归到一栏。序号只在 `src/App.tsx` 的 `ADMIN_NAV` 里维护一份，
-页内 eyebrow 通过 `adminNavNo(key)` 取同一个数——以前侧栏写 01–08、页内各写一遍（「内容管理」是侧栏 04 却自称 `/ 02`），
-搬家之后只会更乱。搬动只改 JSX 归属与编号：**状态字段与写路径一个字没动**，所有卡仍调同一个 `saveSettings`
+**管理端按「页面」分栏，页面内按栏目分卡**（2026-10-10）：侧栏依次是
+`01 馆藏总览 · 02 标头与导航 · 03 首页栏目 · 04 详情页文案 · 05 底部栏文案 · 06 项目管理 · 07 GitHub 同步 · 08 站点设置`。
+以前首页四段的配置散在三个视图里（名称在「导航与标头」、指标在「馆藏统计」、显隐在「站点设置 → 展示偏好」），
+现在收进「03 首页栏目」一页，卡片的顺序就是访客在页面上看到的顺序：陈列 → 统计（指标 / 年鉴 / 该段描述）→ 手记（关于与联系 / 手记正文）→ 目录（该段描述）。
+**中途走过头一次**：先把四个栏目各升成一条侧栏项（`03 首页·陈列 … 06 首页·目录`），结果四条各只装一两张卡、
+看着像四个空壳——"按栏目分"指的是**页面内分区**，不是侧栏条目数。合并后这一页只留一个保存按钮：
+原先四块各有页级按钮、卡内还挂着「保存馆藏指标设置」这类按钮，它们调的是同一个 `saveSettings`、
+提交的都是整份改动集，标签暗示的作用域并不存在（点"只存指标"其实会把手记的改动一起写进去）。
+
+序号只在 `src/App.tsx` 的 `ADMIN_NAV` 里维护一份，页内 eyebrow 与顶栏标题都取自它——
+以前侧栏一份、页内各写一遍（「内容管理」是侧栏 04 却自称 `/ 02`），搬家之后只会更乱。
+搬动只改 JSX 归属与编号：**状态字段与写路径一个字没动**，所有卡仍调同一个 `saveSettings`
 （PUT 只发与库里不同的顶层键）。
 
-- **03 首页 · 陈列**（主标题 / 副标题）与 **05 首页 · 手记**（关于文案、GitHub 主页、联系邮箱、手记正文）：中英各一份；
+- **03 首页栏目**：主标题 / 副标题（陈列段）、关于文案 / GitHub 主页 / 联系邮箱、手记正文（手记段）、统计指标与年鉴、目录段与统计段的描述行；中英各一份，用页内语言页签切换；
 - **站点设置 → 站点信息 / 搜索与分享**：SEO 标题与 Meta 描述（保存后动态应用到页面标题与描述）；
 - **站点设置 → 备案信息 (ICP)**：**默认关闭**。填写备案号并开启开关后，页脚展示
   备案号并链接至工信部备案系统（默认 `https://beian.miit.gov.cn/`，可自定义）；
-- **05 首页 · 手记 → 手记栏目文案**（迁移 `0009`）：栏目标签、引言（按语言切换）、主标题（每行一句，
+- **03 首页栏目 → 手记栏目文案**（迁移 `0009`）：栏目标签、引言（按语言切换）、主标题（每行一句，
   两种语言模式下都会显示）、中文尾注（斜体，留空则不显示）、HABITAT / FIELD 属性值；
   改名或改文案都在此完成，无需改代码。
 - **按页面分开的「栏目与页面文案」卡**（迁移 `0014`，`src/utils/sectionCopy.ts`）：五个槽位存成一列 JSON
@@ -396,12 +436,12 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
   内置默认；**按访客语言只显示一种**的走 `pickSiteHeading` 跨语言回退。混用会让"只填英文"的标题框把中文侧
   也顶成英文。闸门 `section_copy.test.mjs` 钉住同源、两类判据、"内置默认不许被 merge 进 state"（否则任何一次
   保存都会把默认烤进库，以后改默认再也传不下去）与超限点名。
-- **07 详情页 → 详情页正文小标题**（迁移 `0013`，`src/utils/bilingual.ts` 的 `pickSiteHeading`）：
+- **04 详情页文案 → 详情页正文小标题**（迁移 `0013`，`src/utils/bilingual.ts` 的 `pickSiteHeading`）：
   详情页 FIELD NOTES 两栏 `THE CONDITION` / `THE RESPONSE` 下面的那两句标题，原先写死在组件里，
   现由管理端配置，中英各一份、随访客语言切换。内置默认就是原来那两句英文
   （`Why it needed to exist.` / `A narrow tool, carefully shaped.`），中文默认留空 = 中文模式也显示这两句英文；
   两栏都留空则回退内置默认（清空 = 恢复默认，不是删掉标题；只敲空格同样算留空）。
-  **这两句是唯一的真源**：前台的小标题、「05 项目管理」抽屉里那两栏正文的上排标注，都读同一个值——
+  **这两句是唯一的真源**：前台的小标题、「06 项目管理」抽屉里那两栏正文的上排标注，都读同一个值——
   改完标题，后台的指称跟着变（抽屉里因此不再写死「挑战 / 背景」「解决方案」）。这张卡自己的标题也刻意
   不含这两个词（它管的就是能把这两个词改掉的东西），锚点用不可配置的排版标签 `THE CONDITION` /
   `THE RESPONSE`。项目抽屉底部有「去改这两段的小标题」直达这张卡；抽屉里有未保存改动时它只弹确认、
@@ -418,18 +458,26 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
 - **底部栏**：中英文各一份，随访客语言切换。含品牌区小标与说明段落、三列标题、
   GitHub / 联系链接文字、Colophon 入口文字与底行版权行；文案支持 `{name}`（Logo 副标题署名）、
   `{since}`（馆藏起始年份）、`{year}`（当前年份）占位符；其中「章节导航列」的链接顺序、
-  名称与显示状态直接跟随**02 全局 · 标头与导航**的配置，改导航即同步改页脚；
-- **11 站点设置 → 展示偏好**（迁移 `0006`）：默认语言（跟随浏览器 / 中文 / English）、默认主题
+  名称与显示状态直接跟随**02 标头与导航**的配置，改导航即同步改页脚；
+- **08 站点设置 → 展示偏好**（迁移 `0006`）：默认语言（跟随浏览器 / 中文 / English）、默认主题
   （跟随系统 / 白日标本室 / 夜间标本室）、是否展示首页统计栏目、是否展示前台深浅色与
   语言切换按钮。**默认值等于既有行为**：语言与主题跟随访客浏览器与系统，统计与两个切换按钮全部开启；
-  「公开项目统计」开关已从展示偏好搬到 **04 首页 · 统计**（它管的就是那一段）；关闭时同步从导航与页脚移除该入口，避免留下点不到的链接；
+  「公开项目统计」开关已从展示偏好搬到 **03 首页栏目**的统计卡旁（它管的就是那一段）；关闭时同步从导航与页脚移除该入口，避免留下点不到的链接；
 - **SEO 生效范围**：管理端保存的标题与 Meta 描述会即时改写浏览器内的文档标题，同时由边缘 Worker
   注入到首页 HTML 的 `<title>` / `description` / `og:*`（**因此不执行 JS 的爬虫与社交平台也能读到**；
   注入结果按 isolate 缓存 60 秒，保存后最多 1 分钟生效）。页面语言也会同步写入 `<html lang>`。
+  `rel="canonical"` 与 `og:url` 在构建产物里**并不存在**，只有一行 `<!-- seo:origin-tags -->` 标记，
+  由同一次注入按当前请求的 origin 换成绝对地址——因此换主域、上 preview 子域都不用改 `index.html`。
+  （标记不能写成 `href="/"` 之类的相对地址：`vite:build-html` 会把根斜杠当站内资产去读文件，
+  `pnpm build` 直接以 `EISDIR` 失败。）
+- **首屏主题不闪**：展示偏好选「白日/夜间」这类**显式**值时，同一次注入会把 `data-theme` 直接打在
+  `<html>` 上（这份 SELECT 也顺带读 `default_theme`），于是第一帧就是对的，不用等 JS 起来；
+  选「跟随系统」时不注入，由 `index.css` 里 `@media (prefers-color-scheme: dark)` 那一段兜底。
+  两处深色取值必须一致，`test/shell_guards.test.mjs` 会逐项比对（改一处忘另一处就红）。
   **社交分享图目前未配置**（站点没有 `og:image`）：要添加就把图片放进 `frontend/public/`，
   并在 `.figma/make/site.json` 声明 `openGraph.image`，重新构建部署后生效；后台不提供修改。
 - **站点设置 → 域名与部署**：**只读信息卡**（当前访问域名、公开站点入口）。主域名、DNS 记录与
-  管理端子域由 Cloudflare 部署配置和代码中的跳转规则决定，后台不提供修改。
+  管理端子域由 Cloudflare 部署配置决定，后台不提供修改；前后台互跳地址按当前 hostname 推导。
 
 数据库字段为空时，公开站自动回退到 `frontend/src/data/defaultSiteSettings.ts` 的内置默认文案，
 因此未做任何配置的部署也始终有完整可读的内容。**"空"按 trim 后判定**：只填空格等同于没填
@@ -449,10 +497,12 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
 
 另有两点使用约定：
 
-- **管理端入口**：公开界面（页头/详情页/页脚）不展示任何管理入口按钮，通过直接访问
-  `https://你的域名/#admin` 进入（建议收藏）。这只是减少暴露面，真正的安全边界在
-  管理 API 层（见第三节三层防线）。
-- **GitHub 同步**：管理端「06 GitHub 同步」按各项目的仓库地址调用 GitHub 公开 API，
+- **管理端入口**：公开界面（页头/详情页/页脚）不展示任何管理入口按钮。直接访问 `https://admin.你的域名`
+  （建议收藏）；在公开站上敲 `https://你的域名/#admin` 会自动跳到该子域。**没有 `admin.` 兄弟域可用的环境**
+  （本地、IP 直连、`*.workers.dev` / `*.pages.dev` 预览域）不做跳转，`#admin` 就地打开后台——
+  判据是 `src/utils/siteHost.ts` 的 `hasAdminSibling()`，所以不存在"跳到不存在的域名"这种死链。
+  这只是减少暴露面，真正的安全边界在管理 API 层（见第三节三层防线）。
+- **GitHub 同步**：管理端「07 GitHub 同步」按各项目的仓库地址调用 GitHub 公开 API，
   把最新 stars / 推送时间 / Release 版本写回 D1。公开仓库无需任何 Token；**私有仓库
   在匿名 API 下不可见（会如实显示 404）**。如需同步私有仓库或提高速率限额，可配置
   `GITHUB_TOKEN`（`npx wrangler secret put GITHUB_TOKEN`），或在管理端「GitHub 同步」里临时填入
@@ -717,7 +767,7 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
 
 ## 七、 匿名使用度量（Analytics Engine，免费、无迁移；默认关闭）
 
-改版前先回答一句"怎么知道有没有变好"。此前整站**零度量**，所有判断只能靠专家走查，所以这轮补了三个聚合事件。
+改版前先回答一句"怎么知道有没有变好"。此前整站**零度量**，所有判断只能靠专家走查，所以这轮补了六个聚合事件。
 
 - ⚠️ **默认不挂绑定（重要）**：`frontend/wrangler.toml` 里的 `[[analytics_engine_datasets]]` 是**注释掉的**。
   该绑定要求账号先启用 Analytics Engine，未启用时 `wrangler deploy` 会直接失败
@@ -732,6 +782,9 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   | `deck` | `view` / `thumb` / `plate` / `arrow` / `drag` / `key` / `zoom` | 观察台有没有让人看图、翻图；缩略图索引与放大被用到没有 |
   | `imgfail` | —（带图源主机名 `h`） | 图片加载失败率，分母用 `deck view`；哪个图源在坏 |
   | `dirimport` | `ok` / `ratelimited` / `notfound` / `error` | 批量导入到底用了多少次、卡在哪一步（对应"减少手工粘贴"这个诉求） |
+  | `pageview` | `home` / `detail` / `admin` | 哪个页面有人在看（首页与详情各自只记一次，不叠加） |
+  | `specimen_open` | `card` / `index` / `related` / `footer` | 标本是从哪一段被打开的（带标本编号 `r`） |
+  | `outbound` | `github` / `demo` | 真的出站了没有（带标本编号 `r`）；转化率 = `outbound ÷ specimen_open` |
 - **不收什么**：IP、User-Agent、cookie、访客标识、项目 id、URL 查询串都不写。`/api/usage` 是**公开无鉴权**的，
   因此带**按 IP 的粗限流**（每分钟 120 条，超出静默丢弃并返回 204，不给访客报错），主机名只收
   `[a-z0-9.-]{1,63}` 形态，其余当没给。
@@ -773,7 +826,7 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   `apple-touch-icon.png` 是满铺方形、不留透明——iOS 把透明区域按黑色渲染，圆角由系统遮罩。
   - 渲染收在一个组件里：`LogoContent`（内容）+ `LogoWordmark`（首页的 `<a>` 外壳）；
     详情页返回入口是 `<button>`，所以那里用 `LogoContent` 而不是把 `<a>` 套进 `<button>`（非法 HTML）。
-  - 管理端「02 全局 · 标头与导航」的 Logo 地址**留空 = 用内置深浅两版**，填了 = 两个主题共用它（这就是替换入口）。
+  - 管理端「02 标头与导航」的 Logo 地址**留空 = 用内置深浅两版**，填了 = 两个主题共用它（这就是替换入口）。
     预览区是深浅两版并排——后台只有一套配色，跟着控制台主题走就永远看不到另一版的实际效果。
   - ⚠️ **这些 PNG / ICO 必须留在 Git 里、不能走 LFS**：`frontend/.gitattributes` 原本对 `*.png`、`*.ico` 全量启用 LFS，
     而 Workers Builds 的 git clone 不解 LFS 指针 —— 那样 `dist/brand/*.png` 会变成 ~130 字节的指针文本，
@@ -783,7 +836,7 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
     （`git check-attr` 实测四项均 unset）；原件 `frontend/design/` 继续走 LFS 无妨，它不参与构建。
   - ⚠️ **内置默认不会覆盖已存的偏好**：`logo_type` 在生产库里已经是 `'text'`（当年保存过一次），
     代码里的默认值 `'both'` 只对"该列为空"的情况生效。要让标头出图，去
-    「02 全局 · 标头与导航 → 显示模式」选「图标 + 文字」保存一次即可（这是一次生产写，由你执行）。
+    「02 标头与导航 → 显示模式」选「图标 + 文字」保存一次即可（这是一次生产写，由你执行）。
 - **顶部进度条改为整页滚动进度**：`--page-progress` 以前由螺旋段（cabinet）自己的滚动比例写入，
   而栏目顺序现在可配置 —— cabinet 一旦被拖到后面，前面几段全程读 0，进度条看着是坏的。
   改在 `App` 顶层按 `scrollY / (scrollHeight - innerHeight)` 计算，与段落顺序无关；
@@ -791,7 +844,7 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
 - **首页内容栏目顺序 = 管理端导航顺序**：`src/utils/navOrder.ts` 的 `orderHomeSections(navItems)` 是纯函数
   （闸门：`test/nav_order.test.mjs`），首页四段按它渲染；导航里没有的段落**排到末尾而不是消失**，
   外链/未知 id 不参与排版。`visible` 开关只管导航条上那个链接在不在，**不会**把对应段落从页面上删掉——
-  段落显隐仍由 `homeStatsVisible` 单独控制（现在挂在 **04 首页 · 统计**），两件事刻意不合并。
+  段落显隐仍由 `homeStatsVisible` 单独控制（现在挂在 **03 首页栏目**），两件事刻意不合并。
 - **栏目标题 = 导航标签本身**（迁移 `0014` 配套，`src/utils/sectionCopy.ts`）：`CABINET RECORD / 02` 那两段的
   `<h2>` 以前是写死在组件里的字面量，于是"后台把 Catalogue 改成 Statistics"只管到导航条，栏目标题仍是老词。
   现在四段标题都由 `navLabel(item, lang)` 从导航项取，与顶栏、页脚章节列、后台预览**同一份判据**

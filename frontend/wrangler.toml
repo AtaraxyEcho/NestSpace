@@ -31,4 +31,12 @@ database_id = "5e61e41e-0554-4ec4-8516-ee5f66a5f11d"
 #   [[analytics_engine_datasets]]
 #   binding = "METRICS"
 #   dataset = "nestspace_usage"
+# 事件集（白名单在 worker 的 USAGE_EVENTS，客户端联合类型由闸门 case 钉住与之同名）：
+#   deck         观察台翻页，方式 view/thumb/plate/arrow/drag/key/zoom
+#   imgfail      代理取图失败，h=图源主机名
+#   dirimport    后台按目录批量导入结果
+#   pageview     浏览了哪个页面：home / detail / admin
+#   specimen_open 从哪个位置打开某件标本：card / index / related / footer，r=标本编号
+#   outbound     真的出站：github / demo，r=标本编号
+#   ⇒ 转化率的算法：outbound ÷ specimen_open（按 r 分组即"哪件作品带走了点击"，按 m 分组即"哪一段在带量"）
 # 查询：npx wrangler analytics query nestspace_usage --since 7d

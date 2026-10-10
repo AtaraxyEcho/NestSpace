@@ -1,5 +1,10 @@
 # figma-make-app
 
+> **本仓库的真实开发回路以 [README.md](../README.md) 为准**：先 `pnpm run build`，再在 `frontend/` 下
+> `npx wrangler dev`（8787，内含 Worker + 本地 D1 + 静态资产）。`pnpm run dev` 只有 Vite、**没有 Worker**，
+> `/api` 会 404——它只用来做前端热更（`/api` 会代理到并行起的 8787）。
+> 下面这段"已经有一个 dev server 在跑"是 Figma Make 环境里的情况，在本地、CI 与部署环境里都不成立。
+
 React + Vite + Tailwind CSS project running inside Figma Make.
 
 ## Development Server

@@ -34,13 +34,28 @@ import {
   slotProse,
   sectionSlotIssues,
 } from "./utils/sectionCopy"
+// 前后台互跳的地址判据（admin.X ↔ X）：纯函数在 utils/siteHost.ts，闸门钉住拼接规则
+import {
+  adminSiteOrigin as adminOriginOf,
+  publicSiteOrigin as publicOriginOf,
+  hasAdminSibling,
+  isAdminHostname,
+  type HostParts,
+} from "./utils/siteHost"
 import type { SectionSlotKey } from "./types/siteSettings"
 // 双语字段（挑战/方案）的读侧规则，与 Worker 投影同一份
 import { asBilingual, pickBilingual, pickSiteHeading, type BilingualText } from "./utils/bilingual"
 // 相册判据与 Worker 写侧共用这一份（坏行即时点名与 400 点名必然是同一批）
 import { PREVIEW_IMAGE_LIMIT, galleryRowIssues } from "./utils/previewRules"
 import { changedColumns } from "./utils/projectDiff"
-import { trackImageFailure, trackUsage } from "./utils/usage"
+import { readSession, writeSession, clearSession } from "./utils/safeStorage"
+import {
+  trackImageFailure,
+  trackUsage,
+  trackOutbound,
+  trackPageView,
+  trackSpecimenOpen,
+} from "./utils/usage"
 
 
 function SpecimenSvg({ shape }: { shape: Project["shape"] }) {
@@ -138,6 +153,7 @@ function SpecimenCard({
   onOpen: (project: Project) => void
 }) {
   const demoUrl = demoHref(project)
+  const sourceUrl = sourceHref(project)
   return (
     <article className="specimen-card">
       <CropMarks />
@@ -186,7 +202,10 @@ function SpecimenCard({
             <button
               type="button"
               className="button primary"
-              onClick={() => onOpen(project)}
+              onClick={() => {
+                trackSpecimenOpen("card", project.id)
+                onOpen(project)
+              }}
             >
               View specimen <span>↗</span>
             </button>
@@ -196,18 +215,22 @@ function SpecimenCard({
                 href={demoUrl}
                 target="_blank"
                 rel="noreferrer"
+                onClick={() => trackOutbound("demo", project.id)}
               >
                 Live demo <span>↗</span>
               </a>
             ) : null}
-            <a
-              href={formatRepositoryUrl(project.repository)}
-              className="button secondary"
-              target="_blank"
-              rel="noreferrer"
-            >
-              GitHub <span>↗</span>
-            </a>
+            {sourceUrl ? (
+              <a
+                className="button secondary"
+                href={sourceUrl}
+                target="_blank"
+                rel="noreferrer"
+                onClick={() => trackOutbound("github", project.id)}
+              >
+                GitHub <span>↗</span>
+              </a>
+            ) : null}
           </div>
         </div>
       </div>
@@ -221,11 +244,15 @@ function SpecimenCard({
   )
 }
 
-/** 规范化仓库 URL，避免 https:// 重复拼接、缺冒号（如 https//）或缺失协议导致 DNS 解析异常 */
+/**
+ * 规范化仓库 URL，避免 https:// 重复拼接、缺冒号（如 https//）或缺失协议导致 DNS 解析异常。
+ * 留空返回空串：以前空值回 "https://github.com"，于是没填仓库的标本仍然长出一个「GitHub ↗」按钮，
+ * 点进去是 GitHub 首页——一个看起来能点、实际把人送错地方的按钮（本站唯一的转化动作就是去仓库）。
+ */
 export function formatRepositoryUrl(repo: string | null | undefined): string {
-  if (!repo) return "https://github.com"
+  if (!repo) return ""
   let trimmed = repo.trim()
-  if (!trimmed) return "https://github.com"
+  if (!trimmed) return ""
   if (/^git@github\.com:/i.test(trimmed)) {
     return `https://github.com/${trimmed.replace(/^git@github\.com:/i, "").replace(/\.git$/i, "")}`
   }
@@ -253,6 +280,12 @@ export function formatRepositoryUrl(repo: string | null | undefined): string {
 function demoHref(project: Project): string | null {
   if (!project.demoEnabled) return null
   const url = (project.demoUrl || "").trim()
+  return /^https?:\/\//i.test(url) ? url : null
+}
+
+/** 源码地址：与 demoHref 同一口径——规范化后必须是绝对 http(s) 才渲染按钮（空值不配拥有按钮） */
+function sourceHref(project: Project): string | null {
+  const url = formatRepositoryUrl(project.repository)
   return /^https?:\/\//i.test(url) ? url : null
 }
 
@@ -315,21 +348,42 @@ const DETAIL_TABS = ["overview", "readme", "deployment"] as const
 // 公开数据重读的最小间隔：管理端在独立子域，改动后切回公开页即可自动生效，又不至于每次聚焦都打接口
 const PUBLIC_REFRESH_MIN_INTERVAL_MS = 20 * 1000
 
-export function isAdminHost(): boolean {
+// 管理端与公开站是同一父域下的一对兄弟（admin.X ↔ X）。两侧地址都按当前 hostname 推导，
+// 拼接规则在 utils/siteHost.ts（有闸门），这里只把 window.location 递进去。
+function hostPartsOfWindow(): HostParts {
+  const { protocol, hostname, port } = window.location
+  return { protocol, hostname, port }
+}
+
+function isAdminHost(): boolean {
   if (typeof window === "undefined") return false
-  const host = window.location.hostname.toLowerCase()
-  return host === "admin.nestspace.online" || host.startsWith("admin.")
+  return isAdminHostname(window.location.hostname)
+}
+
+/** 公开站 origin（服务端渲染期没有 window，返回空串） */
+function publicSiteOrigin(): string {
+  return typeof window === "undefined" ? "" : publicOriginOf(hostPartsOfWindow())
+}
+
+/** 管理端子域 origin；当前主机没有兄弟域时返回空串（调用方据此不跳） */
+function adminSiteOrigin(): string {
+  return typeof window === "undefined" ? "" : adminOriginOf(hostPartsOfWindow())
+}
+
+/** 当前公开主机能不能靠 admin.<主域> 找到管理端（本地、IP、*.workers.dev 预览域都不能） */
+function canSwitchToAdminHost(): boolean {
+  return typeof window !== "undefined" && hasAdminSibling(window.location.hostname)
 }
 
 function routeFromHash(hash: string) {
   if (isAdminHost()) return "admin"
   // 这里只做**纯解析**、不做跳转：本函数会在 useState 初始化（render 期间）被调用，
-  // 在其中改 location 属于渲染期副作用。生产公开站点上的 #admin 跳到 admin 子域由路由 effect 负责；
-  // 这里仍返回 home，免得登录页在公开域名上闪一下。
+  // 在其中改 location 属于渲染期副作用。
   const clean = hash.replace(/^#/, "")
-  const isLocalHost =
-    typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname)
-  if (clean === "admin" && !isAdminHost() && !isLocalHost) return "home"
+  // 公开站上的 #admin 有两种归宿：能上 admin 子域就留在首页交给路由 effect 跳走（免得登录页闪一下），
+  // 没有子域的环境（本地、IP 直连、*.workers.dev/*.pages.dev 预览域）**就地渲染后台**——
+  // 鉴权靠口令与 Access，不靠"域名长什么样"。
+  if (clean === "admin" && canSwitchToAdminHost()) return "home"
   if (!clean || SECTION_ANCHORS.includes(clean)) return "home"
   // 只有 admin 与 project/<id> 是真路由；其余（比如导航里一个手工写进库的未知锚点）
   // 必须留在首页分支——否则首页虽然渲染，但进场动画与深链定位两个 effect 都因
@@ -359,7 +413,7 @@ const BRAND_LOGO = {
  */
 function LogoContent({ settings, dark }: { settings: SiteSettings; dark: boolean }) {
   const logoText = settings.logoText || "NESTSPACE"
-  const logoSubtext = settings.logoSubtext || "ATARAXYECHO"
+  const logoSubtext = settings.logoSubtext || settings.logoText
   const logoType = settings.logoType || "both"
   const logoImageUrl = (settings.logoImageUrl || "").trim()
   // 管理端填了地址 = 两个主题都用它（替换）；留空**或填了非法协议**才回到内置的两版。
@@ -377,7 +431,8 @@ function LogoContent({ settings, dark }: { settings: SiteSettings; dark: boolean
       {logoType !== "text" ? (
         <img
           src={logoSrc}
-          alt={logoText}
+          // 只有"仅图片"模式才靠它读站名；图文模式下面还有同一段文字，此时它是装饰图
+          alt={logoType === "image" ? logoText : ""}
           className="wordmark-logo-img"
           // 内置 mark 是 128×128 的方形图：给出固有尺寸，浏览器能在解码前就留好盒子
           // （标头在首屏，缺宽高会抖一下）。自定义地址不知道比例，就不硬填。
@@ -717,11 +772,17 @@ function SpiralGallery({
   }
 
   return (
-    <section className="spiral-scroll" id="cabinet" ref={sectionRef}>
+    <section
+      className="spiral-scroll"
+      id="cabinet"
+      ref={sectionRef}
+      style={{ "--spiral-steps": Math.max(1, items.length - 1) } as React.CSSProperties}>
       <div className="spiral-sticky">
         <div className="ambient-mark">
           <span>{language === "zh" ? settings.subtitleZh : settings.subtitleEn}</span>
-          <strong>NestSpace</strong>
+          {/* 首页唯一的 h1：整页此前没有一级标题（十个 h1 全在详情页与管理端）。
+              用站点名而不是某段叙事，因为它就是这一页的"标题"。 */}
+          <h1 className="ambient-title">{settings.logoText || "NESTSPACE"}</h1>
           <em>{language === "zh" ? settings.heroZh : settings.heroEn}</em>
           <small>CABINET NO. 01 · LIVING OPEN-SOURCE SPECIMENS</small>
         </div>
@@ -734,7 +795,7 @@ function SpiralGallery({
               onClick={() => goToSpecimen(index)}
               key={project.id}
             >
-              <span>0{index + 1}</span>
+              <span>{pad2(index + 1)}</span>
               {project.name}
             </button>
           ))}
@@ -759,7 +820,7 @@ function SpiralGallery({
         </div>
         <div className="gallery-footer">
           <span className="gallery-count">
-            0{active + 1} <i /> 0{items.length}
+            {pad2(active + 1)} <i /> {pad2(items.length)}
           </span>
           <span className="scroll-cue">
             SCROLL TO TRAVERSE <b>↓</b>
@@ -989,6 +1050,16 @@ function SpecimenIndex({
   // eyebrow 用的是条目数（SYSTEMATIC REGISTER / 04 = 四件标本），不是段落序号，刻意的。
   const heading = sectionHeading(navItems, "index")
   const description = slotProse(settings.sectionCopy, "home.index", language)
+  // 馆藏到量才给搜索：小清单上加一个输入框只会让人觉得东西少
+  const [query, setQuery] = useState("")
+  const needle = query.trim().toLowerCase()
+  const rows = needle
+    ? items.filter((item) =>
+        `${item.name} ${item.cn} ${item.type} ${item.language}`
+          .toLowerCase()
+          .includes(needle),
+      )
+    : items
   return (
     <section className="section index-section" id="index">
       <div className="section-heading">
@@ -1006,11 +1077,42 @@ function SpecimenIndex({
           {String(items.length).padStart(2, "0")} ENTRIES
         </span>
       </div>
+      {items.length >= INDEX_SEARCH_THRESHOLD ? (
+        <label className="index-search">
+          <span className="index-search-label">
+            {language === "zh" ? "检索馆藏" : "Search the collection"}
+          </span>
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={language === "zh" ? "名称 / 类型 / 语言" : "name / type / language"}
+            aria-label={language === "zh" ? "检索馆藏" : "Search the collection"}
+          />
+          {needle ? (
+            <small>
+              {language === "zh"
+                ? `${rows.length} / ${items.length} 件匹配`
+                : `${rows.length} of ${items.length} match`}
+            </small>
+          ) : null}
+        </label>
+      ) : null}
+      {!rows.length ? (
+        <p className="section-empty index-empty">
+          {language === "zh"
+            ? "没有匹配的标本，换个关键词试试。"
+            : "No specimens match — try another keyword."}
+        </p>
+      ) : null}
       <div className="index-list">
-        {items.map((project, index) => (
+        {rows.map((project, index) => (
           <button
             type="button"
-            onClick={() => onOpen(project)}
+            onClick={() => {
+              trackSpecimenOpen("index", project.id)
+              onOpen(project)
+            }}
             className="index-row"
             key={project.id}
             style={{ "--delay": `${index * 80}ms` } as React.CSSProperties}
@@ -1057,7 +1159,7 @@ function SiteFooter({
     language === "zh" ? zh || en : en || zh
   const stats = computeCatalogueStats(items, settings)
   const templateVars = {
-    name: settings.logoSubtext || "AtaraxyEcho",
+    name: settings.logoSubtext || settings.logoText,
     since: stats.sinceYear,
     year: new Date().getFullYear(),
   }
@@ -1118,8 +1220,8 @@ function SiteFooter({
           <span className="eyebrow">
             {copy(settings.footerKickerEn, settings.footerKickerZh)}
           </span>
-          <strong>{settings.logoText || "NestSpace"}</strong>
-          <em>{settings.logoSubtext || "ATARAXYECHO"}</em>
+          <strong>{settings.logoText || "NESTSPACE"}</strong>
+          <em>{settings.logoSubtext || settings.logoText}</em>
           <p>{fill(copy(settings.footerBlurbEn, settings.footerBlurbZh))}</p>
         </div>
         <div>
@@ -1130,7 +1232,10 @@ function SiteFooter({
             <button
               type="button"
               key={project.id}
-              onClick={() => onOpen(project)}
+              onClick={() => {
+                trackSpecimenOpen("footer", project.id)
+                onOpen(project)
+              }}
             >
               {project.name}
             </button>
@@ -1210,6 +1315,7 @@ function DetailPage({
 }) {
   const related = items.filter((item) => item.id !== project.id).slice(0, 2)
   const demoUrl = demoHref(project)
+  const sourceUrl = sourceHref(project)
   // 相册：优先多张；只有封面时退化为单张；都没有则不渲染预览区
   const previewImages =
     project.previewImages && project.previewImages.length > 0
@@ -1221,6 +1327,10 @@ function DetailPage({
   const coverSrc = project.previewImageUrl
     ? proxiedImage(project.previewImageUrl, IMAGE_WIDTH.plate)
     : ""
+  // 封面加载失败（原图被删/图源挂了）时退回"没有封面"那套版式：
+  // 留着破图只会显示浏览器默认的裂图图标，比没有图更难看，也不说明任何事
+  const [coverBroken, setCoverBroken] = useState(false)
+  const showCover = coverSrc !== "" && !coverBroken
   const [plateRatio, setPlateRatio] = useState<number | null>(null)
   const [detailTab, setDetailTab] =
     useState<"overview" | "readme" | "deployment">("overview")
@@ -1354,20 +1464,24 @@ function DetailPage({
               )
             })()}
             <div className="detail-actions">
-              <a
-                className="button primary"
-                href={formatRepositoryUrl(project.repository)}
-                target="_blank"
-                rel="noreferrer"
-              >
-                VIEW SOURCE <span>↗</span>
-              </a>
+              {sourceUrl ? (
+                <a
+                  className="button primary"
+                  href={sourceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={() => trackOutbound("github", project.id)}
+                >
+                  VIEW SOURCE <span>↗</span>
+                </a>
+              ) : null}
               {demoUrl ? (
                 <a
                   className="button secondary"
                   href={demoUrl}
                   target="_blank"
                   rel="noreferrer"
+                  onClick={() => trackOutbound("demo", project.id)}
                 >
                   LIVE DEMO <span>↗</span>
                 </a>
@@ -1386,7 +1500,7 @@ function DetailPage({
             </div>
           </div>
           <div
-            className={`detail-plate${coverSrc ? " has-cover" : ""}`}
+            className={`detail-plate${showCover ? " has-cover" : ""}`}
             style={
               plateRatio
                 ? ({ "--plate-ratio": String(plateRatio) } as React.CSSProperties)
@@ -1395,13 +1509,14 @@ function DetailPage({
           >
             <CropMarks />
             <span className="plate-code">NS / {project.id}</span>
-            {coverSrc ? (
+            {showCover ? (
               <img
                 className="plate-cover"
                 src={coverSrc}
-                alt={`${project.name} 预览`}
+                alt={language === "zh" ? `${project.name} 预览` : `${project.name} preview`}
                 decoding="async"
                 fetchPriority="high"
+                onError={() => setCoverBroken(true)}
                 onLoad={(event) => {
                   const el = event.currentTarget
                   if (el.naturalWidth && el.naturalHeight) {
@@ -1542,7 +1657,7 @@ function DetailPage({
             <div className="capability-grid">
               {features.map((feature, index) => (
                 <article key={feature}>
-                  <span>0{index + 1}</span>
+                  <span>{pad2(index + 1)}</span>
                   <h3>{feature}</h3>
                 </article>
               ))}
@@ -1573,7 +1688,7 @@ function DetailPage({
             <div className="evolution-list">
               {timeline.map((event, index) => (
                 <article key={`${event.date}-${event.title}-${index}`}>
-                  <span className="event-index">0{index + 1}</span>
+                  <span className="event-index">{pad2(index + 1)}</span>
                   <time>{event.date}</time>
                   <h3>{event.title}</h3>
                   <p>{event.note}</p>
@@ -1761,7 +1876,14 @@ function DetailPage({
         </div>
         <div className="related-grid">
           {related.map((item) => (
-            <button type="button" key={item.id} onClick={() => onOpen(item)}>
+            <button
+              type="button"
+              key={item.id}
+              onClick={() => {
+                trackSpecimenOpen("related", item.id)
+                onOpen(item)
+              }}
+            >
               <span>
                 SPEC—{item.id} · {item.type}
               </span>
@@ -1879,30 +2001,25 @@ function SectionSlotFields({
 type AdminView =
   | "overview"
   | "global"
-  | "homeCabinet"
-  | "homeStats"
-  | "homeCurator"
-  | "homeIndex"
+  | "home"
   | "detail"
   | "footer"
   | "projects"
   | "sync"
   | "settings"
 
-// 侧栏按「页面 / 栏目」分组。序号只在这里维护一份：以前侧栏写 01–08、页内 eyebrow 各写一遍
-// （「内容管理」是侧栏 04 却自称 / 02、「站点设置」是 07 却自称 / 03），搬家之后只会更乱。
+// 侧栏按访客看到的页面分组：一个页面一条，页面里再按栏目分卡（以前把首页四段各升成一条侧栏项，
+// 四条都只装一两张卡，看着像拆了四个空壳）。序号只在这里维护一份，
+// 页内 eyebrow 与顶栏标题都取自这张表——以前侧栏一份、页内一份，早就对不上过。
 const ADMIN_NAV: readonly { key: AdminView; no: string; label: string }[] = [
   { key: "overview", no: "01", label: "馆藏总览" },
-  { key: "global", no: "02", label: "全局 · 标头与导航" },
-  { key: "homeCabinet", no: "03", label: "首页 · 陈列" },
-  { key: "homeStats", no: "04", label: "首页 · 统计" },
-  { key: "homeCurator", no: "05", label: "首页 · 手记" },
-  { key: "homeIndex", no: "06", label: "首页 · 目录" },
-  { key: "detail", no: "07", label: "详情页" },
-  { key: "footer", no: "08", label: "底部栏文案" },
-  { key: "projects", no: "09", label: "项目管理" },
-  { key: "sync", no: "10", label: "GitHub 同步" },
-  { key: "settings", no: "11", label: "站点设置" },
+  { key: "global", no: "02", label: "标头与导航" },
+  { key: "home", no: "03", label: "首页栏目" },
+  { key: "detail", no: "04", label: "详情页文案" },
+  { key: "footer", no: "05", label: "底部栏文案" },
+  { key: "projects", no: "06", label: "项目管理" },
+  { key: "sync", no: "07", label: "GitHub 同步" },
+  { key: "settings", no: "08", label: "站点设置" },
 ]
 
 /** 页内 eyebrow 的编号与顶栏标题：都取自 ADMIN_NAV，杜绝"侧栏一份、页内一份" */
@@ -2000,7 +2117,7 @@ function AdminFooterView({
   const pick = (en: string, zh: string) =>
     contentLanguage === "zh" ? zh || en : en || zh
   const templateVars = {
-    name: settings.logoSubtext || "AtaraxyEcho",
+    name: settings.logoSubtext || settings.logoText,
     since: computeCatalogueStats(items, settings).sinceYear,
     year: new Date().getFullYear(),
   }
@@ -2066,7 +2183,7 @@ function AdminFooterView({
           />
           <FooterCopyField
             label="品牌说明段落"
-            hint="支持 {name} 占位符，取自「02 全局 · 标头与导航」的副标题署名"
+            hint="支持 {name} 占位符，取自「02 标头与导航」的副标题署名"
             language={contentLanguage}
             settings={settings}
             enKey="footerBlurbEn"
@@ -2081,7 +2198,7 @@ function AdminFooterView({
           <h2>三列标题与锚点文字</h2>
           <FooterCopyField
             label="标本列表列标题"
-            hint="内容为全部公开标本名称，来自「09 项目管理」"
+            hint="内容为全部公开标本名称，来自「06 项目管理」"
             language={contentLanguage}
             settings={settings}
             enKey="footerColSpecimensEn"
@@ -2090,7 +2207,7 @@ function AdminFooterView({
           />
           <FooterCopyField
             label="章节导航列标题"
-            hint="该列链接的顺序、名称与显示状态跟随「02 全局 · 标头与导航」"
+            hint="该列链接的顺序、名称与显示状态跟随「02 标头与导航」"
             language={contentLanguage}
             settings={settings}
             enKey="footerColCollectionEn"
@@ -2122,7 +2239,7 @@ function AdminFooterView({
           <h2>外部链接显示文字</h2>
           <FooterCopyField
             label="GitHub 链接文字"
-            hint="链接地址来自「05 首页 · 手记」的 GitHub"
+            hint="链接地址来自「03 首页栏目」的 GitHub"
             language={contentLanguage}
             settings={settings}
             enKey="footerGithubLabelEn"
@@ -2131,7 +2248,7 @@ function AdminFooterView({
           />
           <FooterCopyField
             label="联系链接文字"
-            hint="链接指向 mailto:「05 首页 · 手记」的联系邮箱"
+            hint="链接指向 mailto:「03 首页栏目」的联系邮箱"
             language={contentLanguage}
             settings={settings}
             enKey="footerContactLabelEn"
@@ -2145,7 +2262,7 @@ function AdminFooterView({
           <h2>版权行</h2>
           <FooterCopyField
             label="底行左侧文案"
-            hint="支持 {since} 占位符，取馆藏起始年份（可在「04 首页 · 统计」指定）"
+            hint="支持 {since} 占位符，取馆藏起始年份（可在「03 首页栏目」指定）"
             language={contentLanguage}
             settings={settings}
             enKey="footerColophonLineEn"
@@ -2154,7 +2271,7 @@ function AdminFooterView({
           />
           <FooterCopyField
             label="底行右侧版权行"
-            hint="支持 {year} 占位符，取当前年份；备案号在「11 站点设置」的备案信息卡片"
+            hint="支持 {year} 占位符，取当前年份；备案号在「08 站点设置」的备案信息卡片"
             language={contentLanguage}
             settings={settings}
             enKey="footerCopyrightEn"
@@ -2177,7 +2294,7 @@ function AdminFooterView({
               {pick(settings.footerKickerEn, settings.footerKickerZh)}
             </span>
             <strong>{settings.logoText || "NESTSPACE"}</strong>
-            <em>{settings.logoSubtext || "ATARAXYECHO"}</em>
+            <em>{settings.logoSubtext || settings.logoText}</em>
             <p>{fill(pick(settings.footerBlurbEn, settings.footerBlurbZh))}</p>
           </div>
           <div className="footer-preview-cols">
@@ -2227,14 +2344,22 @@ function AdminFooterView({
 
 function AdminGateway({
   items,
+  logoText,
   onChange,
   onExit,
 }: {
   items: Project[]
+  /** 登录卡上的站名：与公开站同一个来源，不在代码里留站名 */
+  logoText: string
   onChange: (items: Project[]) => void
   onExit: () => void
 }) {
   const [authenticated, setAuthenticated] = useState(false)
+  // 有 admin. 兄弟域 = 生产形态（Access 拦在边缘）；没有 = 本地/IP/预览域，只剩口令一层
+  const accessLayerPresent =
+    typeof window === "undefined" ||
+    isAdminHost() ||
+    hasAdminSibling(window.location.hostname)
   const [password, setPassword] = useState("")
   const [loading, setLoading] = useState(false)
   const [authError, setAuthError] = useState("")
@@ -2290,9 +2415,17 @@ function AdminGateway({
       <form onSubmit={handleSubmit}>
         <CropMarks />
         <span className="eyebrow">EDGE PROTECTED / CLOUDFLARE ZERO TRUST</span>
-        <strong>NestSpace</strong>
+        <strong>{logoText || "NESTSPACE"}</strong>
         <em>馆长控制台</em>
         <p>请输入管理员安全口令（ADMIN_SECRET_KEY）以进入边缘管理后台。</p>
+        {!accessLayerPresent ? (
+          // 页眉那行「EDGE PROTECTED」在没有 Access 子域的环境里是句空话，
+          // 必须在这里说清楚：只剩口令这一层，别以为有 Zero Trust 兜底
+          <p className="login-posture" role="note">
+            注意：当前域名没有 <code>admin.</code> 兄弟子域，Cloudflare Access 那一层不在场，
+            后台只由这道口令保护——建议只用于本地调试，生产请用受 Access 保护的子域。
+          </p>
+        ) : null}
         <label>
           CURATOR KEY / 密钥口令
           <input
@@ -2439,29 +2572,37 @@ function AdminPage({
   const [savingProject, setSavingProject] = useState(false)
   // 关闭抽屉时如果有未保存改动，这里存改动列数（>0 表示确认条展开）
   const [confirmClose, setConfirmClose] = useState(0)
+  // 抽屉的焦点管理：打开时环在抽屉里、关闭后还给唤起它的那个按钮（键盘用户不该被丢在 body 上）
+  const drawerRef = useRef<HTMLFormElement | null>(null)
+  const drawerOpenerRef = useRef<HTMLElement | null>(null)
   // 后台只有一条通知位（.admin-notice）。三种状态各有归宿：
   //   info —— 结果性提示，6 秒后自动让位（否则一条旧消息会常驻到下次操作，失败提示会被冲掉）；
   //   error —— 常驻，带关闭按钮，直到用户确认它被看过；
   //   busy —— 在途提示，不自动消失（GitHub 抓取可能超过 10 秒，自动消失会让人以为没反应）。
   const [notice, setNoticeText] = useState("")
   const [noticeKind, setNoticeKind] = useState<"info" | "error" | "busy">("info")
-  const setNotice = (message: string) => {
+  // 常驻提示：额度归零、部分同步失败这类"再点一次也不会自己好"的结果，6 秒淡掉等于没说
+  const [noticeSticky, setNoticeSticky] = useState(false)
+  const setNotice = (message: string, sticky = false) => {
     setNoticeText(message)
     setNoticeKind("info")
+    setNoticeSticky(sticky)
   }
   const setNoticeError = (message: string) => {
     setNoticeText(message)
     setNoticeKind("error")
+    setNoticeSticky(false)
   }
   const setNoticeBusy = (message: string) => {
     setNoticeText(message)
     setNoticeKind("busy")
+    setNoticeSticky(false)
   }
   useEffect(() => {
-    if (noticeKind !== "info" || !notice) return
+    if (noticeKind !== "info" || noticeSticky || !notice) return
     const timer = setTimeout(() => setNoticeText(""), 6000)
     return () => clearTimeout(timer)
-  }, [notice, noticeKind])
+  }, [notice, noticeKind, noticeSticky])
   const [contentLanguage, setContentLanguage] = useState<Language>("zh")
   // 站点文案与合规设置：初始为内置默认值，挂载后从 D1 拉取覆盖
   const [siteContent, setSiteContent] = useState<SiteSettings>({
@@ -2471,6 +2612,9 @@ function AdminPage({
   const [settingsBaseline, setSettingsBaseline] = useState<SiteSettings>({
     ...DEFAULT_SITE_SETTINGS,
   })
+  // 单行表的版本戳：保存时带回给服务端做乐观锁。两个标签页各存一次时，
+  // 后存的一方否则会把自己载入时的旧值当"改动"写回去（提示还是成功，N 还被抬高）。
+  const [settingsStamp, setSettingsStamp] = useState("")
   const [syncing, setSyncing] = useState(false)
   // 是否在同步指标的同时抓取 README / Compose 文档
   const [syncDocs, setSyncDocs] = useState(false)
@@ -2481,8 +2625,10 @@ function AdminPage({
   const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [settingsLoadError, setSettingsLoadError] = useState("")
   const [syncResults, setSyncResults] = useState<GithubSyncResult[] | null>(null)
-  const [githubUser, setGithubUser] = useState("AtaraxyEcho")
-  const [githubToken, setGithubToken] = useState(() => sessionStorage.getItem("nestspace_gh_token") || "")
+  const [githubUser, setGithubUser] = useState("")
+  // sessionStorage 在"禁用存储"的浏览器里读取就抛 SecurityError；这段跑在 render 期，
+  // 不接住会直接把整站白屏（不是降级）
+  const [githubToken, setGithubToken] = useState(() => readSession("nestspace_gh_token"))
   const [scanningRepos, setScanningRepos] = useState(false)
   const [discoveredRepos, setDiscoveredRepos] = useState<RemoteGithubRepo[] | null>(null)
   const [importingRepo, setImportingRepo] = useState<string | null>(null)
@@ -2499,6 +2645,7 @@ function AdminPage({
     }
     setSiteContent(res.data)
     setSettingsBaseline(res.data)
+    setSettingsStamp(res.updatedAt ?? "")
     setSettingsLoaded(true)
     if (res.data.githubUrl) {
       const match = /github\.com\/([^/\s#?]+)/i.exec(res.data.githubUrl)
@@ -2536,11 +2683,21 @@ function AdminPage({
       return
     }
     setNoticeBusy(`正在保存 ${changedCount} 项站点设置到线上库...`)
-    const res = await saveAdminSiteSettings(changed as Partial<SiteSettings>)
+    const res = await saveAdminSiteSettings(
+      changed as Partial<SiteSettings>,
+      settingsStamp,
+    )
     // 成功/失败分两条通道：成功会 6 秒淡出，失败常驻到用户关掉——混在一个三元里就没法区分
     if (res.success) {
       setSettingsBaseline({ ...siteContent })
+      if (res.updatedAt) setSettingsStamp(res.updatedAt)
       setNotice(`站点设置已保存（改动 ${changedCount} 项），刷新公开站点即可生效。`)
+    } else if (res.conflict) {
+      // 基线过期：不写、也不悄悄用对方的值重建基线。戳保持不变，所以他重新载入前每次保存都会被拒——
+      // 这正是目的（继续写就会把对方那一份回退掉）。
+      setNoticeError(
+        res.error || "站点设置已被别处保存过，本次未写入。请重新载入后再保存。",
+      )
     } else {
       setNoticeError(`保存失败: ${res.error || "请检查网络或口令权限"}`)
     }
@@ -2577,13 +2734,16 @@ function AdminPage({
   }
 
   const handleScanRepos = async () => {
-    if (!githubUser.trim()) {
-      setNoticeError("请输入 GitHub 用户名")
-      return
-    }
+    // 账号留空 = 让服务端按站点设置里的 GitHub 地址推导（那个框只是"临时改扫别的账号"），
+    // 所以不能在前端拦下空值，否则提示会说谎。
+    const account = githubUser.trim()
     setScanningRepos(true)
-    setNoticeBusy(`正在扫描 GitHub 用户 @${githubUser.trim()} 的所有公开仓库…`)
-    const res = await fetchGithubUserRepos(githubUser.trim(), githubToken.trim() || undefined)
+    setNoticeBusy(
+      account
+        ? `正在扫描 GitHub 用户 @${account} 的所有公开仓库…`
+        : "账号留空，正在按「03 首页栏目」里的 GitHub 地址扫描公开仓库…",
+    )
+    const res = await fetchGithubUserRepos(account || undefined, githubToken.trim() || undefined)
     setScanningRepos(false)
     if (!res.success || !res.repos) {
       setNoticeError(`扫描失败: ${res.error || "请检查网络或用户名"}`)
@@ -2666,11 +2826,14 @@ function AdminPage({
     const results = res.results as GithubSyncResult[]
     setSyncResults(results)
     const synced = results.filter((r) => r.status === "synced").length
+    const failed = results.filter((r) => r.status === "failed").length
+    const quota = typeof res.rateLimitRemaining === "number" ? res.rateLimitRemaining : null
     setNotice(
       `同步完成：${synced}/${results.length} 个标本指标已更新。` +
-        (typeof res.rateLimitRemaining === "number"
-          ? ` GitHub 剩余额度 ${res.rateLimitRemaining}。`
-          : ""),
+        (quota !== null ? ` GitHub 剩余额度 ${quota}。` : "") +
+        (failed ? ` ${failed} 个失败，见下方同步记录。` : ""),
+      // 额度见底或部分失败时不会自己变好：让它常驻，不然 6 秒后这条唯一证据就没了
+      quota === 0 || failed > 0 || synced < results.length,
     )
     // 刷新项目列表以反映 stars / 版本 / 更新时间的变化
     verifyAndFetchAdminProjects().then((refresh) => {
@@ -2683,7 +2846,13 @@ function AdminPage({
   // 会让"上移/下移"作用的邻居错位，出现"改了顺序首页却没变"的假象。
   const orderedItems = items
 
+  // 行是从 filtered 渲染的，而上下移要按**全表**的 sort_order 重排：
+  // 有筛选条件时"下一个邻居"可能是隐藏行，点一下会把标本移到看不见的地方。
+  // 与其猜语义，不如在筛选时禁用（判据在函数内算：filtered 声明在下面，外面提前取值会踩 TDZ）。
+  const isFilteringProjects = () => filtered.length !== items.length
+
   const canMove = (id: string, direction: -1 | 1) => {
+    if (isFilteringProjects()) return false
     const index = orderedItems.findIndex((item) => item.id === id)
     const target = index + direction
     return index >= 0 && target >= 0 && target < orderedItems.length
@@ -2776,10 +2945,18 @@ function AdminPage({
     setDirImportError("")
     setDirImportNote("")
     setReplaceGallery(false)
+    // 抽屉这一帧才卸载，等它走后再把焦点还给唤起者（元素可能已因重排不在原处，故判一下还在文档里）
+    const opener = drawerOpenerRef.current
+    drawerOpenerRef.current = null
+    requestAnimationFrame(() => {
+      if (opener && document.contains(opener)) opener.focus()
+    })
   }
 
   // 打开某个已保存项目的抽屉：清掉新建模板基线（否则 items 里查不到这一行时会拿错基线）
   const openProject = (item: Project) => {
+    // 唤起者必须在这里（还在点击事件里）记：setEditing 之后焦点就进抽屉了，再也找不到回来该给谁
+    drawerOpenerRef.current = document.activeElement as HTMLElement | null
     setNewDraftBase(null)
     setConfirmClose(0)
     setEditing(item)
@@ -2801,6 +2978,10 @@ function AdminPage({
   useEffect(() => {
     if (!editing) return
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Tab") {
+        cycleFocusOnTab(drawerRef.current, event)
+        return
+      }
       if (event.key !== "Escape") return
       if (confirmClose > 0) {
         setConfirmClose(0)
@@ -2811,6 +2992,14 @@ function AdminPage({
     document.addEventListener("keydown", onKeyDown)
     return () => document.removeEventListener("keydown", onKeyDown)
   }, [editing, confirmClose, featuresText, metricsText, timelineText, previewImagesText, items])
+
+  // 焦点进抽屉：只在"换了一个项目/新建"时做一次。
+  // 刻意不放在上面那条 effect 里——它依赖 featuresText 等输入内容，每敲一个字就会重跑并抢走光标。
+  useEffect(() => {
+    if (!editing) return
+    // 聚焦关闭按钮而不是第一个输入框：手机上聚焦输入框会弹键盘，而键盘用户只需要一个环内的落点
+    drawerRef.current?.querySelector<HTMLElement>("button")?.focus()
+  }, [editing?.id])
 
   // 每次打开抽屉（切换项目或新建）时，把数组字段摊平成可编辑文本
   useEffect(() => {
@@ -3020,6 +3209,9 @@ function AdminPage({
     }
     // 空白模板同时是"未保存改动"的比对基线：新建后一个字没改就直接关，不该弹确认
     setNewDraftBase(template)
+    // 与 openProject 同理：唤起者要在点击事件里记，关抽屉时才还得回去
+    drawerOpenerRef.current = document.activeElement as HTMLElement | null
+    setConfirmClose(0)
     setEditing(template)
   }
 
@@ -3113,7 +3305,7 @@ function AdminPage({
           <div className="admin-banner" role="alert">
             <span>
               站点文案未能从线上库载入（{settingsLoadError}）。为避免用内置默认值覆盖线上配置，
-              所有保存操作已禁用。
+              保存会被拒绝：点保存只会提示先重新加载，不会写入任何一列。
             </span>
             <button type="button" onClick={loadSiteSettings}>
               重新加载
@@ -3265,8 +3457,9 @@ function AdminPage({
                 <h1>标头与导航</h1>
                 <p>
                   顶部栏导航项的顺序、中英名称与显示状态，以及网站品牌 Logo。
-                  这里的名称同时是页脚「馆藏章节」的入口文字，也是首页**陈列 / 统计 / 目录**三段的大标题
-                  （手记段的大标题另有文案，在「05 首页 · 手记」）。补充描述行只在有得配的那几栏：04 统计、06 目录、07 详情页。
+                  这里的名称同时是页脚「馆藏章节」的入口文字，也是首页
+                  <strong>陈列 / 统计 / 目录</strong>三段的大标题（手记段的大标题另有文案，在「03 首页栏目」里）。
+                  各段的补充描述行与详情页、页脚的文案分别在「03 首页栏目」「04 详情页文案」「05 底部栏文案」。
                 </p>
               </div>
               <button
@@ -3286,9 +3479,9 @@ function AdminPage({
                   通过 ▲ / ▼ 调整顺序——这一份顺序<strong>同时决定顶部栏导航与首页内容段落的排列</strong>。
                   这里的两个名称也不只出现在导航条：它们是<strong>陈列 / 统计 / 目录</strong>三段的大标题
                   （中英并排显示），也是页脚「馆藏章节」里的入口文字，改一次三处一起变；
-                  手记段的大标题是「05 首页 · 手记」里的 headline，刻意不跟导航名。
+                  手记段的大标题是「03 首页栏目」里的 headline，刻意不跟导航名。
                   「显示」开关只影响导航条里那个链接在不在，不会把对应段落从页面上删掉；
-                  段落显隐在「04 首页 · 统计」里单独控制。
+                  段落显隐在「03 首页栏目」里单独控制。
                 </p>
 
                 <div className="nav-config-list">
@@ -3452,7 +3645,7 @@ function AdminPage({
                     onChange={(e) =>
                       setSiteContent({ ...siteContent, logoText: e.target.value })
                     }
-                    placeholder="NESTSPACE"
+                    placeholder={DEFAULT_SITE_SETTINGS.logoText}
                   />
                   <small>在顶部栏左侧突出展示的品牌文本</small>
                 </label>
@@ -3464,7 +3657,7 @@ function AdminPage({
                     onChange={(e) =>
                       setSiteContent({ ...siteContent, logoSubtext: e.target.value })
                     }
-                    placeholder="ATARAXYECHO"
+                    placeholder={DEFAULT_SITE_SETTINGS.logoSubtext}
                   />
                   <small>品牌名称后以破折号连接的辅助署名</small>
                 </label>
@@ -3524,24 +3717,81 @@ function AdminPage({
           </div>
         )}
 
-        {view === "homeStats" && (
+        {view === "home" && (
           <div className="admin-content">
             <div className="admin-page-title compact">
               <div>
-                <span className="eyebrow">RECORD & TIMELINE / {adminNavNo("homeStats")}</span>
-                <h1>首页 · 统计</h1>
-                <p>修复与维护前台统计栏目（Statistics）的数据及 ACTIVITY LOG 活跃度时间线。</p>
+                <span className="eyebrow">HOME SECTIONS / {adminNavNo("home")}</span>
+                <h1>首页栏目</h1>
+                <p>
+                  首页四段按访客看到的顺序排在下面：陈列、统计、手记、目录。
+                  每段的大标题就是「02 标头与导航」里那条导航项的名称，这里只管该段自己的补充文案与数据。
+                  本页只有一个保存按钮，它提交的是整份改动集（不局限于某张卡），改完最后按一次即可。
+                </p>
               </div>
               <button
                 type="button"
                 className="admin-primary"
                 onClick={saveSettings}
               >
-                保存统计设置
+                保存并生效
               </button>
             </div>
+            <ContentLanguageTabs value={contentLanguage} onChange={setContentLanguage} />
+            <div className="content-editor-grid">
+              <section className="settings-card">
+                <span className="eyebrow">HERO / 首屏</span>
+                <h2>首屏叙事</h2>
+                <label>
+                  主标题
+                  <input
+                    value={
+                      contentLanguage === "zh"
+                        ? siteContent.heroZh
+                        : siteContent.heroEn
+                    }
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        [contentLanguage === "zh" ? "heroZh" : "heroEn"]:
+                          event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  副标题
+                  <textarea
+                    value={
+                      contentLanguage === "zh"
+                        ? siteContent.subtitleZh
+                        : siteContent.subtitleEn
+                    }
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        [contentLanguage === "zh"
+                          ? "subtitleZh"
+                          : "subtitleEn"]: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <div className="content-preview">
+                  <span>LIVE PREVIEW</span>
+                  <strong>
+                    {contentLanguage === "zh"
+                      ? siteContent.heroZh
+                      : siteContent.heroEn}
+                  </strong>
+                  <p>
+                    {contentLanguage === "zh"
+                      ? siteContent.subtitleZh
+                      : siteContent.subtitleEn}
+                  </p>
+                </div>
+              </section>
 
-            <div className="settings-grid">
               <section className="settings-card">
                 <span className="eyebrow">CATALOGUE STATS / 馆藏概览</span>
                 <h2>基础指标控制</h2>
@@ -3602,13 +3852,6 @@ function AdminPage({
                   <small>如：2024.10 或当前年月</small>
                 </label>
 
-                <button
-                  type="button"
-                  className="admin-primary"
-                  onClick={saveSettings}
-                >
-                  保存馆藏指标设置
-                </button>
               </section>
 
               <section className="settings-card">
@@ -3752,21 +3995,13 @@ function AdminPage({
                   )}
                 </div>
 
-                <button
-                  type="button"
-                  className="admin-primary"
-                  style={{ marginTop: "24px" }}
-                  onClick={saveSettings}
-                >
-                  保存活跃度设置
-                </button>
               </section>
 
               <section className="settings-card">
-                <span className="eyebrow">SECTION COPY / 本栏目</span>
+                <span className="eyebrow">SECTION COPY / 统计段</span>
                 <h2>统计栏目的文案与显示</h2>
                 <p>
-                  大标题不在这里改——它就是「02 全局 · 标头与导航」里那条导航项的名称，
+                  大标题不在这里改——它就是「02 标头与导航」里那条导航项的名称，
                   中英两个名称并排显示在标题右侧。这里只放标题之下的描述行，以及这一段在首页要不要出现。
                   描述行留空则不渲染（内置默认是空）；开关关闭时首页整段消失、导航入口同步移除。
                 </p>
@@ -3796,109 +4031,7 @@ function AdminPage({
                   />
                 </label>
               </section>
-            </div>
-          </div>
-        )}
 
-        {view === "homeCabinet" && (
-          <div className="admin-content">
-            <div className="admin-page-title compact">
-              <div>
-                <span className="eyebrow">CABINET / {adminNavNo("homeCabinet")}</span>
-                <h1>首页 · 陈列</h1>
-                <p>
-                  首屏的两句叙事。陈列段（螺旋画廊）本身由馆藏项目驱动，没有独立标题可配；
-                  它在导航条与页脚里的名字仍是「02 全局 · 标头与导航」里 cabinet 那一条。
-                </p>
-              </div>
-              <button
-                type="button"
-                className="admin-primary"
-                onClick={saveSettings}
-              >
-                保存并生效
-              </button>
-            </div>
-            <ContentLanguageTabs value={contentLanguage} onChange={setContentLanguage} />
-            <div className="content-editor-grid">
-              <section className="settings-card">
-                <span className="eyebrow">HERO / 首屏</span>
-                <h2>首屏叙事</h2>
-                <label>
-                  主标题
-                  <input
-                    value={
-                      contentLanguage === "zh"
-                        ? siteContent.heroZh
-                        : siteContent.heroEn
-                    }
-                    onChange={(event) =>
-                      setSiteContent({
-                        ...siteContent,
-                        [contentLanguage === "zh" ? "heroZh" : "heroEn"]:
-                          event.target.value,
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  副标题
-                  <textarea
-                    value={
-                      contentLanguage === "zh"
-                        ? siteContent.subtitleZh
-                        : siteContent.subtitleEn
-                    }
-                    onChange={(event) =>
-                      setSiteContent({
-                        ...siteContent,
-                        [contentLanguage === "zh"
-                          ? "subtitleZh"
-                          : "subtitleEn"]: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-                <div className="content-preview">
-                  <span>LIVE PREVIEW</span>
-                  <strong>
-                    {contentLanguage === "zh"
-                      ? siteContent.heroZh
-                      : siteContent.heroEn}
-                  </strong>
-                  <p>
-                    {contentLanguage === "zh"
-                      ? siteContent.subtitleZh
-                      : siteContent.subtitleEn}
-                  </p>
-                </div>
-              </section>
-            </div>
-          </div>
-        )}
-
-
-        {view === "homeCurator" && (
-          <div className="admin-content">
-            <div className="admin-page-title compact">
-              <div>
-                <span className="eyebrow">CURATOR / {adminNavNo("homeCurator")}</span>
-                <h1>首页 · 手记</h1>
-                <p>
-                  馆长手记段落的叙事：手记正文（标题 / 引言 / 属性值）与「关于 + 公开联系方式」。
-                  这一段的大标题用的是下面的 headline，<strong>刻意不跟随导航名称</strong>——它是一句宣言，不是栏目名。
-                </p>
-              </div>
-              <button
-                type="button"
-                className="admin-primary"
-                onClick={saveSettings}
-              >
-                保存并发布
-              </button>
-            </div>
-            <ContentLanguageTabs value={contentLanguage} onChange={setContentLanguage} />
-            <div className="content-editor-grid">
               <section className="settings-card">
                 <span className="eyebrow">ABOUT & CONTACT</span>
                 <h2>关于与联系</h2>
@@ -3945,6 +4078,7 @@ function AdminPage({
                   />
                 </label>
               </section>
+
               <section className="settings-card">
                 <span className="eyebrow">CURATOR COPY / 栏目文案</span>
                 <h2>手记栏目文案</h2>
@@ -4041,39 +4175,10 @@ function AdminPage({
                     />
                   </label>
                 </div>
-                <button
-                  type="button"
-                  className="admin-primary"
-                  onClick={saveSettings}
-                >
-                  保存栏目文案
-                </button>
               </section>
-            </div>
-          </div>
-        )}
-        {view === "homeIndex" && (
-          <div className="admin-content">
-            <div className="admin-page-title compact">
-              <div>
-                <span className="eyebrow">INDEX / {adminNavNo("homeIndex")}</span>
-                <h1>首页 · 目录</h1>
-                <p>
-                  目录段逐行来自馆藏项目，这里只配标题之下的描述行；
-                  标题本身是导航项 index 的中英名称（在「02 全局 · 标头与导航」改）。
-                </p>
-              </div>
-              <button
-                type="button"
-                className="admin-primary"
-                onClick={saveSettings}
-              >
-                保存并生效
-              </button>
-            </div>
-            <div className="content-editor-grid">
+
               <section className="settings-card">
-                <span className="eyebrow">SECTION COPY / 本栏目</span>
+                <span className="eyebrow">SECTION COPY / 目录段</span>
                 <h2>目录栏目的描述</h2>
                 <p>留空 = 内置默认为空，即标题下不显示这一行。</p>
                 <SectionSlotFields
@@ -4085,6 +4190,7 @@ function AdminPage({
             </div>
           </div>
         )}
+
 
 
         {view === "detail" && (
@@ -4159,7 +4265,7 @@ function AdminPage({
                     }
                   />
                   <small>
-                    同上。这两句是全站一份，改完后前台详情页的小标题与「09 项目管理」抽屉里的栏名都跟着变
+                    同上。这两句是全站一份，改完后前台详情页的小标题与「06 项目管理」抽屉里的栏名都跟着变
                   </small>
                 </label>
                 <button
@@ -4240,6 +4346,12 @@ function AdminPage({
                 <option value="ARCHIVED">归档下线</option>
               </select>
               <span>{filtered.length} 个结果</span>
+              {isFilteringProjects() ? (
+                // 只把"排序按钮为什么灰着"写在 tooltip 里等于没说；筛掉行时明说一句
+                <small className="filter-order-note">
+                  筛选中：▲▼ 已停用（避免与看不见的行互换位置），清掉搜索/状态筛选即可排序。
+                </small>
+              ) : null}
             </div>
             <div className="project-table-wrap">
               <table className="project-table">
@@ -4284,7 +4396,11 @@ function AdminPage({
                         <div className="nav-order-btns">
                           <button
                             type="button"
-                            title="上移"
+                            title={
+                              isFilteringProjects()
+                                ? "筛选状态下不可排序：先清掉搜索或状态筛选"
+                                : "上移"
+                            }
                             disabled={!canMove(item.id, -1)}
                             onClick={() => moveProject(item.id, -1)}
                           >
@@ -4292,7 +4408,11 @@ function AdminPage({
                           </button>
                           <button
                             type="button"
-                            title="下移"
+                            title={
+                              isFilteringProjects()
+                                ? "筛选状态下不可排序：先清掉搜索或状态筛选"
+                                : "下移"
+                            }
                             disabled={!canMove(item.id, 1)}
                             onClick={() => moveProject(item.id, 1)}
                           >
@@ -4351,11 +4471,11 @@ function AdminPage({
                     type="text"
                     value={githubUser}
                     onChange={(e) => setGithubUser(e.target.value)}
-                    placeholder="如 AtaraxyEcho"
+                    placeholder="如 octocat"
                     style={{ width: "100%", padding: "8px 11px", border: "1px solid #c5c6bf", background: "#fdfdfc", fontFamily: "inherit", fontSize: "12px" }}
                   />
                   <small style={{ color: "#777b70", fontSize: "11px", marginTop: "5px", display: "block" }}>
-                    默认按「05 首页 · 手记」里的 GitHub 地址自动推导
+                    默认按「03 首页栏目」里的 GitHub 地址自动推导
                   </small>
                 </div>
                 <div>
@@ -4367,8 +4487,8 @@ function AdminPage({
                     value={githubToken}
                     onChange={(e) => {
                       setGithubToken(e.target.value)
-                      if (e.target.value) sessionStorage.setItem("nestspace_gh_token", e.target.value)
-                      else sessionStorage.removeItem("nestspace_gh_token")
+                      if (e.target.value) writeSession("nestspace_gh_token", e.target.value)
+                      else clearSession("nestspace_gh_token")
                     }}
                     placeholder="ghp_xxx (提升 API 限制至 5000 次/时)"
                     style={{ width: "100%", padding: "8px 11px", border: "1px solid #c5c6bf", background: "#fdfdfc", fontFamily: "inherit", fontSize: "12px" }}
@@ -4833,8 +4953,9 @@ function AdminPage({
                 <span className="eyebrow">DOMAIN & DEPLOYMENT</span>
                 <h2>域名与部署（只读）</h2>
                 <p className="settings-card-note" style={{ borderTop: 0, paddingTop: 0, marginTop: 0 }}>
-                  主域名、DNS 记录与管理端子域由 Cloudflare 部署配置和代码中的跳转规则决定，
-                  后台不提供修改，避免与真实部署状态不一致。
+                  主域名、DNS 记录与管理端子域由 Cloudflare 部署配置决定，后台不提供修改，
+                  避免与真实部署状态不一致。前后台互跳的地址按当前访问域名推导
+                  （<code>admin.主域</code> ↔ <code>主域</code>），代码里不写死域名。
                 </p>
                 <label>
                   当前访问域名
@@ -4847,11 +4968,7 @@ function AdminPage({
                   公开站点入口
                   <input
                     readOnly
-                    value={
-                      isAdminHost() || typeof window === "undefined"
-                        ? "https://nestspace.online"
-                        : window.location.origin
-                    }
+                    value={publicSiteOrigin()}
                   />
                 </label>
                 <div className="settings-card-note">
@@ -4875,6 +4992,7 @@ function AdminPage({
           }
         >
           <form
+            ref={drawerRef}
             className="editor-drawer"
             role="dialog"
             aria-modal="true"
@@ -5073,7 +5191,7 @@ function AdminPage({
                 />
                 <small>
                   展示在首页标本卡片右下角；留空则卡片上不出现任何协议字样。
-                  GitHub 同步只会把仓库识别出的协议（SPDX 标识）填进**空白**字段，不覆盖这里手填的值。
+                  GitHub 同步只会把仓库识别出的协议（SPDX 标识）填进<strong>空白</strong>字段，不覆盖这里手填的值。
                 </small>
               </label>
               <label>
@@ -5121,7 +5239,7 @@ function AdminPage({
                   en: siteContent.solutionHeadlineEn,
                   zh: siteContent.solutionHeadlineZh,
                 }}
-                hint="同上。这两段的小标题是站点级设置（改一次全站生效），入口在「07 详情页」，下面这个按钮直接跳过去。"
+                hint="同上。这两段的小标题是站点级设置（改一次全站生效），入口在「04 详情页文案」，下面这个按钮直接跳过去。"
                 preview
                 value={editing.solution}
                 onChange={(next) => setEditing({ ...editing, solution: next })}
@@ -5235,7 +5353,7 @@ function AdminPage({
                   </button>
                 </span>
                 <small>
-                  这个名字就是它的作用范围：只用于**详情页 hero 的那张大图**。
+                  这个名字就是它的作用范围：只用于<strong>详情页 hero 的那张大图</strong>。
                   首页卡片仍用占位标本图，分享图(og:image)仍是构建期静态文件，两者都不读这里。
                   它不自动等于相册第一张——留空时对外读取会退化到相册首张，但库里保持为空，
                   只有 README 同步在库里为空时才补；调整相册顺序不会影响这里。
@@ -5300,7 +5418,7 @@ function AdminPage({
                   <span>整体替换现有相册（不勾就是追加）</span>
                 </label>
                 <small>
-                  地址怎么来：在 GitHub 打开图片所在的那个文件夹，**直接复制浏览器地址栏**即可
+                  地址怎么来：在 GitHub 打开图片所在的那个文件夹，<strong>直接复制浏览器地址栏</strong>即可
                   （raw.githubusercontent.com/owner/repo/分支/路径 与 github.com/owner/repo/tree/分支/路径都认）。
                   只列该目录一层：取其中的位图（png/jpg/jpeg/webp/gif/avif/bmp），按文件名排序，跳过徽章与子目录，
                   读到的地址先并入上面的相册文本框（去重、上限 {PREVIEW_IMAGE_LIMIT} 张），
@@ -5468,6 +5586,20 @@ function detectSystemTheme(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches
 }
 
+/**
+ * 首屏主题的初值，必须与"第一帧已经画出来的样子"一致，否则会在挂载后再翻一次。
+ * 显式设成日/夜的站点，Worker 已经把 data-theme 打在 <html> 上（网络慢时 JS 还没起来，那一帧只能靠它）；
+ * 跟随系统时上面没有标记，就地按系统偏好判断——与 index.css 里那条 prefers-color-scheme 同源。
+ */
+function initialDark(): boolean {
+  if (typeof document !== "undefined") {
+    const injected = document.documentElement.dataset.theme
+    if (injected === "dark") return true
+    if (injected === "light") return false
+  }
+  return detectSystemTheme()
+}
+
 // 与 CSS 的 ≤760 断点是同一个值：JS 侧要知道"侧牌本来就不显示"，好连请求都不发。
 // 断点只在这里与 index.css 各写一次数字，改动时两处一起看（组件里没有别的 760 依赖）。
 function useNarrowScreen() {
@@ -5495,6 +5627,42 @@ function useNarrowScreen() {
 // 动效按站内约定收口：过渡 ≤280ms、后牌不加 blur；
 // prefers-reduced-motion 由 CSS 把主牌变换写回静态（JS 写的倾斜变量因此不再生效），
 // 但保留 3D 排布——那是版面不是动画，抹掉后侧牌就完全看不见了。
+/**
+ * 把 Tab 环在弹层内部：`aria-modal` 只是声明，浏览器不会自己限制焦点走向，
+ * 不环的话 Tab 会走到被遮住的页面背后（焦点停在屏幕上看不见的元素上，键盘用户直接迷路）。
+ * 放大看图层与管理端抽屉共用这一份——两处各写一遍迟早一份漏掉 Shift+Tab。
+ */
+function cycleFocusOnTab(root: HTMLElement | null, event: KeyboardEvent): void {
+  if (event.key !== "Tab" || !root) return
+  // 可见性用 getClientRects 而不是 offsetParent：弹层自己是 position:fixed，
+  // 其内元素的 offsetParent 恒为 null，拿它当过滤器会把整层焦点元素都误删
+  const focusables = Array.from(
+    root.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((el) => el.getClientRects().length > 0)
+  if (focusables.length === 0) return
+  const first = focusables[0]
+  const last = focusables[focusables.length - 1]
+  const current = document.activeElement as HTMLElement | null
+  const inside = current ? root.contains(current) : false
+  if (event.shiftKey && (!inside || current === first)) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && (!inside || current === last)) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+/** 目录段什么时候值得给一个搜索框：4 件时搜索是噪音，8 件起才是找东西 */
+const INDEX_SEARCH_THRESHOLD = 8
+
+/** 编号统一补零：以前是字符串拼 "0"，第 10 件会渲染成 "010" */
+function pad2(n: number): string {
+  return String(Math.max(0, Math.floor(n))).padStart(2, "0")
+}
+
 function PreviewGallery({
   images,
   name,
@@ -5567,35 +5735,24 @@ function PreviewGallery({
       }
       if (event.key === "Tab") {
         // aria-modal 只是声明；不把焦点环起来，Tab 会走到被遮住的页面后面去
-        const root = zoomRef.current
-        if (!root) return
-        const focusables = Array.from(
-          root.querySelectorAll<HTMLElement>(
-            'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
-          ),
-        )
-        if (focusables.length === 0) return
-        const first = focusables[0]
-        const last = focusables[focusables.length - 1]
-        const current = document.activeElement as HTMLElement | null
-        const inside = current ? root.contains(current) : false
-        if (event.shiftKey && (!inside || current === first)) {
-          event.preventDefault()
-          last.focus()
-        } else if (!event.shiftKey && (!inside || current === last)) {
-          event.preventDefault()
-          first.focus()
-        }
+        cycleFocusOnTab(zoomRef.current, event)
       }
     }
     document.addEventListener("keydown", onKeyDown)
     return () => {
       document.body.style.overflow = previous
       document.removeEventListener("keydown", onKeyDown)
-      // 关闭后把焦点还给打开它的那张牌（键盘用户不会掉回页面顶部）
-      zoomOpenerRef.current?.focus?.()
     }
   }, [zoom, albumKey])
+
+  // 焦点只在**关闭**时还给打开它的那张牌（键盘用户不会掉回页面顶部）。
+  // 单独一条 effect：上面那条的依赖含 zoom，翻页（0→1）也会跑它的清理，
+  // 把"还焦点"写在那里就会每翻一张都把焦点甩出放大层，焦点环断掉。
+  useEffect(() => {
+    if (zoom !== null) return
+    const opener = zoomOpenerRef.current
+    if (opener && document.contains(opener)) opener.focus()
+  }, [zoom])
 
   // 每张牌的可访问名与图注都要用文件名/目录；相册有 12 张时这是每帧十几次 new URL()，
   // 按相册内容缓存一次。依赖同样是 albumKey 而不是数组引用（理由同上）
@@ -5624,7 +5781,8 @@ function PreviewGallery({
 
   const goTo = (index: number, method: "thumb" | "plate") => {
     setActive(index)
-    if (method === "thumb") trackUsage("deck", "thumb")
+    // 两种点选都要记：侧牌与前一张缩略图都是"翻到某一张"的动作，白名单里也各有一档
+    trackUsage("deck", method)
   }
 
   const step = (delta: number, method: "arrow" | "drag" | "key") => {
@@ -5984,7 +6142,7 @@ function DetailLoading({
       <header className="detail-header">
         <button type="button" className="wordmark" onClick={onBack}>
           {settings.logoText || "NESTSPACE"}{" "}
-          <span>— {settings.logoSubtext || "ATARAXYECHO"}</span>
+          <span>— {settings.logoSubtext || settings.logoText}</span>
         </button>
         <span className="detail-location">CABINET / RETRIEVING</span>
       </header>
@@ -6017,6 +6175,41 @@ function ProjectNotFound({ id, onBack }: { id: string; onBack: () => void }) {
   )
 }
 
+/**
+ * 取数失败（网络断、接口 5xx、超时）。
+ * 与"未找到"分开是本项目的一贯要求：把"我们坏了"说成"这件标本不存在"是假状态，
+ * 而且会让访客直接放弃——所以这里给出重试，且明说标本本身大概率还在。
+ */
+function DetailUnavailable({
+  id,
+  onBack,
+  onRetry,
+}: {
+  id: string
+  onBack: () => void
+  onRetry: () => void
+}) {
+  return (
+    <main className="detail-page">
+      <section className="detail-hero">
+        <div className="detail-placeholder" role="alert">
+          <span className="eyebrow">SPECIMEN UNAVAILABLE</span>
+          <h1>暂时取不到标本 SPEC—{id}</h1>
+          <p>请求没有成功——多半是网络或服务端的问题，不代表这件标本不存在。</p>
+          <div className="detail-placeholder-actions">
+            <button type="button" className="button primary" onClick={onRetry}>
+              重试
+            </button>
+            <button type="button" className="button secondary" onClick={onBack}>
+              ← 返回馆藏
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+  )
+}
+
 // 详情路由：按 id 拉取完整记录（含 README / Compose），
 // 深链或刷新时先显示骨架而不是闪回首页；查不到则给出明确的未找到页面
 function ProjectRoute({
@@ -6043,9 +6236,11 @@ function ProjectRoute({
   onOpen: (project: Project) => void
 }) {
   const [detail, setDetail] = useState<Project | null>(listed ?? null)
-  const [state, setState] = useState<"loading" | "ready" | "missing">(
+  const [state, setState] = useState<"loading" | "ready" | "missing" | "error">(
     listed ? "ready" : "loading",
   )
+  // 重试就是把这个数加一：effect 依赖它，于是会真的再拉一次
+  const [attempt, setAttempt] = useState(0)
 
   // 列表里已有该标本时先用列表数据渲染，再补详情（含 README/Compose）；
   // 依赖里带上 listed：避免"详情请求失败 + 列表稍后才到"时错误地停在未找到页且不自愈
@@ -6055,6 +6250,7 @@ function ProjectRoute({
       setDetail(listed)
       setState("ready")
     } else {
+      // 重试也走这里：先回到骨架屏，再按结果落到 ready / missing / error
       setState("loading")
     }
     fetchPublicProjectById(id)
@@ -6067,18 +6263,36 @@ function ProjectRoute({
           setState("missing")
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (!alive) return
-        if (!listed) setState("missing")
+        console.error(`Failed to fetch project ${id}:`, error)
+        // 网络/服务端出错≠标本不存在：只有 404 才进 missing（见 client.ts 的契约）
+        if (!listed) setState("error")
       })
     return () => {
       alive = false
     }
-  }, [id, listed])
+  }, [id, listed, attempt])
+
+  // 详情页算一次浏览：等状态真的是 ready 才记（未找到的 id 不该进浏览量），
+  // 且同一 id 只记一次（列表先到、详情后到会两次进入 ready）
+  const detailCountedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (state !== "ready" || detailCountedRef.current === id) return
+    detailCountedRef.current = id
+    trackPageView("detail")
+  }, [state, id])
 
   if (state === "loading") return <DetailLoading settings={settings} onBack={onBack} />
+  if (state === "error")
+    return (
+      <DetailUnavailable
+        id={id}
+        onBack={onBack}
+        onRetry={() => setAttempt((value) => value + 1)}
+      />
+    )
   if (state === "missing" || !detail) return <ProjectNotFound id={id} onBack={onBack} />
-
   return (
     <DetailPage
       project={detail}
@@ -6096,7 +6310,7 @@ function ProjectRoute({
 
 export default function App() {
   const [language, setLanguage] = useState<Language>(detectBrowserLanguage)
-  const [dark, setDark] = useState(detectSystemTheme)
+  const [dark, setDark] = useState(initialDark)
   const [route, setRoute] = useState(routeFromHash(window.location.hash))
   // 内置演示标本：首屏立即有内容（不等接口），接口不可达时也仍有东西可看。
   // 注意它只是**占位/兜底**，不是「接口返回空就当非空」——成功响应（含空数组）一律采纳，见 refreshPublicData。
@@ -6109,6 +6323,10 @@ export default function App() {
   const [siteSettings, setSiteSettings] = useState<SiteSettings>(DEFAULT_SITE_SETTINGS)
   // 站点设置是否已从接口返回（无论成功失败），用于决定何时套用展示偏好
   const [settingsResolved, setSettingsResolved] = useState(false)
+  // 访客当前看到的是哪一份馆藏，以及"读不到线上"这件事要不要告诉他：
+  // 以前接口挂了只有 console.warn，访客照样看到 4 件内置示例（带假 star 数与死链）却以为是真的。
+  const [collectionSource, setCollectionSource] = useState<"fallback" | "live">("fallback")
+  const [publicFetchFailed, setPublicFetchFailed] = useState(false)
   // 展示偏好只套用一次，之后不覆盖访客手动切换的语言与主题
   const preferenceApplied = useRef(false)
   // 最近一次公开数据重读时间（节流用）
@@ -6130,10 +6348,15 @@ export default function App() {
       ])
       // 成功即采用（**包括空数组**）：空是"没有已发布标本"这个合法事实，
       // 不能因为 length===0 就留着上一批/示例数据。失败时才保持当前内容不动。
-      if (Array.isArray(projects)) setItems(projects)
+      if (Array.isArray(projects)) {
+        setItems(projects)
+        setCollectionSource("live")
+      }
       setSiteSettings(settings)
+      setPublicFetchFailed(false)
     } catch (err) {
       console.warn("Public API fetch failed; keeping the last known collection:", err)
+      setPublicFetchFailed(true)
     } finally {
       setSettingsResolved(true)
     }
@@ -6226,15 +6449,12 @@ export default function App() {
   // useLayoutEffect 而不是 useEffect：这个跳转必须在**首次绘制之前**发生，
   // 否则生产站点访问 #admin 会先闪一下公开首页再跳走（routeFromHash 如今只做纯解析、不再在渲染期跳转）。
   useLayoutEffect(() => {
-    // 生产环境中，若在公开主站通过 #admin 访问后台，平滑跳转到受 Zero Trust 保护的专属子域名
+    // 公开主站上敲 #admin：能上 admin 子域就交给受 Zero Trust 保护的专属子域去处理；
+    // 没有子域可用的环境**不跳**（跳过去是不存在的域名），由 routeFromHash 就地开后台。
     const checkRedirect = () => {
-      if (
-        typeof window !== "undefined" &&
-        window.location.hash === "#admin" &&
-        !isAdminHost() &&
-        !["localhost", "127.0.0.1"].includes(window.location.hostname)
-      ) {
-        window.location.href = "https://admin.nestspace.online"
+      const target = canSwitchToAdminHost() ? adminSiteOrigin() : ""
+      if (window.location.hash === "#admin" && target) {
+        window.location.href = target
         return true
       }
       return false
@@ -6308,14 +6528,22 @@ export default function App() {
 
   const openProject = (project: Project) => navigate(`project/${project.id}`)
 
+  // 首页与后台各算一次浏览；详情浏览在 ProjectRoute 里记（它才知道记录到底有没有取到）。
+  // 必须**只认这两种路由**：按"非 admin 即 home"写，会让每次进详情都额外记一次 home。
+  useEffect(() => {
+    if (route === "home") trackPageView("home")
+    else if (route === "admin") trackPageView("admin")
+  }, [route])
+
   if (route === "admin") {
     return (
       <AdminGateway
         items={adminItems}
+        logoText={siteSettings.logoText}
         onChange={setAdminItems}
         onExit={() => {
           if (isAdminHost()) {
-            window.location.href = "https://nestspace.online"
+            window.location.href = publicSiteOrigin()
           } else {
             // 回前台后的公开数据重读由路由变化那条 effect 负责（覆盖前进/后退与直接改 hash）
             navigate("home")
@@ -6356,7 +6584,7 @@ export default function App() {
     : homeSections
 
   return (
-    <main>
+    <div>
       <Header
         language={language}
         setLanguage={setLanguage}
@@ -6364,63 +6592,83 @@ export default function App() {
         setDark={setDark}
         settings={effectiveSettings}
       />
-      {collectionEmpty ? (
-        <section className="section" id="empty-collection">
-          <p className="section-empty">
-            {language === "zh"
-              ? "馆藏尚未公开任何标本——请在管理端把项目状态设为 LIVE 或 BETA。"
-              : "No specimens are published yet — set a project to LIVE or BETA in the admin console."}
-          </p>
-        </section>
-      ) : null}
-      {/* 段落顺序跟着管理端的导航顺序走（orderHomeSections 是纯函数、有闸门测试）。
-          以前这四段写死在 JSX 里，导航条却可拖序——同一个设置只管到一半。
-          统计段的显隐仍由「04 首页 · 统计」里的 homeStatsVisible 决定：导航项的 visible 只管导航条，
-          两件事刻意不合并（合并后"隐藏一个链接"会顺手把整段内容从页面上弄丢）。 */}
-      {shownSections.map((id, position) => {
-        switch (id) {
-          case "cabinet":
-            return (
-              <SpiralGallery
-                key={id}
-                language={language}
-                items={items}
-                settings={effectiveSettings}
-                onOpen={openProject}
-              />
-            )
-          case "catalogue":
-            return siteSettings.homeStatsVisible !== false ? (
-              <CatalogueStats
-                key={id}
-                language={language}
-                items={items}
-                settings={effectiveSettings}
-                navItems={siteSettings.navItems}
-                sectionIndex={position + 1}
-              />
-            ) : null
-          case "curator":
-            return <Curator key={id} language={language} settings={effectiveSettings} />
-          case "index":
-            return (
-              <SpecimenIndex
-                key={id}
-                items={items}
-                language={language}
-                settings={effectiveSettings}
-                navItems={siteSettings.navItems}
-                onOpen={openProject}
-              />
-            )
-        }
-      })}
+      <main>
+        {/* 读不到线上馆藏时说出来：以前只在控制台 warn，
+            访客看到的是 4 件内置示例（假 star 数、指向不存在仓库的链接）却以为是真馆藏。 */}
+        {publicFetchFailed ? (
+          <div className="source-notice" role="status">
+            <span>
+              {language === "zh"
+                ? collectionSource === "fallback"
+                  ? "线上馆藏读取失败，下面显示的是内置示例。"
+                  : "线上馆藏读取失败，显示的是上次成功载入的内容。"
+                : collectionSource === "fallback"
+                  ? "Cannot reach the live collection. These are built-in samples."
+                  : "Cannot reach the live collection. Showing the last loaded data."}
+            </span>
+            <button type="button" onClick={() => refreshPublicData(true)}>
+              {language === "zh" ? "重试" : "Retry"}
+            </button>
+          </div>
+        ) : null}
+        {collectionEmpty ? (
+          <section className="section" id="empty-collection">
+            <p className="section-empty">
+              {language === "zh"
+                ? "馆藏尚未公开任何标本——请在管理端把项目状态设为 LIVE 或 BETA。"
+                : "No specimens are published yet — set a project to LIVE or BETA in the admin console."}
+            </p>
+          </section>
+        ) : null}
+        {/* 段落顺序跟着管理端的导航顺序走（orderHomeSections 是纯函数、有闸门测试）。
+            以前这四段写死在 JSX 里，导航条却可拖序——同一个设置只管到一半。
+            统计段的显隐仍由「03 首页栏目」里的 homeStatsVisible 决定：导航项的 visible 只管导航条，
+            两件事刻意不合并（合并后"隐藏一个链接"会顺手把整段内容从页面上弄丢）。 */}
+        {shownSections.map((id, position) => {
+          switch (id) {
+            case "cabinet":
+              return (
+                <SpiralGallery
+                  key={id}
+                  language={language}
+                  items={items}
+                  settings={effectiveSettings}
+                  onOpen={openProject}
+                />
+              )
+            case "catalogue":
+              return siteSettings.homeStatsVisible !== false ? (
+                <CatalogueStats
+                  key={id}
+                  language={language}
+                  items={items}
+                  settings={effectiveSettings}
+                  navItems={siteSettings.navItems}
+                  sectionIndex={position + 1}
+                />
+              ) : null
+            case "curator":
+              return <Curator key={id} language={language} settings={effectiveSettings} />
+            case "index":
+              return (
+                <SpecimenIndex
+                  key={id}
+                  items={items}
+                  language={language}
+                  settings={effectiveSettings}
+                  navItems={siteSettings.navItems}
+                  onOpen={openProject}
+                />
+              )
+          }
+        })}
+      </main>
       <SiteFooter
         items={items}
         settings={effectiveSettings}
         language={language}
         onOpen={openProject}
       />
-    </main>
+    </div>
   )
 }

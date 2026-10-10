@@ -181,6 +181,21 @@ check('槽位形状被手改成字符串 / 数组时，回退内置默认且不�
   assert.equal(slotProse({ 'home.index': 42 }, 'home.index', 'zh'), '')
 })
 
+check('非字符串的文本列一律不采纳，回退内置默认（SQLite 是动态类型，数字会打白整站）', () => {
+  // 以前这里是 `else { target[key] = value }`：D1 列里被写成 2021（手工改库、老写入方）时
+  // 原样透传成 number，下游 `statsSinceYear.trim()` 抛 TypeError ⇒ 整站白屏
+  const dirty = mergeSiteSettings({
+    statsSinceYear: 2021,
+    logoText: 42,
+    heroZh: '   ',
+    curatorHabitat: null,
+  })
+  assert.equal(dirty.statsSinceYear, DEFAULT_SITE_SETTINGS.statsSinceYear)
+  assert.equal(dirty.logoText, DEFAULT_SITE_SETTINGS.logoText)
+  assert.equal(dirty.heroZh, DEFAULT_SITE_SETTINGS.heroZh, '纯空白仍按老判据当"没填"')
+  assert.equal(typeof dirty.statsSinceYear, 'string')
+})
+
 check('前端整串上限必须低于服务端上限（阈值从 Worker 的真实话术里取）', () => {
   const limit = Number(WORKER_LIMIT_MATCH[1])
   assert.ok(limit > 0, `没从 Worker 报错话术里读到上限：${WORKER_LIMIT_MATCH && WORKER_LIMIT_MATCH[0]}`)

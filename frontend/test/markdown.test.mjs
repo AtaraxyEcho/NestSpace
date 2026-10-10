@@ -52,4 +52,13 @@ assert.equal(previewCalls.length, 2, 'case 3f: 抽屉两栏都要有只读预览
 assert.doesNotMatch(mdSrc, /dangerouslySetInnerHTML\s*=/, 'case 4a: 渲染器不许透传 HTML')
 assert.doesNotMatch(appSrc, /dangerouslySetInnerHTML\s*=/, 'case 4b: 正文/预览也不许')
 
-console.log('markdown：全部用例通过（段落两种口径 / 渲染器接线 / 正文走 breaks / README 口径不变 / 抽屉预览同口径 / 零原始 HTML）✓')
+// —— 超长段要有守卫：行内/去标签的两个正则对没有闭合符的 [ 或 < 是平方级扫描 ——
+// 实测：20 万字符的一行「[」在无守卫时耗时 35 秒（同步渲染＝页面冻住）。
+const { exceedsInlineParseLimit, MD_TEXT_PARSE_MAX } = lines
+assert.equal(exceedsInlineParseLimit('x'.repeat(MD_TEXT_PARSE_MAX)), false, 'case 5a: 上限本身不触发守卫')
+assert.equal(exceedsInlineParseLimit('x'.repeat(MD_TEXT_PARSE_MAX + 1)), true, 'case 5b: 超一格就触发')
+assert.ok(MD_TEXT_PARSE_MAX >= 4000 && MD_TEXT_PARSE_MAX <= 50000, `case 5c: 上限取值要落在合理区间（现 ${MD_TEXT_PARSE_MAX}）`)
+assert.match(mdSrc, /exceedsInlineParseLimit\(line\)/, 'case 5d: 去标签那条要先过守卫')
+assert.match(mdSrc, /exceedsInlineParseLimit\(text\)/, 'case 5e: 行内解析那条要先过守卫')
+
+console.log('markdown：全部用例通过（段落两种口径 / 渲染器接线 / 正文走 breaks / README 口径不变 / 抽屉预览同口径 / 零原始 HTML / 超长段守卫）✓')

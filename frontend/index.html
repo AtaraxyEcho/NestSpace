@@ -7,12 +7,17 @@
     <title><!-- figma:title --></title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300..800;1,300..800&display=swap" rel="stylesheet" />
+    <!-- 四个字族只在这里声明一次。以前 JetBrains Mono 在这里、另外三个在 index.css 的
+         @import 里：CSS 的 @import 要等样式表下载完才发起请求（串行），同一条 JBM 还被下两次。
+         改字族时两处都要看的情况到此为止。 -->
+    <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;600&family=EB+Garamond:ital,wght@0,400;0,600;0,700;1,400;1,600&family=JetBrains+Mono:ital,wght@0,300..800;1,300..800&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
     <!-- figma:head-end -->
-    <!-- 规范地址与社交卡片：单域名站点，写死生产 origin（与 App.tsx 里 admin 子域跳转、部署手册一致）。
+    <!-- 规范地址与社交卡片：构建产物里**不含任何域名**——这里只留一个标记，
+         由 Worker 在边缘按当前请求的 origin 注入 canonical 链接与 og:url 两个标签
+         （worker/index.ts 的 injectSeoOverrides）。换主域、上 preview 子域都不必重新构建。
+         不能写成 href="/"：Vite 的 build-html 会把根斜杠当站内资产去读文件（EISDIR），构建直接失败。
          放在 figma 标记之外，构建插件不会覆盖。 -->
-    <link rel="canonical" href="https://nestspace.online/" />
-    <meta property="og:url" content="https://nestspace.online/" />
+    <!-- seo:origin-tags -->
     <meta property="og:type" content="website" />
     <!-- 浏览器图标：由 scripts/make-brand-logos.py 从同一份原件生成，改标时一起更新。
          favicon 带**圆盘**底（贴着徽章的圆形，不是方块）——纯透明会在浅色或深色标签栏上有一边看不见。 -->

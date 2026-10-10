@@ -1,5 +1,16 @@
 # NestSpace Cloudflare 零成本全栈分离与安全管理端架构方案
 
+> ⚠️ **这是立项时的规划稿，不是现状说明。** 落地实现与本文有四处明确的偏离，读之前先看这张对照表：
+>
+> | 本文（规划） | 现状 |
+> |---|---|
+> | 域名 `nestspace.dev`、管理端路径 `/admin*` | 主域 + `admin.<主域>` 子域（Access 拦截），公开站上敲 `#admin` 会跳到该子域；无 `/admin*` 路径 |
+> | 逐条 `wrangler d1 execute --file=./migrations/0001…`（当时 2 条迁移） | `bash scripts/d1-migrate.sh [local\|remote]`，按序执行 15 条迁移（登记表 + 自愈） |
+> | 目录树里的 `worker/api/[[route]].ts`、`admin/`、`src/components/` | 实际是单个 `frontend/worker/index.ts`（Hono）+ `frontend/src/App.tsx`；这些路径不存在 |
+> | "写死的 2000 多行常量数据" | `App.tsx` 已约 6.5k 行，数据来自 D1 + 内置回退 |
+>
+> 现状以 **[README.md](../README.md)** 与 **[docs/DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)** 为准。
+
 本文档为 **NestSpace** 项目量身定制，基于 **Cloudflare 官方免费额度（Free Tier）**，实现**前后端彻底分离**、**数据动态持久化**、**管理端零信任防护（边缘拦截 + 代码层签名校验，fail-closed）** 的生产级全栈落地架构方案。
 
 ---

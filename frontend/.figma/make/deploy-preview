@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# 同上：Figma Make 脚手架的预览部署脚本。本仓库的预览/生产都走 Cloudflare（见 README）。
 # Build in development mode to emit sourcemaps.
 pnpm run build --mode development
 figma make deploy-preview --build-dir dist
