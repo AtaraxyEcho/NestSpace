@@ -22,7 +22,7 @@ import { renderMarkdown } from "./utils/markdown"
 import { frameLabel, hiddenFrameCount, previewFrames } from "./utils/previewFrames"
 import { orderHomeSections } from "./utils/navOrder"
 // 双语字段（挑战/方案）的读侧规则，与 Worker 投影同一份
-import { asBilingual, pickBilingual, type BilingualText } from "./utils/bilingual"
+import { asBilingual, pickBilingual, pickSiteHeading, type BilingualText } from "./utils/bilingual"
 // 相册判据与 Worker 写侧共用这一份（坏行即时点名与 400 点名必然是同一批）
 import { PREVIEW_IMAGE_LIMIT, galleryRowIssues } from "./utils/previewRules"
 import { changedColumns } from "./utils/projectDiff"
@@ -392,24 +392,56 @@ function BilingualField({
   hint,
   value,
   onChange,
+  heading,
+  preview,
 }: {
   label: string
   hint?: string
   value: BilingualText | string
   onChange: (next: BilingualText) => void
+  /**
+   * 该栏在站点设置里的小标题。给了它，两栏上排的文字就是**访客在站点上看到的那句**
+   * （与前台同一个 pickSiteHeading），而不是写死的「中文 / English」——
+   * 管理员改完标题，后台的指称跟着变，两边不会各说一套。
+   */
+  heading?: BilingualText
+  /** 只读预览：正文与前台同一渲染口径（markdown + 单换行生效），不用猜自己写的内容长什么样 */
+  preview?: boolean
 }) {
   const pair = asBilingual(value)
+  const zhCaption = heading ? pickSiteHeading(heading, "zh") : "中文"
+  const enCaption = heading ? pickSiteHeading(heading, "en") : "English"
+  const previewZh = useMemo(
+    () => (pair.zh.trim() ? renderMarkdown(pair.zh, { breaks: true }).nodes : null),
+    [pair.zh],
+  )
+  const previewEn = useMemo(
+    () => (pair.en.trim() ? renderMarkdown(pair.en, { breaks: true }).nodes : null),
+    [pair.en],
+  )
   return (
     <div className="bilingual-field">
       <span className="bilingual-title">{label}</span>
       <div className="bilingual-pair">
         <label>
-          <small>中文</small>
+          <small>{heading ? `中文 · ${zhCaption}` : "中文"}</small>
           <textarea value={pair.zh} onChange={(e) => onChange({ ...pair, zh: e.target.value })} />
+          {preview && previewZh ? (
+            <div className="bilingual-preview" aria-hidden="true">
+              <span className="bilingual-preview-tag">预览</span>
+              <div className="narrative-doc">{previewZh}</div>
+            </div>
+          ) : null}
         </label>
         <label>
-          <small>English</small>
+          <small>{heading ? `English · ${enCaption}` : "English"}</small>
           <textarea value={pair.en} onChange={(e) => onChange({ ...pair, en: e.target.value })} />
+          {preview && previewEn ? (
+            <div className="bilingual-preview" aria-hidden="true">
+              <span className="bilingual-preview-tag">预览</span>
+              <div className="narrative-doc">{previewEn}</div>
+            </div>
+          ) : null}
         </label>
       </div>
       {hint ? <small className="bilingual-hint">{hint}</small> : null}
@@ -1197,15 +1229,30 @@ function DetailPage({
   // 挑战 / 方案：与 README 同一套规则——当前语言没有内容就回退另一种语言，并标出「原文」
   const challengeCopy = pickBilingual(project.challenge, language)
   const solutionCopy = pickBilingual(project.solution, language)
-  // 两段的小标题是站点级文案（管理端「内容管理」可改），中文留空时回退英文
-  const headlineOf = (en: string, zh: string) => pickBilingual({ en, zh }, language).text
-  const challengeHeadline = headlineOf(
-    settings.challengeHeadlineEn,
-    settings.challengeHeadlineZh,
+  // 两段的小标题来自站点设置（管理端可改），口径与后台字段标签共用 pickSiteHeading
+  const challengeHeadline = pickSiteHeading(
+    { en: settings.challengeHeadlineEn, zh: settings.challengeHeadlineZh },
+    language,
   )
-  const solutionHeadline = headlineOf(
-    settings.solutionHeadlineEn,
-    settings.solutionHeadlineZh,
+  const solutionHeadline = pickSiteHeading(
+    { en: settings.solutionHeadlineEn, zh: settings.solutionHeadlineZh },
+    language,
+  )
+  // 正文按 markdown 渲染（breaks：管理员按 Enter 就是想让下一行开始）。
+  // 仍是 markdown → React 节点，零 dangerouslySetInnerHTML；README 那条调用保持默认口径。
+  const challengeBody = useMemo(
+    () =>
+      challengeCopy.text
+        ? renderMarkdown(challengeCopy.text, { breaks: true }).nodes
+        : null,
+    [challengeCopy.text],
+  )
+  const solutionBody = useMemo(
+    () =>
+      solutionCopy.text
+        ? renderMarkdown(solutionCopy.text, { breaks: true }).nodes
+        : null,
+    [solutionCopy.text],
   )
   const readmeDoc = useMemo(() => renderMarkdown(readmeText), [readmeText])
 
@@ -1420,29 +1467,25 @@ function DetailPage({
               <span>THE CONDITION</span>
               <h2>{challengeHeadline}</h2>
               {challengeCopy.text ? (
-                <p>
-                  {challengeCopy.text}
-                  {challengeCopy.fallback ? (
-                    <em className="lang-fallback">{language === "en" ? "中文原文" : "ENGLISH 原文"}</em>
-                  ) : null}
-                </p>
+                <div className="narrative-doc">{challengeBody}</div>
               ) : (
                 <p className="section-empty">{language === "zh" ? "尚未记录" : "Not recorded"}</p>
               )}
+              {challengeCopy.fallback ? (
+                <em className="lang-fallback">{language === "en" ? "中文原文" : "ENGLISH 原文"}</em>
+              ) : null}
             </article>
             <article>
               <span>THE RESPONSE</span>
               <h2>{solutionHeadline}</h2>
               {solutionCopy.text ? (
-                <p>
-                  {solutionCopy.text}
-                  {solutionCopy.fallback ? (
-                    <em className="lang-fallback">{language === "en" ? "中文原文" : "ENGLISH 原文"}</em>
-                  ) : null}
-                </p>
+                <div className="narrative-doc">{solutionBody}</div>
               ) : (
                 <p className="section-empty">{language === "zh" ? "尚未记录" : "Not recorded"}</p>
               )}
+              {solutionCopy.fallback ? (
+                <em className="lang-fallback">{language === "en" ? "中文原文" : "ENGLISH 原文"}</em>
+              ) : null}
             </article>
           </div>
         </section>
@@ -3817,11 +3860,13 @@ function AdminPage({
                   保存栏目文案
                 </button>
               </section>
-              <section className="settings-card">
-                <span className="eyebrow">DETAIL / 详情页</span>
-                <h2>「挑战 / 方案」小标题</h2>
+              {/* 卡的标题刻意不写「挑战 / 方案」——那两个词正是这张卡能改掉的东西，
+                  用它当索引，改完就找不到北了。锚点用 THE CONDITION / THE RESPONSE：排版标签，刻意单语。 */}
+              <section className="settings-card" id="detail-copy-card">
+                <span className="eyebrow">DETAIL / FIELD NOTES</span>
+                <h2>详情页正文小标题</h2>
                 <label>
-                  挑战栏小标题（{contentLanguage === "zh" ? "中文" : "English"}）
+                  左栏 THE CONDITION 下方（{contentLanguage === "zh" ? "中文" : "English"}）
                   <input
                     value={
                       contentLanguage === "zh"
@@ -3843,11 +3888,11 @@ function AdminPage({
                     }
                   />
                   <small>
-                    FIELD NOTES 左栏「THE CONDITION」下方；留空回退英文，中英都留空则用内置默认
+                    访客在这一语言下看到的就是这一句；留空回退另一种语言，中英都留空则用内置默认
                   </small>
                 </label>
                 <label>
-                  方案栏小标题（{contentLanguage === "zh" ? "中文" : "English"}）
+                  右栏 THE RESPONSE 下方（{contentLanguage === "zh" ? "中文" : "English"}）
                   <input
                     value={
                       contentLanguage === "zh"
@@ -3868,7 +3913,9 @@ function AdminPage({
                       })
                     }
                   />
-                  <small>FIELD NOTES 右栏「THE RESPONSE」下方，规则同上</small>
+                  <small>
+                    同上。这两句是全站一份，改完后前台详情页的小标题与「05 项目管理」抽屉里的栏名都跟着变
+                  </small>
                 </label>
                 <button
                   type="button"
@@ -4812,17 +4859,50 @@ function AdminPage({
                 </select>
               </label>
               <BilingualField
-                label="挑战 / 背景"
-                hint="前台按语言各取一栏；只填中文时，英文站显示中文并标注「中文原文」"
+                label="FIELD NOTES 左栏正文"
+                heading={{
+                  en: siteContent.challengeHeadlineEn,
+                  zh: siteContent.challengeHeadlineZh,
+                }}
+                hint="正文按 Markdown 渲染：空行分段、- 列表、**粗体**、`代码`，单个回车也另起一行。两栏都空则前台显示「尚未记录」。"
+                preview
                 value={editing.challenge}
                 onChange={(next) => setEditing({ ...editing, challenge: next })}
               />
               <BilingualField
-                label="解决方案"
-                hint="同上。两栏都空则前台显示「尚未记录」"
+                label="FIELD NOTES 右栏正文"
+                heading={{
+                  en: siteContent.solutionHeadlineEn,
+                  zh: siteContent.solutionHeadlineZh,
+                }}
+                hint="同上。这两段的小标题是站点级设置（改一次全站生效），入口在「04 内容管理」，下面这个按钮直接跳过去。"
+                preview
                 value={editing.solution}
                 onChange={(next) => setEditing({ ...editing, solution: next })}
               />
+              <button
+                type="button"
+                className="field-link-button"
+                onClick={() => {
+                  // 抽屉里没保存的改动不能被跳转悄悄丢掉：脏了就只弹确认条，视图不动
+                  if (dirtyColumnCount() > 0) {
+                    requestClose()
+                    return
+                  }
+                  closeDrawer()
+                  setView("content")
+                  // 这张卡要等 view 切过去才在 DOM 里，同一帧滚不动它
+                  window.setTimeout(
+                    () =>
+                      document
+                        .getElementById("detail-copy-card")
+                        ?.scrollIntoView({ behavior: "smooth", block: "start" }),
+                    80,
+                  )
+                }}
+              >
+                去改这两段的小标题 →
+              </button>
               <label>
                 特性列表
                 <textarea

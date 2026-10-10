@@ -35,7 +35,7 @@ NestSpace/
 │   ├── vite.config.ts            # Vite + Tailwind v4 + Figma Make 插件；dev 下把 /api 代理到本地 wrangler
 │   ├── tsconfig.json             # 前端 TS 配置（worker/tsconfig.json 单独一套）
 │   ├── .figma/make/site.json     # 站点标题 / 描述 / 收录开关（构建期注入 HTML 头部）
-│   ├── test/                     # 单元测试（纯函数 / 前后端判据一致性；npm test 依次跑这十个文件）
+│   ├── test/                     # 单元测试（纯函数 / 前后端判据一致性；npm test 依次跑这十一个文件）
 │   │   ├── jwt_verify.test.mjs   # JWT 校验与 Access 白名单
 │   │   ├── demo_url.test.mjs     # 演示地址规范化
 │   │   ├── sync_update.test.mjs  # GitHub 同步字段归属 / 时间线生成 / 代码列 ⊆ 迁移列（17f）/ 站点设置三份清单对齐（18）
@@ -45,6 +45,7 @@ NestSpace/
 │   │   ├── preview_rules.test.mjs # 相册判据前后端一致性 / 坏行行号 / 抽屉改动列判定 / 埋点白名单
 │   │   ├── nav_order.test.mjs    # 首页栏目顺序 = 导航顺序（缺项兜底 / 脏输入退化）
 │   │   ├── bilingual.test.mjs    # 挑战/方案双语读侧：新列优先、旧列中文兜底、坏 JSON 不抛错、回退标注
+│   │   ├── markdown.test.mjs     # 正文两种渲染口径（README 折行 / 后台正文硬换行）+ 零原始 HTML 的源码钉子
 │   │   └── sync_scope.test.mjs   # 同步范围 ids：省略=全表、空数组=拒绝、形态与上限、去重
 │   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（Analytics Engine 数据集默认注释、按需开启）
 │   └── package.json
@@ -67,7 +68,7 @@ NestSpace/
 │   └── 0013_add_detail_headlines.sql
 │                                 # 详情页「挑战 / 方案」两段小标题（原先写死在组件里，现由管理端配置）
 │
-├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十个闸门 + 构建（见第四节末）
+├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十一个闸门 + 构建（见第四节末）
 │
 ├── scripts/                      # 运维脚本
 │   ├── d1-migrate.sh             # 一键按序执行全部 D1 迁移（local / remote，可反复执行）
@@ -135,7 +136,7 @@ bash scripts/d1-migrate.sh remote
 | `0010` 预览图 | 项目列表/详情的 SELECT 与同步写路径 | `GET /api/projects` 每条都 500（列表 SELECT 引用了不存在的列），首页与陈列整体空白 |
 | `0011` 双语叙述 | 项目列表/详情的 SELECT 与管理端写路径 | 同上两条 500；且「挑战 / 解决方案」保存写不进库（`challenge_json` / `solution_json` 不存在） |
 | `0012` 标本协议 | 公开列表/详情的显式 SELECT（`license`）、管理端写路径与同步写路径 | `GET /api/projects` 每条都 500（首页与陈列空白），管理端保存项目同样 500 |
-| `0013` 详情页小标题 | `site_settings` 写白名单（`challenge_headline_*` / `solution_headline_*`） | 「内容管理 → 详情页」保存报 500（读侧 `SELECT *`，只会静默回退内置文案） |
+| `0013` 详情页小标题 | `site_settings` 写白名单（`challenge_headline_*` / `solution_headline_*`） | 「内容管理 → 详情页正文小标题」保存报 500（读侧 `SELECT *`，只会静默回退内置文案） |
 
 > ⚠️ **顺序是硬约束，而且 Git 自动构建不会替你把关**：第 4 节的 Workers Builds 是"push 即部署"，
 > 一旦你为了跑迁移而先 push 了代码，部署就已经发生了。正确顺序是
@@ -314,7 +315,7 @@ bash scripts/usage-probe.sh
 
 ### CI（`.github/workflows/ci.yml`）
 
-push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十个纯函数闸门）、
+push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十一个纯函数闸门）、
 `pnpm run build`。用 **pnpm** 不是风格问题：仓库里只有 `pnpm-lock.yaml`，`npm ci` 会直接 ENOLOCK 失败。
 版本钉在 `frontend/.mise.toml` 的同一套（node 22 / pnpm 10.34.3）。
 
@@ -372,12 +373,23 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
 - **内容管理 → 手记栏目文案**（迁移 `0009`）：栏目标签、引言（按语言切换）、主标题（每行一句，
   两种语言模式下都会显示）、中文尾注（斜体，留空则不显示）、HABITAT / FIELD 属性值；
   改名或改文案都在此完成，无需改代码。
-- **内容管理 → 「挑战 / 方案」小标题**（迁移 `0013`）：详情页 FIELD NOTES 两栏 `THE CONDITION` /
-  `THE RESPONSE` 下面的那两句标题，原先写死在组件里，现由管理端配置，中英各一份、随访客语言切换。
-  内置默认就是原来那两句英文（`Why it needed to exist.` / `A narrow tool, carefully shaped.`），
-  中文默认留空 = 中文模式也显示这两句英文；两栏都留空则回退内置默认（清空 = 恢复默认，不是删掉标题；
-  只敲空格同样算留空——库里存的是原样字符串，判据按 trim 后是否为空）。
+- **内容管理 → 详情页正文小标题**（迁移 `0013`，`src/utils/bilingual.ts` 的 `pickSiteHeading`）：
+  详情页 FIELD NOTES 两栏 `THE CONDITION` / `THE RESPONSE` 下面的那两句标题，原先写死在组件里，
+  现由管理端配置，中英各一份、随访客语言切换。内置默认就是原来那两句英文
+  （`Why it needed to exist.` / `A narrow tool, carefully shaped.`），中文默认留空 = 中文模式也显示这两句英文；
+  两栏都留空则回退内置默认（清空 = 恢复默认，不是删掉标题；只敲空格同样算留空）。
+  **这两句是唯一的真源**：前台的小标题、「05 项目管理」抽屉里那两栏正文的上排标注，都读同一个值——
+  改完标题，后台的指称跟着变（抽屉里因此不再写死「挑战 / 背景」「解决方案」）。这张卡自己的标题也刻意
+  不含这两个词（它管的就是能把这两个词改掉的东西），锚点用不可配置的排版标签 `THE CONDITION` /
+  `THE RESPONSE`。项目抽屉底部有「去改这两段的小标题」直达这张卡；抽屉里有未保存改动时它只弹确认、
+  不会把人带走。
   栏名本身（`THE CONDITION` / `THE RESPONSE`）是排版语汇，刻意不做双语、也不可配置。
+- **正文的换行与样式**（`src/utils/markdown.tsx` + `markdownLines.ts`）：挑战 / 方案正文按 Markdown 渲染，
+  且开启 `breaks` 口径——**单个回车就是硬换行**，空行分段，`- ` 列表、`**粗体**`、`` `代码` `` 生效；
+  编辑抽屉里每栏下面有只读预览，与前台同一口径。README **保持默认口径**（源码按 80 列折行，
+  句中换行不是排版意图，不能变成硬换行）——所以这是两套判据，不是一套全局行为。
+  全程 markdown → React 节点，**零 `dangerouslySetInnerHTML`**（闸门 case 4 钉着）；首页卡片简介仍是纯文本，
+  因为它靠四行钳制控高，塞块级元素会把按钮又顶出去。
 - **项目管理 → 顺序**：表格每行的 ▲ / ▼ 直接调整公开站点与后台列表的展示顺序
   （按 `sort_order` 升序落库，只写顺序真正变化的行）；抽屉里的「排序权重」仍可手工指定数值。
 - **底部栏**：中英文各一份，随访客语言切换。含品牌区小标与说明段落、三列标题、

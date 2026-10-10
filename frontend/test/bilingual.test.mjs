@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path'
 const HERE = join(dirname(fileURLToPath(import.meta.url)), '..')
 const url = (...parts) => pathToFileURL(join(HERE, ...parts)).href
 
-const { asBilingual, pickBilingual, pairFromSingleText } = await import(
+const { asBilingual, pickBilingual, pickSiteHeading, pairFromSingleText } = await import(
   url('src', 'utils', 'bilingual.ts')
 )
 const worker = await import(url('worker', 'index.ts'))
@@ -153,6 +153,17 @@ check('POST 与 PUT 对 description 也落同一份文本', () => {
   }
 })
 
+check('站点小标题：语言留空回退另一种，纯空白等同于没填', () => {
+  // 前台详情页的小标题与后台抽屉的栏名共用这一份，两边不可能各说一套
+  const enOnly = { en: 'Why it needed to exist.', zh: '' }
+  assert.equal(pickSiteHeading(enOnly, 'zh'), 'Why it needed to exist.', '中文留空 → 回退英文（与访客看到的一致）')
+  assert.equal(pickSiteHeading(enOnly, 'en'), 'Why it needed to exist.', '英文本身照给')
+  const both = { en: 'A narrow tool.', zh: '把工具收窄。' }
+  assert.equal(pickSiteHeading(both, 'zh'), '把工具收窄。', '两种语言各取各的')
+  assert.equal(pickSiteHeading({ en: '  ', zh: '\n' }, 'en'), '', '纯空白按 trim 后算未填，不能渲染出一个空白标题')
+  assert.equal(pickSiteHeading({ en: '', zh: '' }, 'zh'), '', '两边都空返回空串，由调用方回退内置默认')
+})
+
 let failed = 0
 for (const [name, fn] of cases) {
   try {
@@ -166,4 +177,4 @@ if (failed) {
   console.error(`bilingual：${failed}/${cases.length} 个用例失败`)
   process.exit(1)
 }
-console.log(`bilingual：全部 ${cases.length} 个用例通过（新列优先 / 旧列中文兜底 / 坏数据不抛错 / 回退标注 / 管理端投影）✓`)
+console.log(`bilingual：全部 ${cases.length} 个用例通过（新列优先 / 旧列中文兜底 / 坏数据不抛错 / 回退标注 / 管理端投影 / 站点小标题口径）✓`)

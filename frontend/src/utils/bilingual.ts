@@ -106,3 +106,14 @@ export function pairFromSingleText(text: unknown): BilingualText {
   if (other) return { text: other, fallback: true }
   return { text: "", fallback: false }
 }
+
+/**
+ * 站点级小标题（详情页「挑战 / 方案」两段的那两句）的取文口径：按语言取，该语言留空就回退另一种。
+ *
+ * 前台详情页与后台的字段标签**必须共用这一份**：后台的标签显示的就是访客看到的那句话，
+ * 管理员改了标题，后台的指称跟着变。两边各写一遍正是这次要修的 bug（抽屉里还挂着
+ * 「挑战 / 背景」「解决方案」这类写死的旧词，而它管的恰恰是能把这两个词改掉的设置）。
+ */
+export function pickSiteHeading(pair: BilingualText, lang: "en" | "zh"): string {
+  return pickBilingual({ en: pair.en.trim(), zh: pair.zh.trim() }, lang).text
+}

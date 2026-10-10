@@ -479,6 +479,20 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
    h2 的 scrollWidth 从 1222 回到 405。单独加 article{min-width:0} 治不了裁字，只加它反而多余，故不加。 */
 .detail-narrative h2 { max-width: 480px; margin: 17px 0 25px; font-size: clamp(38px, 4.5vw, 68px); line-height: .95; font-weight: 600; letter-spacing: -.03em; overflow-wrap: anywhere; }
 .detail-narrative p { max-width: 600px; font-size: 18px; line-height: 1.85; color: var(--ink-secondary); }
+/* 正文现在由 markdown 渲染（一个字段可能有多个段落/列表），块间距由这里统一给：
+   段落自带的 UA margin 先清零，否则与下面的 + 选择器叠成两倍行距。
+   Tailwind 的 preflight 去掉了 ul/ol 的标记，所以列表样式必须显式写回来。 */
+.detail-narrative .narrative-doc p { margin: 0; }
+.narrative-doc > * + * { margin-top: 14px; }
+.detail-narrative .narrative-doc ul, .detail-narrative .narrative-doc ol { margin: 0; padding-left: 22px; }
+.detail-narrative .narrative-doc ul { list-style: disc; }
+.detail-narrative .narrative-doc ol { list-style: decimal; }
+.detail-narrative .narrative-doc li { font-size: 18px; line-height: 1.8; color: var(--ink-secondary); }
+.detail-narrative .narrative-doc strong { color: var(--ink-primary); }
+.detail-narrative .narrative-doc code { padding: 1px 5px; border: 1px solid var(--line-hair); background: var(--bg-surface); font: 13px var(--font-mono); }
+.detail-narrative .narrative-doc a { color: var(--accent-dark); text-decoration: underline; text-underline-offset: 3px; }
+/* 「中文原文 / ENGLISH 原文」标注：正文改成块级渲染后它不再是段落内联尾巴，落到正文下方 */
+.detail-narrative > .lang-fallback { display: block; margin: 6px 0 0; }
 .capability-grid { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 48px; border-top: 1px solid var(--line-strong); border-left: 1px solid var(--line-default); }
 .capability-grid article { min-height: 260px; padding: 28px; border-right: 1px solid var(--line-default); border-bottom: 1px solid var(--line-default); }
 .capability-grid article > span { font: 10px var(--font-mono); color: var(--ink-tertiary); }
@@ -783,6 +797,10 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .markdown-body .readme-doc h4 { margin: 24px 0 8px; font-size: 17px; }
 .markdown-body .readme-doc p, .markdown-body .readme-doc li { font-size: 15px; line-height: 1.85; }
 .readme-doc ul, .readme-doc ol { margin: 0 0 18px; padding-left: 22px; }
+/* Tailwind 的 preflight 把 ul/ol 的 list-style 抹了，README 里的列表一直是"只缩进没标记"，
+   看着像散句。补回默认标记（GitHub 上渲染同一份 README 时本来就有）。 */
+.readme-doc ul { list-style: disc; }
+.readme-doc ol { list-style: decimal; }
 .readme-doc li { margin: 6px 0; }
 .readme-doc code { padding: 2px 6px; border: 1px solid var(--line-hair); background: var(--bg-surface); font: 13px var(--font-mono); }
 .readme-doc pre { margin: 0 0 22px; padding: 20px; overflow-x: auto; background: #232019; color: #e8dfd0; }
@@ -1014,6 +1032,19 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .bilingual-pair label { display: block; margin-bottom: 0; }
 .bilingual-pair label > small { display: block; margin: 0 0 5px; color: #898c84; font: 10px var(--font-mono); letter-spacing: .08em; }
 .bilingual-hint { display: block; margin-top: 7px; color: #898c84; font-size: 10px; line-height: 1.5; }
+/* 抽屉里的只读预览：与前台同一渲染口径，管理员不用猜自己的回车和 `- ` 会变成什么。
+   压高度靠 max-height + 滚动，正文再长也不把抽屉撑成两屏。 */
+.bilingual-preview { margin-top: 6px; padding: 8px 10px; border: 1px dashed #cfcdc4; background: #fbfaf6; max-height: 168px; overflow-y: auto; }
+.bilingual-preview-tag { display: block; margin-bottom: 5px; color: #8a8d84; font: 9px var(--font-mono); letter-spacing: .14em; }
+.bilingual-preview p, .bilingual-preview li { margin: 0; color: #4d5148; font-size: 12.5px; line-height: 1.6; }
+.bilingual-preview > * + * { margin-top: 8px; }
+.bilingual-preview ul, .bilingual-preview ol { margin: 0; padding-left: 18px; }
+.bilingual-preview ul { list-style: disc; }
+.bilingual-preview ol { list-style: decimal; }
+.bilingual-preview code { padding: 1px 4px; border: 1px solid #e0ded6; background: #f2efe6; font: 11px var(--font-mono); }
+/* 从项目抽屉跳到「04 内容管理」那张小标题卡：编辑口只有一个，这里只是可达性 */
+.field-link-button { align-self: flex-start; margin: -4px 0 18px; padding: 0; border: 0; background: none; color: #3f6b52; font: 11px var(--font-mono); letter-spacing: .04em; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.field-link-button:hover { color: #2d5340; }
 @media (max-width: 760px) {
   .bilingual-pair { grid-template-columns: 1fr; }
 }

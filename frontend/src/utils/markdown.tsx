@@ -1,9 +1,12 @@
+import { Fragment } from 'react'
 import type { ReactNode } from 'react'
+import { joinParagraphLines, splitParagraphLines } from './markdownLines'
 
 // 极简 Markdown 渲染器：只解析本项目 README 会用到的语法，全程产出 React 元素，
 // 既不解析也不透传任何原始 HTML，因此不存在 HTML 注入面。
 // 支持：h1-h4、围栏代码块 ```、无序/有序列表、引用、分隔线、简单表格、段落；
 // 行内：**粗体**、*斜体*、`行内代码`、[文字](链接)、![图片](链接)（渲染为链接）。
+// options.breaks=true 时段落内的单个换行渲染成硬换行（后台正文用），默认 false（README 用）。
 
 type ListItemNode = { text: string; children: ListBlockData[] }
 type ListBlockData = { ordered: boolean; start: number; items: ListItemNode[] }
@@ -143,7 +146,7 @@ function parseList(
   return { block: { ordered, start: startNumber, items }, next: i }
 }
 
-function parseBlocks(markdown: string): Block[] {
+function parseBlocks(markdown: string, breaks: boolean): Block[] {
   const lines = sanitizeBlockHtml(markdown.replace(/\r\n?/g, '\n').split('\n'))
   const blocks: Block[] = []
   const usedIds = new Map<string, number>()
@@ -235,7 +238,7 @@ function parseBlocks(markdown: string): Block[] {
       paragraph.push(lines[i])
       i++
     }
-    blocks.push({ kind: 'paragraph', text: paragraph.join(' ') })
+    blocks.push({ kind: 'paragraph', text: joinParagraphLines(paragraph, breaks) })
   }
 
   return blocks
@@ -318,12 +321,19 @@ function renderListNodes(block: ListBlockData, keyPrefix: string): ReactNode {
   )
 }
 
-/** 渲染 Markdown，同时回传标题列表供「ON THIS PAGE」目录使用 */
-export function renderMarkdown(markdown: string): {
+/**
+ * 渲染 Markdown，同时回传标题列表供「ON THIS PAGE」目录使用。
+ * options.breaks=true：段落内的单个换行渲染成硬换行（后台正文用）；默认 false 保持 README 的
+ * 空白折行口径。
+ */
+export function renderMarkdown(
+  markdown: string,
+  options?: { breaks?: boolean },
+): {
   nodes: ReactNode
   headings: MarkdownHeading[]
 } {
-  const blocks = parseBlocks(markdown)
+  const blocks = parseBlocks(markdown, options?.breaks === true)
   const headings: MarkdownHeading[] = []
   const nodes: ReactNode[] = []
 
@@ -339,9 +349,21 @@ export function renderMarkdown(markdown: string): {
         else nodes.push(<h4 key={key} id={block.id}>{content}</h4>)
         break
       }
-      case 'paragraph':
-        nodes.push(<p key={key}>{renderInline(block.text, key)}</p>)
+      case 'paragraph': {
+        // 默认口径下这里只有一项（换行已被拼成空格），所以 README 的输出与加 breaks 前逐字一致
+        const segments = splitParagraphLines(block.text)
+        nodes.push(
+          <p key={key}>
+            {segments.map((segment, lineIndex) => (
+              <Fragment key={`${key}-ln${lineIndex}`}>
+                {lineIndex > 0 ? <br /> : null}
+                {renderInline(segment, `${key}-ln${lineIndex}`)}
+              </Fragment>
+            ))}
+          </p>,
+        )
         break
+      }
       case 'list':
         nodes.push(renderListNodes(block, key))
         break
