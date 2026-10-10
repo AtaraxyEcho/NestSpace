@@ -1,11 +1,38 @@
-import type { SiteSettings, NavItemConfig } from '../types/siteSettings'
+import type {
+  SiteSettings,
+  NavItemConfig,
+  SectionSlotKey,
+  SectionSlotPair,
+  SectionSlotMap,
+} from '../types/siteSettings'
 
 export const DEFAULT_NAV_ITEMS: NavItemConfig[] = [
   { id: 'cabinet', labelEn: 'Cabinet', labelZh: '标本陈列', visible: true },
-  { id: 'catalogue', labelEn: 'Catalogue', labelZh: '馆藏统计', visible: true },
+  { id: 'catalogue', labelEn: 'Statistics', labelZh: '馆藏统计', visible: true },
   { id: 'curator', labelEn: 'Curator', labelZh: '馆长手记', visible: true },
   { id: 'index', labelEn: 'Index', labelZh: '馆藏目录', visible: true },
 ]
+
+// 栏目/页面文案的内置默认：管理端留空时回退到这里，**渲染期才用，绝不写进库**
+// （写进库＝把默认烤成历史值，以后改默认再也传不下去）。
+// home.* 的默认是空串：这两行是新增的，不填就不渲染，前台视觉与改造前一致。
+export const BUILT_IN_SECTION_SLOTS: Record<SectionSlotKey, SectionSlotPair> = {
+  'home.catalogue': { en: '', zh: '' },
+  'home.index': { en: '', zh: '' },
+  'detail.preview': { en: 'Inside the specimen', zh: '项目预览' },
+  'detail.anatomy': { en: 'Core capabilities', zh: '标本特征' },
+  'detail.related': { en: 'Continue observing', zh: '' },
+}
+
+// 单格字符上限：内置默认最长 19 字符，160 已是十倍余量，只挡"把整段 README 粘进标题框"。
+// 真正的兜底在 Worker（整列序列化 5000 上限），这里先把超限的那一格点名出来。
+export const SECTION_SLOT_TEXT_MAX = 160
+
+/** 按 id 取内置导航项（mergeSiteSettings 补回缺失段落时用它，避免再抄一份字面量） */
+export function defaultNavItem(id: string): NavItemConfig {
+  const found = DEFAULT_NAV_ITEMS.find((item) => item.id === id)
+  return found ? { ...found } : { id, labelEn: id, labelZh: id, visible: true }
+}
 
 // 站点文案内置默认值：D1 中对应字段为空时回退到这里；
 // 修改默认文案后需重新构建部署（管理端改动则即时生效、无需重新部署）。
@@ -88,6 +115,10 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   solutionHeadlineEn: 'A narrow tool, carefully shaped.',
   solutionHeadlineZh: '',
 
+  // 栏目/页面文案槽位：内置默认**不在这里**（见 BUILT_IN_SECTION_SLOTS，渲染期才合），
+  // 否则每次保存都会把默认文案烤进库，以后改内置默认再也传不下去。
+  sectionCopy: {},
+
   // 展示偏好：默认值等于既有行为（跟随浏览器/系统，统计与两个切换按钮全部开启）
   defaultLanguage: 'auto',
   defaultTheme: 'auto',
@@ -117,12 +148,7 @@ export function mergeSiteSettings(data: Partial<SiteSettings> | null | undefined
         const list = value as NavItemConfig[]
         const hasCatalogue = list.some((item) => item.id === 'catalogue')
         if (!hasCatalogue) {
-          const catalogueItem: NavItemConfig = {
-            id: 'catalogue',
-            labelEn: 'Catalogue',
-            labelZh: '馆藏统计',
-            visible: true,
-          }
+          const catalogueItem = defaultNavItem('catalogue')
           const copy = [...list]
           const cabinetIdx = copy.findIndex((i) => i.id === 'cabinet')
           if (cabinetIdx !== -1) {
@@ -134,6 +160,13 @@ export function mergeSiteSettings(data: Partial<SiteSettings> | null | undefined
         } else {
           target[key] = value
         }
+      }
+    } else if (key === 'sectionCopy') {
+      // 只认纯对象：空列会被 Worker 的 JSON 兜底回吐成 []，数组形状不能顶掉默认表。
+      // 这里刻意**不**把 BUILT_IN_SECTION_SLOTS 合进来——默认只在渲染期用，
+      // 一旦合进 merged，保存时的 changedColumns 就会把整份默认写回库（烤默认）。
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        target[key] = value as SectionSlotMap
       }
     } else if (key === 'customActivityLog') {
       if (Array.isArray(value)) {

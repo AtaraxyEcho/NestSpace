@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { Language, Project, ProjectStatus } from "./types/project"
 import { fallbackProjects as projects } from "./data/fallbackProjects"
-import { DEFAULT_SITE_SETTINGS, DEFAULT_NAV_ITEMS } from "./data/defaultSiteSettings"
+import {
+  DEFAULT_SITE_SETTINGS,
+  DEFAULT_NAV_ITEMS,
+  BUILT_IN_SECTION_SLOTS,
+  SECTION_SLOT_TEXT_MAX,
+} from "./data/defaultSiteSettings"
 import { fetchPublicProjects, fetchSiteSettings, fetchPublicProjectById } from "./api/client"
 import {
   verifyAndFetchAdminProjects,
@@ -21,6 +26,15 @@ import { computeCatalogueStats, computeActivityTimeline } from "./utils/stats"
 import { renderMarkdown } from "./utils/markdown"
 import { frameLabel, hiddenFrameCount, previewFrames } from "./utils/previewFrames"
 import { orderHomeSections } from "./utils/navOrder"
+// 栏目标题与页面文案的读侧判据：顶栏、页脚章节列、后台预览、首页栏目标题四处共用这一份
+import {
+  navLabel,
+  sectionHeading,
+  slotHeading,
+  slotProse,
+  sectionSlotIssues,
+} from "./utils/sectionCopy"
+import type { SectionSlotKey } from "./types/siteSettings"
 // 双语字段（挑战/方案）的读侧规则，与 Worker 投影同一份
 import { asBilingual, pickBilingual, pickSiteHeading, type BilingualText } from "./utils/bilingual"
 // 相册判据与 Worker 写侧共用这一份（坏行即时点名与 400 点名必然是同一批）
@@ -529,10 +543,7 @@ function Header({
       <LogoWordmark settings={settings} dark={dark} />
       <nav aria-label="Primary navigation">
         {navList.map((item) => {
-          const label =
-            language === "zh"
-              ? item.labelZh || item.labelEn
-              : item.labelEn || item.labelZh
+          const label = navLabel(item, language)
           return (
             <a
               key={item.id}
@@ -764,13 +775,20 @@ function CatalogueStats({
   language,
   items,
   settings,
+  navItems,
+  sectionIndex,
 }: {
   language: Language
   items: Project[]
   settings: SiteSettings
+  // 标题取导航标签，必须用**未过滤**的那份 navItems：effectiveSettings 在关闭统计展示时会摘掉 catalogue 项
+  navItems: SiteSettings["navItems"]
+  sectionIndex: number
 }) {
   const computed = computeCatalogueStats(items, settings)
   const timelineData = computeActivityTimeline(items, settings)
+  const heading = sectionHeading(navItems, "catalogue")
+  const description = slotProse(settings.sectionCopy, "home.catalogue", language)
 
   const stats = [
     [
@@ -801,11 +819,14 @@ function CatalogueStats({
     <section className="section stats-section reveal-section" id="catalogue">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">CABINET RECORD / 02</span>
+          <span className="eyebrow">
+            CABINET RECORD / {String(sectionIndex).padStart(2, "0")}
+          </span>
           <h2>
-            Catalogue{" "}
-            <em>/ {language === "zh" ? "馆藏统计" : "Collection record"}</em>
+            {heading.en}{" "}
+            {heading.pair ? <em>/ {heading.zh}</em> : null}
           </h2>
+          {description ? <p className="section-desc">{description}</p> : null}
         </div>
         <span className="as-of">AS OF {computed.asOfDate}</span>
       </div>
@@ -952,11 +973,22 @@ function Curator({ language, settings }: { language: Language; settings: SiteSet
 
 function SpecimenIndex({
   items,
+  language,
+  settings,
+  navItems,
   onOpen,
 }: {
   items: Project[]
+  language: Language
+  settings: SiteSettings
+  navItems: SiteSettings["navItems"]
   onOpen: (project: Project) => void
 }) {
+  // 标题就是导航标签（Index / 馆藏目录）：以前这里和 Catalogue 段都写死在 JSX 里，
+  // 后台改导航名只管到导航条，段落标题不动——同一个设置只管一半。
+  // eyebrow 用的是条目数（SYSTEMATIC REGISTER / 04 = 四件标本），不是段落序号，刻意的。
+  const heading = sectionHeading(navItems, "index")
+  const description = slotProse(settings.sectionCopy, "home.index", language)
   return (
     <section className="section index-section" id="index">
       <div className="section-heading">
@@ -965,8 +997,10 @@ function SpecimenIndex({
             SYSTEMATIC REGISTER / {String(items.length).padStart(2, "0")}
           </span>
           <h2>
-            Index of Specimens <em>/ 馆藏目录</em>
+            {heading.en}{" "}
+            {heading.pair ? <em>/ {heading.zh}</em> : null}
           </h2>
+          {description ? <p className="section-desc">{description}</p> : null}
         </div>
         <span className="as-of">
           {String(items.length).padStart(2, "0")} ENTRIES
@@ -1037,7 +1071,7 @@ function SiteFooter({
     ? `mailto:${contactEmail}`
     : null
 
-  // COLLECTION 列跟随「导航与标头」的顺序、名称与显示状态，末尾固定 Colophon 入口
+  // COLLECTION 列跟随「全局 · 标头与导航」的顺序、名称与显示状态，末尾固定 Colophon 入口
   const navList =
     settings.navItems && settings.navItems.length > 0
       ? settings.navItems
@@ -1046,10 +1080,7 @@ function SiteFooter({
     .filter((item) => item.visible !== false)
     .map((item) => ({
       id: item.id,
-      label:
-        language === "zh"
-          ? item.labelZh || item.labelEn
-          : item.labelEn || item.labelZh,
+      label: navLabel(item, language),
     }))
     .concat([
       {
@@ -1238,6 +1269,9 @@ function DetailPage({
     { en: settings.solutionHeadlineEn, zh: settings.solutionHeadlineZh },
     language,
   )
+  // 「标本特征」与「继续观察」两处标题同样来自槽位；内置默认就是改造前写死的那两句，不填则逐字不变
+  const anatomyHeading = slotHeading(settings.sectionCopy, "detail.anatomy")
+  const relatedHeading = slotHeading(settings.sectionCopy, "detail.related")
   // 正文按 markdown 渲染（breaks：管理员按 Enter 就是想让下一行开始）。
   // 仍是 markdown → React 节点，零 dangerouslySetInnerHTML；README 那条调用保持默认口径。
   const challengeBody = useMemo(
@@ -1455,6 +1489,7 @@ function DetailPage({
           images={previewImages}
           name={project.name}
           language={language}
+          sectionCopy={settings.sectionCopy}
         />
 
         <section className="detail-section" id="field-notes">
@@ -1495,7 +1530,8 @@ function DetailPage({
             <div>
               <span className="eyebrow">ANATOMY / 03</span>
               <h2>
-                Core capabilities <em>/ 标本特征</em>
+                {anatomyHeading.en}{" "}
+                {anatomyHeading.pair ? <em>/ {anatomyHeading.zh}</em> : null}
               </h2>
             </div>
             <span className="as-of">
@@ -1717,7 +1753,10 @@ function DetailPage({
         <div className="section-heading">
           <div>
             <span className="eyebrow">NEIGHBOURING SPECIMENS / 05</span>
-            <h2>Continue observing</h2>
+            <h2>
+              {relatedHeading.en}{" "}
+              {relatedHeading.pair ? <em>/ {relatedHeading.zh}</em> : null}
+            </h2>
           </div>
         </div>
         <div className="related-grid">
@@ -1743,7 +1782,132 @@ function DetailPage({
   )
 }
 
-type AdminView = "overview" | "navigation" | "stats" | "content" | "footer" | "projects" | "sync" | "settings"
+// 管理端「栏目与页面文案」各槽位的人话名称。顺序就是界面上的顺序，所以从 SECTION_SLOT_KEYS 派生，
+// 避免加一个槽位要改两处（漏一处就会"库里有值但界面上看不见"＝假状态）。
+const SECTION_SLOT_LABELS: Record<SectionSlotKey, { label: string; hint: string }> = {
+  "home.catalogue": { label: "本栏目描述", hint: "标题下的一行小字，留空则不显示" },
+  "home.index": { label: "本栏目描述", hint: "标题下的一行小字，留空则不显示" },
+  "detail.preview": { label: "预览区标题", hint: "留空回退内置「Inside the specimen / 项目预览」" },
+  "detail.anatomy": { label: "特征区标题", hint: "留空回退内置「Core capabilities / 标本特征」" },
+  "detail.related": { label: "相邻标本标题", hint: "留空回退内置「Continue observing」" },
+}
+
+/**
+ * 槽位编辑行。按传入的 keys 渲染，所以同一个组件能出现在「统计」「目录」「详情页」三个视图里——
+ * 分栏的要求是"每段自己的配置在自己那一栏"，把这段 JSX 复制三份迟早各自漂移。
+ */
+/** 内容编辑区的中英语言页签：Hero / 手记 / 详情页三栏共用（以前这段 JSX 只在「内容管理」里有一份）*/
+function ContentLanguageTabs({
+  value,
+  onChange,
+}: {
+  value: Language
+  onChange: (next: Language) => void
+}) {
+  return (
+    <div className="content-tabs" role="tablist" aria-label="内容语言">
+      <button
+        type="button"
+        className={value === "zh" ? "active" : ""}
+        onClick={() => onChange("zh")}
+      >
+        中文内容
+      </button>
+      <button
+        type="button"
+        className={value === "en" ? "active" : ""}
+        onClick={() => onChange("en")}
+      >
+        English
+      </button>
+    </div>
+  )
+}
+
+
+function SectionSlotFields({
+  keys,
+  value,
+  onPatch,
+}: {
+  keys: readonly SectionSlotKey[]
+  value: SiteSettings["sectionCopy"]
+  onPatch: (key: SectionSlotKey, lang: "en" | "zh", next: string) => void
+}) {
+  return (
+    <>
+      {keys.map((key) => {
+        const slot = value?.[key]
+        const meta = SECTION_SLOT_LABELS[key]
+        const built = BUILT_IN_SECTION_SLOTS[key]
+        return (
+          <div className="section-slot-row" key={key}>
+            <b>{meta.label}</b>
+            <small>{meta.hint}</small>
+            <div className="section-slot-fields">
+              {(["en", "zh"] as const).map((lang) => {
+                const text = slot?.[lang] ?? ""
+                const over = text.trim().length > SECTION_SLOT_TEXT_MAX
+                return (
+                  <label key={lang}>
+                    {lang === "en" ? "英文" : "中文"}
+                    <input
+                      value={text}
+                      placeholder={built[lang]}
+                      className={over ? "is-invalid" : undefined}
+                      aria-invalid={over}
+                      onChange={(event) => onPatch(key, lang, event.target.value)}
+                    />
+                    {over ? (
+                      <ul className="row-issues" role="list">
+                        <li>
+                          {text.trim().length} 字符，超过 {SECTION_SLOT_TEXT_MAX} 上限
+                        </li>
+                      </ul>
+                    ) : null}
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
+type AdminView =
+  | "overview"
+  | "global"
+  | "homeCabinet"
+  | "homeStats"
+  | "homeCurator"
+  | "homeIndex"
+  | "detail"
+  | "footer"
+  | "projects"
+  | "sync"
+  | "settings"
+
+// 侧栏按「页面 / 栏目」分组。序号只在这里维护一份：以前侧栏写 01–08、页内 eyebrow 各写一遍
+// （「内容管理」是侧栏 04 却自称 / 02、「站点设置」是 07 却自称 / 03），搬家之后只会更乱。
+const ADMIN_NAV: readonly { key: AdminView; no: string; label: string }[] = [
+  { key: "overview", no: "01", label: "馆藏总览" },
+  { key: "global", no: "02", label: "全局 · 标头与导航" },
+  { key: "homeCabinet", no: "03", label: "首页 · 陈列" },
+  { key: "homeStats", no: "04", label: "首页 · 统计" },
+  { key: "homeCurator", no: "05", label: "首页 · 手记" },
+  { key: "homeIndex", no: "06", label: "首页 · 目录" },
+  { key: "detail", no: "07", label: "详情页" },
+  { key: "footer", no: "08", label: "底部栏文案" },
+  { key: "projects", no: "09", label: "项目管理" },
+  { key: "sync", no: "10", label: "GitHub 同步" },
+  { key: "settings", no: "11", label: "站点设置" },
+]
+
+/** 页内 eyebrow 的编号与顶栏标题：都取自 ADMIN_NAV，杜绝"侧栏一份、页内一份" */
+const adminNav = (key: AdminView) => ADMIN_NAV.find((entry) => entry.key === key) ?? ADMIN_NAV[0]
+const adminNavNo = (key: AdminView): string => adminNav(key).no
 
 // 页脚文案的中英字段键（均以 En / Zh 结尾，值类型均为 string）
 type FooterCopyEnKey = Extract<keyof SiteSettings, `${string}En`>
@@ -1849,7 +2013,7 @@ function AdminFooterView({
       : DEFAULT_NAV_ITEMS
   const collectionLinks = navList
     .filter((item) => item.visible !== false)
-    .map((item) => ({ id: item.id, label: pick(item.labelEn, item.labelZh) }))
+    .map((item) => ({ id: item.id, label: navLabel(item, contentLanguage) }))
     .concat([
       {
         id: "colophon",
@@ -1861,7 +2025,7 @@ function AdminFooterView({
     <div className="admin-content">
       <div className="admin-page-title compact">
         <div>
-          <span className="eyebrow">FOOTER COPY / 08</span>
+          <span className="eyebrow">FOOTER COPY / {adminNavNo("footer")}</span>
           <h1>底部栏文案</h1>
           <p>调整公开站点底部栏的品牌说明、栏目标题、链接文字与版权行，中英各一份，随访客语言切换。</p>
         </div>
@@ -1902,7 +2066,7 @@ function AdminFooterView({
           />
           <FooterCopyField
             label="品牌说明段落"
-            hint="支持 {name} 占位符，取自「02 导航与标头」的副标题署名"
+            hint="支持 {name} 占位符，取自「02 全局 · 标头与导航」的副标题署名"
             language={contentLanguage}
             settings={settings}
             enKey="footerBlurbEn"
@@ -1917,7 +2081,7 @@ function AdminFooterView({
           <h2>三列标题与锚点文字</h2>
           <FooterCopyField
             label="标本列表列标题"
-            hint="内容为全部公开标本名称，来自「05 项目管理」"
+            hint="内容为全部公开标本名称，来自「09 项目管理」"
             language={contentLanguage}
             settings={settings}
             enKey="footerColSpecimensEn"
@@ -1926,7 +2090,7 @@ function AdminFooterView({
           />
           <FooterCopyField
             label="章节导航列标题"
-            hint="该列链接的顺序、名称与显示状态跟随「02 导航与标头」"
+            hint="该列链接的顺序、名称与显示状态跟随「02 全局 · 标头与导航」"
             language={contentLanguage}
             settings={settings}
             enKey="footerColCollectionEn"
@@ -1958,7 +2122,7 @@ function AdminFooterView({
           <h2>外部链接显示文字</h2>
           <FooterCopyField
             label="GitHub 链接文字"
-            hint="链接地址来自「04 内容管理」的 GitHub"
+            hint="链接地址来自「05 首页 · 手记」的 GitHub"
             language={contentLanguage}
             settings={settings}
             enKey="footerGithubLabelEn"
@@ -1967,7 +2131,7 @@ function AdminFooterView({
           />
           <FooterCopyField
             label="联系链接文字"
-            hint="链接指向 mailto:「04 内容管理」的联系邮箱"
+            hint="链接指向 mailto:「05 首页 · 手记」的联系邮箱"
             language={contentLanguage}
             settings={settings}
             enKey="footerContactLabelEn"
@@ -1981,7 +2145,7 @@ function AdminFooterView({
           <h2>版权行</h2>
           <FooterCopyField
             label="底行左侧文案"
-            hint="支持 {since} 占位符，取馆藏起始年份（可在「03 馆藏统计」指定）"
+            hint="支持 {since} 占位符，取馆藏起始年份（可在「04 首页 · 统计」指定）"
             language={contentLanguage}
             settings={settings}
             enKey="footerColophonLineEn"
@@ -1990,7 +2154,7 @@ function AdminFooterView({
           />
           <FooterCopyField
             label="底行右侧版权行"
-            hint="支持 {year} 占位符，取当前年份；备案号在「07 站点设置」的备案信息卡片"
+            hint="支持 {year} 占位符，取当前年份；备案号在「11 站点设置」的备案信息卡片"
             language={contentLanguage}
             settings={settings}
             enKey="footerCopyrightEn"
@@ -2323,16 +2487,6 @@ function AdminPage({
   const [discoveredRepos, setDiscoveredRepos] = useState<RemoteGithubRepo[] | null>(null)
   const [importingRepo, setImportingRepo] = useState<string | null>(null)
 
-  const viewNames: Record<AdminView, string> = {
-    overview: "馆藏总览",
-    navigation: "导航与标头",
-    stats: "馆藏统计",
-    content: "内容管理",
-    footer: "底部栏文案",
-    projects: "项目管理",
-    sync: "GitHub 同步",
-    settings: "站点设置",
-  }
   // 从 D1 拉取站点文案设置。未加载成功前一律禁止保存：
   // 否则初值（内置默认文案）会被整份写回，抹掉线上已配置的文案。
   const loadSiteSettings = async () => {
@@ -2361,6 +2515,13 @@ function AdminPage({
       setNoticeError("站点文案尚未从线上库加载成功，已阻止保存以避免覆盖线上配置。请先点上方「重新加载」。")
       return
     }
+    // 栏目文案超限先在前端点名到"哪一格"：服务端只会点名整个 sectionCopy 字段并拒绝整列，
+    // 看起来就像"改了没保存"。拒绝而不是截断——静默裁掉再回成功是假状态。
+    const copyProblems = sectionSlotIssues(siteContent.sectionCopy)
+    if (copyProblems.length > 0) {
+      setNoticeError(`栏目文案有超限项：${copyProblems.join("；")}`)
+      return
+    }
     // 只发与库里那一份不同的列。以前这里 PUT 的是整份 siteContent，而它是 mergeSiteSettings 的结果
     // （空值已被换成内置默认文案），于是**任何一次保存都会把当时所有内置默认抄进那一行**：
     // 之后在代码里改默认值就再也传不到线上（库值赢），"清空=回退默认"的语义也被抹平。
@@ -2383,6 +2544,24 @@ function AdminPage({
     } else {
       setNoticeError(`保存失败: ${res.error || "请检查网络或口令权限"}`)
     }
+  }
+
+  // 栏目文案：只写被敲的那一格，其余槽位保持库里原样。
+  // 刻意不把内置默认合进 state——那样任何一次保存都会把整份默认烤进库（改了默认再也传不下去）。
+  const patchSectionSlot = (key: SectionSlotKey, lang: "en" | "zh", value: string) => {
+    // 只认字符串：库里被手改成别的形状（数组/对象/数字）时，展开它会把垃圾键一起写回库
+    const stored = siteContent.sectionCopy?.[key]
+    const current = {
+      en: typeof stored?.en === "string" ? stored.en : "",
+      zh: typeof stored?.zh === "string" ? stored.zh : "",
+    }
+    setSiteContent({
+      ...siteContent,
+      sectionCopy: {
+        ...siteContent.sectionCopy,
+        [key]: { ...current, [lang]: value },
+      },
+    })
   }
 
   const patchFooterPair = (
@@ -2894,62 +3073,16 @@ function AdminPage({
           <span>CURATOR CONSOLE</span>
         </button>
         <nav aria-label="Admin navigation">
-          <button
-            type="button"
-            className={view === "overview" ? "active" : ""}
-            onClick={() => setView("overview")}
-          >
-            <span>01</span> 总览
-          </button>
-          <button
-            type="button"
-            className={view === "navigation" ? "active" : ""}
-            onClick={() => setView("navigation")}
-          >
-            <span>02</span> 导航与标头
-          </button>
-          <button
-            type="button"
-            className={view === "stats" ? "active" : ""}
-            onClick={() => setView("stats")}
-          >
-            <span>03</span> 馆藏统计
-          </button>
-          <button
-            type="button"
-            className={view === "content" ? "active" : ""}
-            onClick={() => setView("content")}
-          >
-            <span>04</span> 内容管理
-          </button>
-          <button
-            type="button"
-            className={view === "projects" ? "active" : ""}
-            onClick={() => setView("projects")}
-          >
-            <span>05</span> 项目管理
-          </button>
-          <button
-            type="button"
-            className={view === "sync" ? "active" : ""}
-            onClick={() => setView("sync")}
-          >
-            <span>06</span> GitHub 同步
-          </button>
-          <button
-            type="button"
-            className={view === "settings" ? "active" : ""}
-            onClick={() => setView("settings")}
-          >
-            <span>07</span> 站点设置
-          </button>
-          <button
-            type="button"
-            className={view === "footer" ? "active" : ""}
-            onClick={() => setView("footer")}
-          >
-            <span>08</span> 底部栏
-          </button>
+          {ADMIN_NAV.map((entry) => (
+            <button
+              type="button"
+              key={entry.key}
+              className={view === entry.key ? "active" : ""}
+              onClick={() => setView(entry.key)}
+            >
+              <span>{entry.no}</span> {entry.label}
+            </button>
+          ))}
         </nav>
         <div className="admin-sidebar-foot">
           <span>
@@ -2965,7 +3098,7 @@ function AdminPage({
         <header className="admin-topbar">
           <div>
             <span className="eyebrow">PRIVATE CABINET</span>
-            <strong>{viewNames[view]}</strong>
+            <strong>{adminNav(view).label}</strong>
           </div>
           <div className="admin-user">
             <span>NS</span>
@@ -3007,7 +3140,7 @@ function AdminPage({
           <div className="admin-content">
             <div className="admin-page-title">
               <div>
-                <span className="eyebrow">CABINET STATUS / 01</span>
+                <span className="eyebrow">CABINET STATUS / {adminNavNo("overview")}</span>
                 <h1>早上好，Curator</h1>
                 <p>这里是当前数字馆藏的生长概况。</p>
               </div>
@@ -3124,13 +3257,17 @@ function AdminPage({
           </div>
         )}
 
-        {view === "navigation" && (
+        {view === "global" && (
           <div className="admin-content">
             <div className="admin-page-title compact">
               <div>
-                <span className="eyebrow">HEADER & LOGO / 02</span>
-                <h1>导航与标头控制</h1>
-                <p>自定义顶部栏导航项顺序、中英名称、展示状态及网站品牌 Logo。</p>
+                <span className="eyebrow">GLOBAL / {adminNavNo("global")}</span>
+                <h1>标头与导航</h1>
+                <p>
+                  顶部栏导航项的顺序、中英名称与显示状态，以及网站品牌 Logo。
+                  这里的名称同时是页脚「馆藏章节」的入口文字，也是首页**陈列 / 统计 / 目录**三段的大标题
+                  （手记段的大标题另有文案，在「05 首页 · 手记」）。补充描述行只在有得配的那几栏：04 统计、06 目录、07 详情页。
+                </p>
               </div>
               <button
                 type="button"
@@ -3146,9 +3283,12 @@ function AdminPage({
                 <span className="eyebrow">NAVIGATION ORDER & LABELS</span>
                 <h2>导航项控制</h2>
                 <p style={{ fontSize: "12px", color: "#64685f", marginTop: "-16px", marginBottom: "16px" }}>
-                  通过 ▲ / ▼ 调整顺序——这一份顺序**同时决定顶部栏导航与首页内容段落的排列**（标本陈列 /
-                  馆藏统计 / 馆长手记 / 馆藏目录）。「显示」开关只影响导航条里那个链接在不在，
-                  不会把对应段落从页面上删掉；段落显隐在「站点设置 → 展示偏好」里单独控制。
+                  通过 ▲ / ▼ 调整顺序——这一份顺序<strong>同时决定顶部栏导航与首页内容段落的排列</strong>。
+                  这里的两个名称也不只出现在导航条：它们是<strong>陈列 / 统计 / 目录</strong>三段的大标题
+                  （中英并排显示），也是页脚「馆藏章节」里的入口文字，改一次三处一起变；
+                  手记段的大标题是「05 首页 · 手记」里的 headline，刻意不跟导航名。
+                  「显示」开关只影响导航条里那个链接在不在，不会把对应段落从页面上删掉；
+                  段落显隐在「04 首页 · 统计」里单独控制。
                 </p>
 
                 <div className="nav-config-list">
@@ -3279,7 +3419,7 @@ function AdminPage({
                       })
                     }}
                   >
-                    重置为推荐顺序 (Cabinet → Catalogue → Curator → Index)
+                    重置为推荐顺序 ({DEFAULT_NAV_ITEMS.map((item) => item.labelEn).join(" → ")})
                   </button>
                 </div>
               </section>
@@ -3384,13 +3524,13 @@ function AdminPage({
           </div>
         )}
 
-        {view === "stats" && (
+        {view === "homeStats" && (
           <div className="admin-content">
             <div className="admin-page-title compact">
               <div>
-                <span className="eyebrow">RECORD & TIMELINE / 03</span>
-                <h1>馆藏统计与动态</h1>
-                <p>修复与维护前台 Catalogue 统计数据及 ACTIVITY LOG 活跃度时间线。</p>
+                <span className="eyebrow">RECORD & TIMELINE / {adminNavNo("homeStats")}</span>
+                <h1>首页 · 统计</h1>
+                <p>修复与维护前台统计栏目（Statistics）的数据及 ACTIVITY LOG 活跃度时间线。</p>
               </div>
               <button
                 type="button"
@@ -3621,42 +3761,65 @@ function AdminPage({
                   保存活跃度设置
                 </button>
               </section>
+
+              <section className="settings-card">
+                <span className="eyebrow">SECTION COPY / 本栏目</span>
+                <h2>统计栏目的文案与显示</h2>
+                <p>
+                  大标题不在这里改——它就是「02 全局 · 标头与导航」里那条导航项的名称，
+                  中英两个名称并排显示在标题右侧。这里只放标题之下的描述行，以及这一段在首页要不要出现。
+                  描述行留空则不渲染（内置默认是空）；开关关闭时首页整段消失、导航入口同步移除。
+                </p>
+
+                <SectionSlotFields
+                  keys={["home.catalogue"]}
+                  value={siteContent.sectionCopy}
+                  onPatch={patchSectionSlot}
+                />
+
+                <label className="toggle-row">
+                  <span>
+                    <strong>公开项目统计</strong>
+                    <small>
+                      关闭后首页隐藏统计栏目，并同步移除导航里指向它的入口
+                    </small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={siteContent.homeStatsVisible !== false}
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        homeStatsVisible: event.target.checked,
+                      })
+                    }
+                  />
+                </label>
+              </section>
             </div>
           </div>
         )}
 
-        {view === "content" && (
+        {view === "homeCabinet" && (
           <div className="admin-content">
             <div className="admin-page-title compact">
               <div>
-                <span className="eyebrow">EDITORIAL CONTENT / 02</span>
-                <h1>内容管理</h1>
-                <p>统一维护首页 Hero、馆长手记、详情页小标题与公开联系方式。</p>
+                <span className="eyebrow">CABINET / {adminNavNo("homeCabinet")}</span>
+                <h1>首页 · 陈列</h1>
+                <p>
+                  首屏的两句叙事。陈列段（螺旋画廊）本身由馆藏项目驱动，没有独立标题可配；
+                  它在导航条与页脚里的名字仍是「02 全局 · 标头与导航」里 cabinet 那一条。
+                </p>
               </div>
               <button
                 type="button"
                 className="admin-primary"
                 onClick={saveSettings}
               >
-                保存并发布
+                保存并生效
               </button>
             </div>
-            <div className="content-tabs" role="tablist" aria-label="内容语言">
-              <button
-                type="button"
-                className={contentLanguage === "zh" ? "active" : ""}
-                onClick={() => setContentLanguage("zh")}
-              >
-                中文内容
-              </button>
-              <button
-                type="button"
-                className={contentLanguage === "en" ? "active" : ""}
-                onClick={() => setContentLanguage("en")}
-              >
-                English
-              </button>
-            </div>
+            <ContentLanguageTabs value={contentLanguage} onChange={setContentLanguage} />
             <div className="content-editor-grid">
               <section className="settings-card">
                 <span className="eyebrow">HERO / 首屏</span>
@@ -3710,8 +3873,34 @@ function AdminPage({
                   </p>
                 </div>
               </section>
+            </div>
+          </div>
+        )}
+
+
+        {view === "homeCurator" && (
+          <div className="admin-content">
+            <div className="admin-page-title compact">
+              <div>
+                <span className="eyebrow">CURATOR / {adminNavNo("homeCurator")}</span>
+                <h1>首页 · 手记</h1>
+                <p>
+                  馆长手记段落的叙事：手记正文（标题 / 引言 / 属性值）与「关于 + 公开联系方式」。
+                  这一段的大标题用的是下面的 headline，<strong>刻意不跟随导航名称</strong>——它是一句宣言，不是栏目名。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="admin-primary"
+                onClick={saveSettings}
+              >
+                保存并发布
+              </button>
+            </div>
+            <ContentLanguageTabs value={contentLanguage} onChange={setContentLanguage} />
+            <div className="content-editor-grid">
               <section className="settings-card">
-                <span className="eyebrow">CURATOR / 馆长手记</span>
+                <span className="eyebrow">ABOUT & CONTACT</span>
                 <h2>关于与联系</h2>
                 <label>
                   关于我
@@ -3860,6 +4049,62 @@ function AdminPage({
                   保存栏目文案
                 </button>
               </section>
+            </div>
+          </div>
+        )}
+        {view === "homeIndex" && (
+          <div className="admin-content">
+            <div className="admin-page-title compact">
+              <div>
+                <span className="eyebrow">INDEX / {adminNavNo("homeIndex")}</span>
+                <h1>首页 · 目录</h1>
+                <p>
+                  目录段逐行来自馆藏项目，这里只配标题之下的描述行；
+                  标题本身是导航项 index 的中英名称（在「02 全局 · 标头与导航」改）。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="admin-primary"
+                onClick={saveSettings}
+              >
+                保存并生效
+              </button>
+            </div>
+            <div className="content-editor-grid">
+              <section className="settings-card">
+                <span className="eyebrow">SECTION COPY / 本栏目</span>
+                <h2>目录栏目的描述</h2>
+                <p>留空 = 内置默认为空，即标题下不显示这一行。</p>
+                <SectionSlotFields
+                  keys={["home.index"]}
+                  value={siteContent.sectionCopy}
+                  onPatch={patchSectionSlot}
+                />
+              </section>
+            </div>
+          </div>
+        )}
+
+
+        {view === "detail" && (
+          <div className="admin-content">
+            <div className="admin-page-title compact">
+              <div>
+                <span className="eyebrow">DETAIL PAGE / {adminNavNo("detail")}</span>
+                <h1>详情页</h1>
+                <p>标本详情页的标题文案：「挑战 / 方案」两段小标题，以及预览区、特征区、相邻标本三处标题。</p>
+              </div>
+              <button
+                type="button"
+                className="admin-primary"
+                onClick={saveSettings}
+              >
+                保存并生效
+              </button>
+            </div>
+            <ContentLanguageTabs value={contentLanguage} onChange={setContentLanguage} />
+            <div className="content-editor-grid">
               {/* 卡的标题刻意不写「挑战 / 方案」——那两个词正是这张卡能改掉的东西，
                   用它当索引，改完就找不到北了。锚点用 THE CONDITION / THE RESPONSE：排版标签，刻意单语。 */}
               <section className="settings-card" id="detail-copy-card">
@@ -3914,7 +4159,7 @@ function AdminPage({
                     }
                   />
                   <small>
-                    同上。这两句是全站一份，改完后前台详情页的小标题与「05 项目管理」抽屉里的栏名都跟着变
+                    同上。这两句是全站一份，改完后前台详情页的小标题与「09 项目管理」抽屉里的栏名都跟着变
                   </small>
                 </label>
                 <button
@@ -3925,9 +4170,25 @@ function AdminPage({
                   保存详情页文案
                 </button>
               </section>
+
+              <section className="settings-card">
+                <span className="eyebrow">SECTION COPY / 页面标题</span>
+                <h2>预览区 / 特征区 / 相邻标本的标题</h2>
+                <p>
+                  这三处原先是写死在组件里的字面量。留空 = 用内置默认（就是改造前那句原文）；
+                  中英两侧各自回退，只填英文不会把中文侧顶成英文。
+                </p>
+                <SectionSlotFields
+                  keys={["detail.preview", "detail.anatomy", "detail.related"]}
+                  value={siteContent.sectionCopy}
+                  onPatch={patchSectionSlot}
+                />
+              </section>
             </div>
           </div>
         )}
+
+
 
         {view === "footer" && (
           <AdminFooterView
@@ -3944,7 +4205,7 @@ function AdminPage({
           <div className="admin-content">
             <div className="admin-page-title compact">
               <div>
-                <span className="eyebrow">SPECIMEN REGISTER / 02</span>
+                <span className="eyebrow">SPECIMEN REGISTER / {adminNavNo("projects")}</span>
                 <h1>项目管理</h1>
                 <p>维护公开馆藏中的项目资料与发布状态。</p>
               </div>
@@ -4073,7 +4334,7 @@ function AdminPage({
           <div className="admin-content">
             <div className="admin-page-title compact">
               <div>
-                <span className="eyebrow">REMOTE COLLECTION / 06</span>
+                <span className="eyebrow">REMOTE COLLECTION / {adminNavNo("sync")}</span>
                 <h1>GitHub 同步与仓库发现</h1>
                 <p>扫描 GitHub 账号的公开仓库、一键导入为馆藏标本，并实时同步各项目的 Stars、Release 版本与更新时间。</p>
               </div>
@@ -4094,7 +4355,7 @@ function AdminPage({
                     style={{ width: "100%", padding: "8px 11px", border: "1px solid #c5c6bf", background: "#fdfdfc", fontFamily: "inherit", fontSize: "12px" }}
                   />
                   <small style={{ color: "#777b70", fontSize: "11px", marginTop: "5px", display: "block" }}>
-                    默认按「站点设置」中 GitHub 地址自动推导
+                    默认按「05 首页 · 手记」里的 GitHub 地址自动推导
                   </small>
                 </div>
                 <div>
@@ -4347,7 +4608,7 @@ function AdminPage({
           <div className="admin-content">
             <div className="admin-page-title compact">
               <div>
-                <span className="eyebrow">SITE CONFIGURATION / 03</span>
+                <span className="eyebrow">SITE CONFIGURATION / {adminNavNo("settings")}</span>
                 <h1>站点设置</h1>
                 <p>管理公开站点的基础信息与展示偏好。</p>
               </div>
@@ -4442,24 +4703,6 @@ function AdminPage({
                 </label>
                 <label className="toggle-row">
                   <span>
-                    <strong>公开项目统计</strong>
-                    <small>
-                      关闭后首页隐藏 Catalogue 统计区块，并同步移除导航中的「馆藏统计」
-                    </small>
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={siteContent.homeStatsVisible !== false}
-                    onChange={(event) =>
-                      setSiteContent({
-                        ...siteContent,
-                        homeStatsVisible: event.target.checked,
-                      })
-                    }
-                  />
-                </label>
-                <label className="toggle-row">
-                  <span>
                     <strong>深色模式切换</strong>
                     <small>关闭后前台隐藏深浅色按钮，访客只能使用默认主题</small>
                   </span>
@@ -4529,6 +4772,9 @@ function AdminPage({
                   标题与 Meta 描述保存后即时生效：浏览器内直接改写文档标题，同时由边缘 Worker 注入到首页
                   HTML（缓存 60 秒），因此不执行 JS 的爬虫与社交平台也能读到最新值。
                 </p>
+                <button type="button" className="admin-primary" onClick={saveSettings}>
+                  保存搜索与分享设置
+                </button>
               </section>
               <section className="settings-card">
                 <span className="eyebrow">COMPLIANCE / 合规</span>
@@ -4875,7 +5121,7 @@ function AdminPage({
                   en: siteContent.solutionHeadlineEn,
                   zh: siteContent.solutionHeadlineZh,
                 }}
-                hint="同上。这两段的小标题是站点级设置（改一次全站生效），入口在「04 内容管理」，下面这个按钮直接跳过去。"
+                hint="同上。这两段的小标题是站点级设置（改一次全站生效），入口在「07 详情页」，下面这个按钮直接跳过去。"
                 preview
                 value={editing.solution}
                 onChange={(next) => setEditing({ ...editing, solution: next })}
@@ -4890,7 +5136,7 @@ function AdminPage({
                     return
                   }
                   closeDrawer()
-                  setView("content")
+                  setView("detail")
                   // 这张卡要等 view 切过去才在 DOM 里，同一帧滚不动它
                   window.setTimeout(
                     () =>
@@ -5253,11 +5499,15 @@ function PreviewGallery({
   images,
   name,
   language,
+  sectionCopy,
 }: {
   images: string[]
   name: string
   language: Language
+  sectionCopy: SiteSettings["sectionCopy"]
 }) {
+  // 标题来自「栏目与页面文案」的 detail.preview 槽位；留空回退内置原文，所以不填时与改造前逐字相同
+  const heading = slotHeading(sectionCopy, "detail.preview")
   const [active, setActive] = useState(0)
   const [ratios, setRatios] = useState<Record<number, number>>({})
   // 主牌定妆（load 或 error 都算定妆）之后才去取侧牌/后牌：
@@ -5418,7 +5668,8 @@ function PreviewGallery({
       <div className="preview-copy">
         <span className="eyebrow">PREVIEW / 01</span>
         <h2 id="preview-heading">
-          Inside the specimen <em>/ 项目预览</em>
+          {heading.en}{" "}
+          {heading.pair ? <em>/ {heading.zh}</em> : null}
         </h2>
         <p>{hint}</p>
         <div className="preview-pagination" aria-live="polite">
@@ -6124,9 +6375,9 @@ export default function App() {
       ) : null}
       {/* 段落顺序跟着管理端的导航顺序走（orderHomeSections 是纯函数、有闸门测试）。
           以前这四段写死在 JSX 里，导航条却可拖序——同一个设置只管到一半。
-          馆藏统计的显隐仍由「展示偏好」的 homeStatsVisible 决定：导航项的 visible 只管导航条，
+          统计段的显隐仍由「04 首页 · 统计」里的 homeStatsVisible 决定：导航项的 visible 只管导航条，
           两件事刻意不合并（合并后"隐藏一个链接"会顺手把整段内容从页面上弄丢）。 */}
-      {shownSections.map((id) => {
+      {shownSections.map((id, position) => {
         switch (id) {
           case "cabinet":
             return (
@@ -6145,12 +6396,23 @@ export default function App() {
                 language={language}
                 items={items}
                 settings={effectiveSettings}
+                navItems={siteSettings.navItems}
+                sectionIndex={position + 1}
               />
             ) : null
           case "curator":
             return <Curator key={id} language={language} settings={effectiveSettings} />
           case "index":
-            return <SpecimenIndex key={id} items={items} onOpen={openProject} />
+            return (
+              <SpecimenIndex
+                key={id}
+                items={items}
+                language={language}
+                settings={effectiveSettings}
+                navItems={siteSettings.navItems}
+                onOpen={openProject}
+              />
+            )
         }
       })}
       <SiteFooter

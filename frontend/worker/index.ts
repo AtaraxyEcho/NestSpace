@@ -2291,6 +2291,9 @@ export const SITE_SETTINGS_COLUMNS: Record<string, string> = {
 export const SITE_SETTINGS_JSON_COLUMNS: Record<string, string> = {
   navItems: 'nav_items_json',
   customActivityLog: 'activity_log_json',
+  // 栏目/页面文案槽位（迁移 0014）。形状是"键→{en,zh}"的对象表，空列回吐 {}（见 settingsPayloadFromRow）；
+  // 前端 mergeSiteSettings 也再挡一次非纯对象，库里被手改成数组/字符串时不会顶掉默认表。
+  sectionCopy: 'section_copy_json',
 }
 
 // 布尔型站点设置（D1 中以 0/1 存储）
@@ -2311,7 +2314,14 @@ function settingsPayloadFromRow(row: any): Record<string, unknown> {
     payload[field] = row[column] ?? ''
   }
   for (const [field, column] of Object.entries(SITE_SETTINGS_JSON_COLUMNS)) {
-    payload[field] = field === 'navItems' ? safeJsonParse(row[column], null) : safeJsonParse(row[column], [])
+    // 兜底形状按字段给：navItems 空=未配置（null 让前端落内置导航），
+    // sectionCopy 是对象表（给 [] 会把"空"伪装成数组值，前端还得再挡一次）
+    payload[field] =
+      field === 'navItems'
+        ? safeJsonParse(row[column], null)
+        : field === 'sectionCopy'
+          ? safeJsonParse(row[column], {})
+          : safeJsonParse(row[column], [])
   }
   for (const [field, column] of Object.entries(SITE_SETTINGS_BOOLEAN_COLUMNS)) {
     payload[field] = row[column] === 1
