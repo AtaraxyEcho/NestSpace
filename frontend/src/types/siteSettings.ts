@@ -85,6 +85,12 @@ export interface SiteSettings extends FooterCopy {
   curatorHabitat: string
   curatorField: string
 
+  // 详情页「挑战 / 方案」小标题（管理端「04 内容管理」可编辑；zh 留空回退英文）
+  challengeHeadlineEn: string
+  challengeHeadlineZh: string
+  solutionHeadlineEn: string
+  solutionHeadlineZh: string
+
   // 展示偏好（管理端「07 站点设置」，公开站点真实消费）
   defaultLanguage: DefaultLanguagePreference // 无手动切换时前台初始语言
   defaultTheme: DefaultThemePreference // 无手动切换时前台初始主题

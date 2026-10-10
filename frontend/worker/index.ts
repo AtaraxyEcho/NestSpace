@@ -99,7 +99,7 @@ app.get('/projects', async (c) => {
     const query = `
       SELECT
         id, date, status, name, cn, latin, habitat, type, language,
-        stars, year, shape, version, updated, repository, challenge, solution,
+        stars, year, shape, version, updated, repository, license, challenge, solution,
         challenge_json, solution_json,
         demo_url, demo_enabled,
         description_json, features_json, metrics_json, timeline_json, preview_image_url, preview_images_json
@@ -128,6 +128,8 @@ app.get('/projects', async (c) => {
         version: row.version,
         updated: row.updated,
         repository: row.repository || '',
+        // 开源协议：管理端填写（GitHub 同步只填空），留空则前台不显示任何协议字样
+        license: row.license || '',
         // 演示入口：未上线时不下发地址，避免未公开的演示链接外泄
         demoEnabled,
         demoUrl: demoEnabled ? row.demo_url || '' : '',
@@ -157,7 +159,7 @@ app.get('/projects/:id', async (c) => {
     const row: any = await c.env.DB.prepare(`
       SELECT
         id, date, status, name, cn, latin, habitat, type, language,
-        stars, year, shape, version, updated, repository, challenge, solution,
+        stars, year, shape, version, updated, repository, license, challenge, solution,
         challenge_json, solution_json,
         demo_url, demo_enabled,
         description_json, features_json, metrics_json, timeline_json,
@@ -188,6 +190,8 @@ app.get('/projects/:id', async (c) => {
       version: row.version,
       updated: row.updated,
       repository: row.repository || '',
+      // 开源协议：管理端填写（GitHub 同步只填空），留空则前台不显示任何协议字样
+      license: row.license || '',
       // 与列表接口同口径：未上线时不下发演示地址
       demoEnabled,
       demoUrl: demoEnabled ? row.demo_url || '' : '',
@@ -741,6 +745,7 @@ export const EDITABLE_COLUMNS: Record<string, string> = {
   version: 'version',
   updated: 'updated',
   repository: 'repository',
+  license: 'license',
   internal_notes: 'internal_notes',
   sort_order: 'sort_order',
   readme_zh: 'readme_zh',
@@ -1389,7 +1394,8 @@ function nowStamp(): string {
 
 // 同步时的字段归属规则（唯一实现点，纯函数便于测试）：
 //   GitHub 权威 → 每次覆盖：stars / updated / version / language / date / year / metrics / features
-//   编辑所有   → 只在空白时填充：description / README / Compose / （challenge 等由管理端维护，同步不碰）
+//   编辑所有   → 只在空白时填充：description / README / Compose / license（协议＝作者的授权声明，
+//                由管理端配置，同步不得覆盖手工值）
 export type SyncSourceRow = {
   id: string
   name: string
@@ -1401,6 +1407,7 @@ export type SyncSourceRow = {
   has_compose_prod: number
   has_preview: number
   has_preview_images: number
+  has_license: number
   /** README 开头片段：文档已齐时不必再抓取，也能从头部拿到首图 */
   readme_head_en: string
   readme_head_zh: string
@@ -1417,6 +1424,8 @@ export type RepoMeta = {
   description?: string
   topics?: unknown
   full_name?: string
+  /** GitHub 的 license 对象；没有 LICENSE 文件时为 null，识别不出时为 spdx_id: "NOASSERTION" */
+  license?: { spdx_id?: string | null; name?: string | null } | null
 }
 
 export type ReleaseInfo = { tag_name?: string; name?: string; published_at?: string }
@@ -1511,6 +1520,15 @@ export function buildProjectSyncUpdate(
     { label: 'FORKS', value: metricValue(meta.forks_count) },
     { label: 'OPEN ISSUES', value: metricValue(meta.open_issues_count) },
   ])
+
+  // 开源协议：**只填空白**（与文档字段同一规则）。协议是作者的授权声明、由管理端配置，
+  // 一次同步不该替作者改口；数据取自同一个仓库响应（license.spdx_id），不额外发请求。
+  // "NOASSERTION" 是 GitHub 识别不出协议时的占位，不算协议，不写。
+  const licenseId = String(meta.license?.spdx_id ?? '').trim()
+  if (licenseId && licenseId !== 'NOASSERTION' && row.has_license !== 1) {
+    columns.license = licenseId
+    notes.push(`协议已填充 ${licenseId}`)
+  }
 
   const topics = Array.isArray(meta.topics)
     ? meta.topics.filter((topic): topic is string => typeof topic === 'string' && topic.trim() !== '')
@@ -1632,6 +1650,7 @@ adminApp.post('/github-sync', async (c) => {
               (compose_prod <> '') AS has_compose_prod,
               (preview_image_url <> '') AS has_preview,
               (preview_images_json <> '' AND preview_images_json <> '[]') AS has_preview_images,
+              (license <> '') AS has_license,
               substr(readme_en, 1, 2000) AS readme_head_en,
               substr(readme_zh, 1, 2000) AS readme_head_zh
        FROM projects ${where} ORDER BY sort_order ASC LIMIT ${QUERY_ROW_LIMIT}`,
@@ -2211,7 +2230,8 @@ app.get('/site-settings', async (c) => {
 })
 
 // 管理端可编辑的站点设置列白名单：键为请求体字段名，值为数据库列名
-const SITE_SETTINGS_COLUMNS: Record<string, string> = {
+// 三份清单都导出给 test/sync_update.test.mjs 做对齐闸门（字段 ↔ 映射 ↔ migrations 列）。
+export const SITE_SETTINGS_COLUMNS: Record<string, string> = {
   heroEn: 'hero_en',
   heroZh: 'hero_zh',
   subtitleEn: 'subtitle_en',
@@ -2240,6 +2260,10 @@ const SITE_SETTINGS_COLUMNS: Record<string, string> = {
   curatorQuoteZh: 'curator_quote_zh',
   curatorHabitat: 'curator_habitat',
   curatorField: 'curator_field',
+  challengeHeadlineEn: 'challenge_headline_en',
+  challengeHeadlineZh: 'challenge_headline_zh',
+  solutionHeadlineEn: 'solution_headline_en',
+  solutionHeadlineZh: 'solution_headline_zh',
   defaultLanguage: 'default_language',
   defaultTheme: 'default_theme',
   footerKickerEn: 'footer_kicker_en',
@@ -2264,13 +2288,13 @@ const SITE_SETTINGS_COLUMNS: Record<string, string> = {
   footerCopyrightZh: 'footer_copyright_zh',
 }
 
-const SITE_SETTINGS_JSON_COLUMNS: Record<string, string> = {
+export const SITE_SETTINGS_JSON_COLUMNS: Record<string, string> = {
   navItems: 'nav_items_json',
   customActivityLog: 'activity_log_json',
 }
 
 // 布尔型站点设置（D1 中以 0/1 存储）
-const SITE_SETTINGS_BOOLEAN_COLUMNS: Record<string, string> = {
+export const SITE_SETTINGS_BOOLEAN_COLUMNS: Record<string, string> = {
   icpEnabled: 'icp_enabled',
   homeStatsVisible: 'home_stats_visible',
   themeToggleEnabled: 'theme_toggle_enabled',
@@ -2311,6 +2335,58 @@ adminApp.get('/site-settings', async (c) => {
   }
 })
 
+/**
+ * 站点设置写侧：把请求体折成"列 + 值"，并在写入边界做两件事——裁首尾空白、按上限拒绝超长值。
+ * 为什么裁：库里存的是原样字符串，管理端只敲一个空格就会存成 '  '，
+ * 而前台的"空 = 回退内置默认"判据（mergeSiteSettings）是按 trim 后判定的；两侧同一口径。
+ * 为什么是拒绝而不是截断：静默截断后再回"已保存"就是假状态（本仓库的老规矩，报错要点名字段和数字）。
+ * 上限取值：正常最长的是 about / 页脚段落（当前库里最长 277 字符），5000 已是十倍余量，
+ * 只挡"把整份 README 粘进输入框"这类误操作，离 D1 单值上限还差两个数量级。
+ *
+ * 注意 SITE_SETTINGS_TEXT_MAX **不能 export**：Workers 运行时把入口模块的每个具名导出当成
+ * handler 映射，函数与对象可以，标量会直接把 workerd 打死
+ * （`Uncaught TypeError: Incorrect type for map entry 'SITE_SETTINGS_TEXT_MAX'`，dev 与生产同一个 runtime）。
+ * 闸门要的那个数字从错误话术里反推（见 sync_update.test.mjs case 21），比共享符号更严：它验的正是"话术里的数字就是真阈值"。
+ */
+const SITE_SETTINGS_TEXT_MAX = 5000
+
+export function buildSiteSettingsWrite(
+  body: Record<string, unknown>,
+): { columns: string[]; values: (string | number)[]; error?: string } {
+  const columns: string[] = []
+  const values: (string | number)[] = []
+  const problems: string[] = []
+
+  const push = (column: string, text: string, field: string) => {
+    if (text.length > SITE_SETTINGS_TEXT_MAX) {
+      problems.push(`「${field}」有 ${text.length} 字符，超过 ${SITE_SETTINGS_TEXT_MAX} 字符上限`)
+      return
+    }
+    columns.push(column)
+    values.push(text)
+  }
+
+  for (const [field, column] of Object.entries(SITE_SETTINGS_COLUMNS)) {
+    if (body[field] !== undefined) push(column, String(body[field]).trim(), field)
+  }
+  for (const [field, column] of Object.entries(SITE_SETTINGS_JSON_COLUMNS)) {
+    if (body[field] !== undefined) push(column, JSON.stringify(body[field]), field)
+  }
+  for (const [field, column] of Object.entries(SITE_SETTINGS_BOOLEAN_COLUMNS)) {
+    // 只认真布尔：'0' / false / '' 这类"看着像否"的值一律不写，保持与原实现一致
+    if (typeof body[field] === 'boolean') {
+      columns.push(column)
+      values.push(body[field] ? 1 : 0)
+    }
+  }
+
+  return {
+    columns,
+    values,
+    error: problems.length > 0 ? problems.join('；') : undefined,
+  }
+}
+
 // 管理端：部分更新站点设置（UPSERT，容忍迁移未插入默认行的情况）
 adminApp.put('/site-settings', async (c) => {
   try {
@@ -2319,39 +2395,19 @@ adminApp.put('/site-settings', async (c) => {
       return c.json({ error: '请求体不是合法的 JSON 对象' }, 400)
     }
 
-    const insertColumns: string[] = []
-    const insertValues: (string | number)[] = [1]
-    const updateAssignments: string[] = []
-    for (const [field, column] of Object.entries(SITE_SETTINGS_COLUMNS)) {
-      if (body[field] !== undefined) {
-        insertColumns.push(column)
-        insertValues.push(String(body[field]))
-        updateAssignments.push(`${column} = excluded.${column}`)
-      }
+    const { columns, values, error } = buildSiteSettingsWrite(body)
+    if (error) {
+      return c.json({ error }, 400)
     }
-    for (const [field, column] of Object.entries(SITE_SETTINGS_JSON_COLUMNS)) {
-      if (body[field] !== undefined) {
-        insertColumns.push(column)
-        insertValues.push(JSON.stringify(body[field]))
-        updateAssignments.push(`${column} = excluded.${column}`)
-      }
-    }
-    for (const [field, column] of Object.entries(SITE_SETTINGS_BOOLEAN_COLUMNS)) {
-      if (typeof body[field] === 'boolean') {
-        insertColumns.push(column)
-        insertValues.push(body[field] ? 1 : 0)
-        updateAssignments.push(`${column} = excluded.${column}`)
-      }
-    }
-    if (insertColumns.length === 0) {
+    if (columns.length === 0) {
       return c.json({ error: 'No editable fields provided' }, 400)
     }
 
     await c.env.DB.prepare(
-      `INSERT INTO site_settings (id, ${insertColumns.join(', ')})
-       VALUES (?, ${insertColumns.map(() => '?').join(', ')})
-       ON CONFLICT(id) DO UPDATE SET ${updateAssignments.join(', ')}, updated_at = CURRENT_TIMESTAMP`,
-    ).bind(...insertValues).run()
+      `INSERT INTO site_settings (id, ${columns.join(', ')})
+       VALUES (?, ${columns.map(() => '?').join(', ')})
+       ON CONFLICT(id) DO UPDATE SET ${columns.map((column) => `${column} = excluded.${column}`).join(', ')}, updated_at = CURRENT_TIMESTAMP`,
+    ).bind(1, ...values).run()
 
     return c.json({ success: true, message: '站点设置已保存' })
   } catch (err: any) {
@@ -2530,8 +2586,10 @@ async function loadSeoOverrides(db: D1Database): Promise<SeoOverrides> {
     .prepare('SELECT seo_title, seo_description FROM site_settings WHERE id = 1')
     .first()
   const value: SeoOverrides = {
-    title: String(row?.seo_title ?? ''),
-    description: String(row?.seo_description ?? ''),
+    // 按 trim 判定：库里存的是原样字符串，管理端只敲一个空格就会让下面的 `if (seo.title)` 成立，
+    // 于是把构建期写好的 <title>/og 整个换成空白。空 = 不覆写，才对。
+    title: String(row?.seo_title ?? '').trim(),
+    description: String(row?.seo_description ?? '').trim(),
   }
   seoOverridesCache = { value, expiresAt: now + SEO_CACHE_TTL_MS }
   return value

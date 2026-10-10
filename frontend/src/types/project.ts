@@ -24,6 +24,8 @@ export type Project = {
   version: string
   updated: string
   repository: string
+  /** 开源协议（管理端填写；GitHub 同步只填空）。留空则前台不显示任何协议字样 */
+  license?: string
   /** 项目演示入口：地址已是 http/https 规范化形式；开关关闭时公开接口不下发地址 */
   demoUrl: string
   demoEnabled: boolean

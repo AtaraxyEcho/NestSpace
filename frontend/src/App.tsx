@@ -199,7 +199,9 @@ function SpecimenCard({
       </div>
       <footer className="card-footer">
         <span className="hand-note">Collected by NestSpace</span>
-        <span className="microcopy">MIT LICENSE / OPEN SOURCE</span>
+        {/* 协议由管理端配置（GitHub 同步只填空）：有值才显示，没有就不显示任何协议字样——
+            前端不替标本断言它的授权方式 */}
+        {project.license ? <span className="microcopy">{project.license.toUpperCase()}</span> : null}
       </footer>
     </article>
   )
@@ -1195,6 +1197,16 @@ function DetailPage({
   // 挑战 / 方案：与 README 同一套规则——当前语言没有内容就回退另一种语言，并标出「原文」
   const challengeCopy = pickBilingual(project.challenge, language)
   const solutionCopy = pickBilingual(project.solution, language)
+  // 两段的小标题是站点级文案（管理端「内容管理」可改），中文留空时回退英文
+  const headlineOf = (en: string, zh: string) => pickBilingual({ en, zh }, language).text
+  const challengeHeadline = headlineOf(
+    settings.challengeHeadlineEn,
+    settings.challengeHeadlineZh,
+  )
+  const solutionHeadline = headlineOf(
+    settings.solutionHeadlineEn,
+    settings.solutionHeadlineZh,
+  )
   const readmeDoc = useMemo(() => renderMarkdown(readmeText), [readmeText])
 
   const composeEntries = [
@@ -1406,7 +1418,7 @@ function DetailPage({
           <div className="detail-narrative">
             <article>
               <span>THE CONDITION</span>
-              <h2>Why it needed to exist.</h2>
+              <h2>{challengeHeadline}</h2>
               {challengeCopy.text ? (
                 <p>
                   {challengeCopy.text}
@@ -1420,7 +1432,7 @@ function DetailPage({
             </article>
             <article>
               <span>THE RESPONSE</span>
-              <h2>A narrow tool, carefully shaped.</h2>
+              <h2>{solutionHeadline}</h2>
               {solutionCopy.text ? (
                 <p>
                   {solutionCopy.text}
@@ -2248,6 +2260,10 @@ function AdminPage({
   const [siteContent, setSiteContent] = useState<SiteSettings>({
     ...DEFAULT_SITE_SETTINGS,
   })
+  // 从库里读回来的那一份（已套内置默认值）：保存只发与它不同的列，见 saveSettings
+  const [settingsBaseline, setSettingsBaseline] = useState<SiteSettings>({
+    ...DEFAULT_SITE_SETTINGS,
+  })
   const [syncing, setSyncing] = useState(false)
   // 是否在同步指标的同时抓取 README / Compose 文档
   const [syncDocs, setSyncDocs] = useState(false)
@@ -2285,6 +2301,7 @@ function AdminPage({
       return
     }
     setSiteContent(res.data)
+    setSettingsBaseline(res.data)
     setSettingsLoaded(true)
     if (res.data.githubUrl) {
       const match = /github\.com\/([^/\s#?]+)/i.exec(res.data.githubUrl)
@@ -2301,11 +2318,25 @@ function AdminPage({
       setNoticeError("站点文案尚未从线上库加载成功，已阻止保存以避免覆盖线上配置。请先点上方「重新加载」。")
       return
     }
-    setNoticeBusy("正在保存站点设置到线上库...")
-    const res = await saveAdminSiteSettings(siteContent)
+    // 只发与库里那一份不同的列。以前这里 PUT 的是整份 siteContent，而它是 mergeSiteSettings 的结果
+    // （空值已被换成内置默认文案），于是**任何一次保存都会把当时所有内置默认抄进那一行**：
+    // 之后在代码里改默认值就再也传不到线上（库值赢），"清空=回退默认"的语义也被抹平。
+    // 判据与项目抽屉共用 changedColumns，两边不会互相打脸。
+    const changed = changedColumns(
+      settingsBaseline as unknown as Record<string, unknown>,
+      siteContent as unknown as Record<string, unknown>,
+    )
+    const changedCount = Object.keys(changed).length
+    if (changedCount === 0) {
+      setNotice("站点文案没有改动，无需保存。")
+      return
+    }
+    setNoticeBusy(`正在保存 ${changedCount} 项站点设置到线上库...`)
+    const res = await saveAdminSiteSettings(changed as Partial<SiteSettings>)
     // 成功/失败分两条通道：成功会 6 秒淡出，失败常驻到用户关掉——混在一个三元里就没法区分
     if (res.success) {
-      setNotice("站点设置已保存，刷新公开站点即可生效。")
+      setSettingsBaseline({ ...siteContent })
+      setNotice(`站点设置已保存（改动 ${changedCount} 项），刷新公开站点即可生效。`)
     } else {
       setNoticeError(`保存失败: ${res.error || "请检查网络或口令权限"}`)
     }
@@ -3557,7 +3588,7 @@ function AdminPage({
               <div>
                 <span className="eyebrow">EDITORIAL CONTENT / 02</span>
                 <h1>内容管理</h1>
-                <p>统一维护首页 Hero、馆长手记与公开联系方式。</p>
+                <p>统一维护首页 Hero、馆长手记、详情页小标题与公开联系方式。</p>
               </div>
               <button
                 type="button"
@@ -3784,6 +3815,67 @@ function AdminPage({
                   onClick={saveSettings}
                 >
                   保存栏目文案
+                </button>
+              </section>
+              <section className="settings-card">
+                <span className="eyebrow">DETAIL / 详情页</span>
+                <h2>「挑战 / 方案」小标题</h2>
+                <label>
+                  挑战栏小标题（{contentLanguage === "zh" ? "中文" : "English"}）
+                  <input
+                    value={
+                      contentLanguage === "zh"
+                        ? siteContent.challengeHeadlineZh
+                        : siteContent.challengeHeadlineEn
+                    }
+                    placeholder={
+                      contentLanguage === "zh"
+                        ? siteContent.challengeHeadlineEn
+                        : siteContent.challengeHeadlineZh
+                    }
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        [contentLanguage === "zh"
+                          ? "challengeHeadlineZh"
+                          : "challengeHeadlineEn"]: event.target.value,
+                      })
+                    }
+                  />
+                  <small>
+                    FIELD NOTES 左栏「THE CONDITION」下方；留空回退英文，中英都留空则用内置默认
+                  </small>
+                </label>
+                <label>
+                  方案栏小标题（{contentLanguage === "zh" ? "中文" : "English"}）
+                  <input
+                    value={
+                      contentLanguage === "zh"
+                        ? siteContent.solutionHeadlineZh
+                        : siteContent.solutionHeadlineEn
+                    }
+                    placeholder={
+                      contentLanguage === "zh"
+                        ? siteContent.solutionHeadlineEn
+                        : siteContent.solutionHeadlineZh
+                    }
+                    onChange={(event) =>
+                      setSiteContent({
+                        ...siteContent,
+                        [contentLanguage === "zh"
+                          ? "solutionHeadlineZh"
+                          : "solutionHeadlineEn"]: event.target.value,
+                      })
+                    }
+                  />
+                  <small>FIELD NOTES 右栏「THE RESPONSE」下方，规则同上</small>
+                </label>
+                <button
+                  type="button"
+                  className="admin-primary"
+                  onClick={saveSettings}
+                >
+                  保存详情页文案
                 </button>
               </section>
             </div>
@@ -4676,6 +4768,20 @@ function AdminPage({
                     setEditing({ ...editing, repository: event.target.value })
                   }
                 />
+              </label>
+              <label>
+                开源协议
+                <input
+                  value={editing.license || ""}
+                  onChange={(event) =>
+                    setEditing({ ...editing, license: event.target.value })
+                  }
+                  placeholder="如 MIT / Apache-2.0（留空则不显示）"
+                />
+                <small>
+                  展示在首页标本卡片右下角；留空则卡片上不出现任何协议字样。
+                  GitHub 同步只会把仓库识别出的协议（SPDX 标识）填进**空白**字段，不覆盖这里手填的值。
+                </small>
               </label>
               <label>
                 演示地址

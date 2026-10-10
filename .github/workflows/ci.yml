@@ -1,0 +1,58 @@
+name: CI
+
+# 为什么需要它：这个仓库有一批"只在运行时暴露"的一致性判据（代码列 ⊆ migrations 列、
+# 站点设置三份清单双向对齐、相册判据前后端一致），以前只能靠我手动 `pnpm test`，
+# 忘了跑就会把 500 推上线（缺迁移的 Worker 部署后公开列表接口整片 500，首页还静默退回内置数据）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 类型检查 / 闸门测试 / 构建
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      # 版本与 frontend/.mise.toml 保持一致（pnpm 10.34.3 / node 22）。
+      # 不要用 npm：仓库里只有 pnpm-lock.yaml，`npm ci` 会直接 ENOLOCK。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查（前端 + Worker 两套 tsconfig）
+        run: pnpm run typecheck
+
+      # 闸门是 Node 直跑的纯函数测试（原生 type stripping 吃 .ts 源码，≥22.18），
+      # 不需要起服务、不联网、不碰 D1；17f/18 这两条会在校验阶段拦住"代码引用了不存在的列"。
+      - name: 单元测试闸门
+        run: pnpm test
+
+      - name: 构建静态资产
+        run: pnpm run build
+
+      # 这里**不放** `wrangler deploy --dry-run`：wrangler 不是本项目的依赖（devDependencies 里没有它，
+      # 本地用的是全局二进制），CI 里为它单独装一次只会让这一步变成"能不能联网装工具"的噪声。
+      # 本地预检照旧：`npx wrangler deploy --dry-run`（实测不需要账号凭据，只打印绑定列表）。

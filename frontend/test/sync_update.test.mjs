@@ -28,7 +28,16 @@ const {
   EDITABLE_JSON_COLUMNS,
   resolveRepoAssetUrl,
   buildRepoLikePattern,
+  SITE_SETTINGS_COLUMNS,
+  SITE_SETTINGS_JSON_COLUMNS,
+  SITE_SETTINGS_BOOLEAN_COLUMNS,
+  buildSiteSettingsWrite,
 } = await import(ROUTE_URL)
+
+const DEFAULTS_URL = pathToFileURL(
+  join(FRONTEND, 'src', 'data', 'defaultSiteSettings.ts'),
+).href
+const { DEFAULT_SITE_SETTINGS, mergeSiteSettings } = await import(DEFAULTS_URL)
 
 // 封面 = 相册第一张（生产代码只维护 extractPreviewImages 一处实现）
 const firstImage = (md, owner, repo, branch) =>
@@ -43,6 +52,7 @@ const baseRow = (over = {}) => ({
   has_readme_en: 0,
   has_compose_dev: 0,
   has_compose_prod: 0,
+  has_license: 0,
   ...over,
 })
 
@@ -149,6 +159,17 @@ assert.equal('timeline_json' in tolerant.columns, true, 'case 4g: 传 null 时�
 
 const noDesc = buildProjectSyncUpdate(baseRow(), meta({ description: '' }), [], null)
 assert.equal('description_json' in noDesc.columns, false, 'case 4e: 仓库无描述 → 不写')
+
+// 开源协议：与文档同一规则——只填空白，不覆盖管理端手填的值
+const licBlank = buildProjectSyncUpdate(baseRow({ has_license: 0 }), meta({ license: { spdx_id: 'MIT' } }), [], null)
+assert.equal(licBlank.columns.license, 'MIT', 'case 4h: 协议为空 → 填 GitHub 识别出的 SPDX 标识')
+assert.ok(licBlank.notes.some((n) => n.includes('协议已填充')), 'case 4i: 填充有说明')
+const licOwn = buildProjectSyncUpdate(baseRow({ has_license: 1 }), meta({ license: { spdx_id: 'Apache-2.0' } }), [], null)
+assert.equal('license' in licOwn.columns, false, 'case 4j: 已手填协议 → 同步不覆盖')
+const licNoAssert = buildProjectSyncUpdate(baseRow({ has_license: 0 }), meta({ license: { spdx_id: 'NOASSERTION' } }), [], null)
+assert.equal('license' in licNoAssert.columns, false, 'case 4k: NOASSERTION（识别不出）不算协议 → 不写')
+const licNull = buildProjectSyncUpdate(baseRow({ has_license: 0 }), meta({ license: null }), [], null)
+assert.equal('license' in licNull.columns, false, 'case 4l: 仓库没有 LICENSE → license 为 null，不写')
 
 const withDocs = buildProjectSyncUpdate(
   baseRow(),
@@ -635,11 +656,13 @@ function columnsByMigration(files) {
     map.get(key).add(column.toLowerCase())
   }
   for (const name of files) {
-    const sql = readFileSync(join(MIGRATIONS_DIR, name), 'utf8').replace(
-      /--[^\n]*/g,
-      '',
-    )
-    for (const m of sql.matchAll(/ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/gi)) {
+    // 块注释也要剥：列名只出现在注释里时会造成"假通过"（迁移文件确实大量用 -- 注释，/* */ 目前没有，
+    // 但这是判据本身漏洞，不是运气）。顺序：先块注释、再行注释（`--` 可能在 /* */ 内部）。
+    const sql = readFileSync(join(MIGRATIONS_DIR, name), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/--[^\n]*/g, ' ')
+    // COLUMN 关键字在 SQLite 里可省略（`ALTER TABLE t ADD x TEXT` 合法），漏判会造成假失败
+    for (const m of sql.matchAll(/ALTER\s+TABLE\s+(\w+)\s+ADD\s+(?:COLUMN\s+)?(\w+)/gi)) {
       add(m[1], m[2])
     }
     // CREATE TABLE 的列清单不能按"第一个右括号"截断：`CHECK (id = 1)` 里就有一对括号。
@@ -658,7 +681,14 @@ function columnsByMigration(files) {
       const body = sql.slice(from, end - 1)
       for (const line of body.split(',')) {
         const col = /^\s*`?(\w+)`?\s+(\w+)/.exec(line)
-        if (col && !/^(primary|unique|foreign|check|constraint)$/i.test(col[2])) add(table, col[1])
+        // 两个位置都要判：`PRIMARY KEY (id)` 的首词是 PRIMARY、次词是 KEY，
+        // 只判次词会把一张假列 primary 记进集合（给拼错的列名留了误通过的空间）。
+        if (
+          col &&
+          !/^(primary|unique|foreign|check|constraint)$/i.test(col[1]) &&
+          !/^(primary|unique|foreign|check|constraint|key)$/i.test(col[2])
+        )
+          add(table, col[1])
       }
     }
   }
@@ -737,4 +767,191 @@ for (const sentinel of [
   assert.ok(seenStatements.has(sentinel), `case 17f: 提取器没扫到 ${sentinel}，闸门本身失效了`)
 }
 
-console.log('sync_update：全部用例通过（字段归属 / 格式口径 / 文档规则 / 地址解析 / 时间线 / 预览图 / 相册 / 写入校验 / 两种拼写冲突 / 管理端投影字段集）✓')
+// case 18：**站点设置三份清单必须双向对齐**（前端字段 ↔ worker 映射 ↔ migrations 列）
+// 加一处可编辑文案要同时改四个地方（types、内置默认值、worker 映射、迁移），少哪一处都只在运行时暴露：
+// 漏迁移 → 管理端保存 `no such column` 500；漏映射 → 保存"成功"但字段被丢弃，刷新后回到内置默认（假状态）；
+// 漏内置默认值 → mergeSiteSettings 只遍历 DEFAULT_SITE_SETTINGS 的键，该字段渲染时被整个吞掉（也是假状态）。
+// 17f 看不到这几种：映射里的列名是对象字面量的值，不在任何 SELECT 文本里。
+const siteSettingsColumns = tableColumns.get('site_settings')
+assert.ok(siteSettingsColumns, 'case 18a: migrations/ 里找不到表 site_settings')
+const mappedSettingsColumns = [
+  ...Object.values(SITE_SETTINGS_COLUMNS),
+  ...Object.values(SITE_SETTINGS_JSON_COLUMNS),
+  ...Object.values(SITE_SETTINGS_BOOLEAN_COLUMNS),
+]
+const mappedSettingsFields = new Set([
+  ...Object.keys(SITE_SETTINGS_COLUMNS),
+  ...Object.keys(SITE_SETTINGS_JSON_COLUMNS),
+  ...Object.keys(SITE_SETTINGS_BOOLEAN_COLUMNS),
+])
+const defaultSettingsFields = Object.keys(DEFAULT_SITE_SETTINGS)
+
+// 18e：**判据自检**（照 17f 的哨兵做法）。三份清单或内置默认值一旦被改名/清空，
+// 下面两个循环就是零次迭代，闸门会绿得毫无意义——所以先点名几个必须存在的字段与列。
+assert.ok(mappedSettingsFields.size >= 40, `case 18e: worker 映射只剩 ${mappedSettingsFields.size} 项，闸门本身失效了`)
+assert.ok(defaultSettingsFields.length >= 40, 'case 18e: DEFAULT_SITE_SETTINGS 为空，闸门本身失效了')
+for (const sentinel of [
+  'heroEn',
+  'curatorHeadlineEn',
+  'footerCopyrightEn',
+  'navItems',
+  'icpEnabled',
+  'challengeHeadlineEn',
+  'challengeHeadlineZh',
+  'solutionHeadlineEn',
+  'solutionHeadlineZh',
+]) {
+  assert.ok(mappedSettingsFields.has(sentinel), `case 18e: 映射里找不到 ${sentinel}，闸门本身失效了`)
+  assert.ok(defaultSettingsFields.includes(sentinel), `case 18e: 内置默认值里找不到 ${sentinel}`)
+}
+for (const sentinel of ['hero_en', 'curator_headline_en', 'challenge_headline_en', 'challenge_headline_zh']) {
+  assert.ok(siteSettingsColumns.has(sentinel), `case 18e: 迁移列提取器没认出 site_settings.${sentinel}`)
+}
+assert.ok(
+  !siteSettingsColumns.has('primary'),
+  'case 18e: `PRIMARY KEY (id)` 被当成列名收进了集合（表级约束行没过滤干净）',
+)
+
+for (const column of mappedSettingsColumns) {
+  assert.ok(
+    siteSettingsColumns.has(column.toLowerCase()),
+    `case 18b: 站点设置映射指向不存在的列 ${column} —— 部署前必须补迁移，否则保存 500`,
+  )
+}
+for (const field of defaultSettingsFields) {
+  assert.ok(
+    mappedSettingsFields.has(field),
+    `case 18c: 前端设置字段「${field}」没有 worker 映射，管理端保存后会被静默丢弃`,
+  )
+}
+for (const field of mappedSettingsFields) {
+  assert.ok(
+    defaultSettingsFields.includes(field),
+    `case 18d: 「${field}」在 worker 映射里但没有内置默认值 —— mergeSiteSettings 只遍历默认值的键，该字段会在渲染时被吞掉`,
+  )
+}
+
+// case 19：mergeSiteSettings 的「空 = 未填写」判据。详情页小标题这类文案靠它回退内置默认，
+// 而 Worker 存的是原样字符串（不 trim），管理端只敲一个空格就会在库里留下 '  '。
+// 空白必须与空串同义，否则前台渲染的是一个空白文案而不是默认文案（"清空=恢复默认"的承诺会破）。
+assert.equal(
+  mergeSiteSettings({ heroEn: '' }).heroEn,
+  DEFAULT_SITE_SETTINGS.heroEn,
+  'case 19a: 空串回退内置默认',
+)
+assert.equal(
+  mergeSiteSettings({ heroEn: '   ' }).heroEn,
+  DEFAULT_SITE_SETTINGS.heroEn,
+  'case 19b: 纯空白同样回退（库里就是这种值，Worker 不裁）',
+)
+assert.equal(
+  mergeSiteSettings({ heroEn: ' Real copy ' }).heroEn,
+  ' Real copy ',
+  'case 19c: 已填写的内容原样保留，不裁首尾（改判据不是为了动正文）',
+)
+assert.equal(
+  mergeSiteSettings({ logoImageUrl: ' ' }).logoImageUrl,
+  '',
+  "case 19d: 默认值本身为空时，空白落到空串而不是 ' '",
+)
+assert.equal(
+  mergeSiteSettings({ challengeHeadlineEn: ' ', challengeHeadlineZh: ' ' }).challengeHeadlineEn,
+  DEFAULT_SITE_SETTINGS.challengeHeadlineEn,
+  'case 19e: 中英都只敲空格 = 清空，回退内置默认标题',
+)
+
+// case 21：**站点设置写侧**（buildSiteSettingsWrite）
+// 这条把三件事钉住：写边界裁首尾空白（与前台 mergeSiteSettings 的"空=回退默认"同一口径）、
+// 超长值点名拒绝而不是静默截断（截断后回"已保存"就是假状态）、陌生键进不了 SQL。
+const writeHero = buildSiteSettingsWrite({ heroEn: '  Build  ', icpEnabled: true })
+assert.deepEqual(writeHero.columns, ['hero_en', 'icp_enabled'], 'case 21a: 列按三份清单的顺序产出')
+assert.deepEqual(writeHero.values, ['Build', 1], 'case 21b: 字符串裁首尾、布尔转 0/1')
+assert.equal(writeHero.error, undefined, 'case 21c: 正常值不报错')
+
+assert.equal(
+  buildSiteSettingsWrite({ heroEn: '   ' }).values[0],
+  '',
+  "case 21d: 纯空白落到空串（否则库里存 '   '，前台当它是已填写）",
+)
+assert.equal(
+  buildSiteSettingsWrite({ curatorHeadlineEn: 'a\n  b\n' }).values[0],
+  'a\n  b',
+  'case 21e: 只裁首尾，行内的换行与缩进必须保留（主标题是多行字段）',
+)
+
+const tooLong = buildSiteSettingsWrite({ heroEn: 'x'.repeat(20000) })
+assert.ok(tooLong.error, 'case 21f: 超长必须拒绝')
+assert.ok(tooLong.error.includes('heroEn'), `case 21g: 报错要点名字段，实得「${tooLong.error}」`)
+// 上限常量故意不 export（标量具名导出会让 workerd 起不来），所以这个数字从话术里反推，
+// 再拿它当量去卡边界：等于要求"话术里写的就是真正的阈值"，比共享一个符号更严。
+const limitMatch = /超过 (\d+) 字符上限/.exec(tooLong.error)
+assert.ok(limitMatch, `case 21h: 话术里要给出上限数字，实得「${tooLong.error}」`)
+const limit = Number(limitMatch[1])
+assert.equal(
+  buildSiteSettingsWrite({ heroEn: 'x'.repeat(limit) }).error,
+  undefined,
+  `case 21h2: ${limit} 字符（话术里的上限）必须收得下`,
+)
+assert.ok(
+  buildSiteSettingsWrite({ heroEn: 'x'.repeat(limit + 1) }).error,
+  `case 21h3: ${limit + 1} 字符必须被拒（阈值不能比话术宽松）`,
+)
+assert.equal(tooLong.columns.length, 0, 'case 21i: 被拒的值一个都不写')
+
+const mixed = buildSiteSettingsWrite({
+  heroEn: 'fine',
+  heroZh: 'y'.repeat(limit + 1),
+})
+assert.ok(mixed.error, 'case 21j: 一好一坏也要整体拒绝（handler 先看 error，不落库）')
+
+assert.deepEqual(
+  buildSiteSettingsWrite({ notASettingField: 'x' }),
+  { columns: [], values: [], error: undefined },
+  'case 21k: 请求体里的陌生键被丢弃，不会变成列名',
+)
+
+const navOk = buildSiteSettingsWrite({ navItems: [{ id: 'catalogue' }] })
+assert.deepEqual(navOk.columns, ['nav_items_json'], 'case 21l: 数组走 JSON 列')
+assert.equal(navOk.values[0], '[{"id":"catalogue"}]', 'case 21m: 序列化后原样入库')
+const navHuge = buildSiteSettingsWrite({
+  // 造一份一定超过上限的数组：每项 ~40 字符，条数按上限反推，常量将来调大也不会让这条假失败
+  navItems: Array.from({ length: Math.ceil(limit / 40) + 2 }, (_, i) => ({
+    id: `section-${i}`,
+    labelEn: `L${i}`,
+    labelZh: `中${i}`,
+    visible: true,
+  })),
+})
+assert.ok(navHuge.error?.includes('navItems'), 'case 21n: JSON 列同样受上限约束，并点名该字段')
+
+for (const bad of ['true', 0, '', null, {}]) {
+  const w = buildSiteSettingsWrite({ icpEnabled: bad })
+  assert.equal(w.columns.length, 0, `case 21o: 布尔列只认真布尔，${JSON.stringify(bad)} 不写`)
+}
+assert.deepEqual(
+  buildSiteSettingsWrite({ icpEnabled: false }).values,
+  [0],
+  'case 21p: false 要写 0（不能因为"假值"被跳过）',
+)
+
+// case 22：**管理端"只发改动集"的接线**（diff 语义本身由 preview_rules.test.mjs 的 changedColumns 覆盖）
+// 这三条是源码钉子（同 case 17e 的做法）：改动一旦退回"PUT 整份 siteContent"，
+// 每次保存都会把当时的内置默认抄进 site_settings 那一行，之后改 defaultSiteSettings.ts 就不再生效。
+const appSrc = readFileSync(join(FRONTEND, 'src', 'App.tsx'), 'utf8')
+assert.match(
+  appSrc,
+  /saveAdminSiteSettings\(changed/,
+  'case 22a: 保存必须发改动集，不能退回整份 siteContent',
+)
+assert.match(
+  appSrc,
+  /setSettingsBaseline\(res\.data\)/,
+  'case 22b: 从库里载入时必须同时记下基线，diff 才有参照',
+)
+assert.match(
+  appSrc,
+  /changedCount === 0/,
+  'case 22c: 零改动要短路（整份 PUT 的空改动集会打到服务端的 400 分支）',
+)
+
+console.log('sync_update：全部用例通过（字段归属 / 格式口径 / 文档规则 / 地址解析 / 时间线 / 预览图 / 相册 / 写入校验 / 两种拼写冲突 / 管理端投影字段集 / 站点设置三份清单双向对齐 / 空白文案判据 / 站点设置写侧 / 改动集接线）✓')

@@ -13,10 +13,12 @@ const url = (...parts) => pathToFileURL(join(HERE, ...parts)).href
 
 const rules = await import(url('src', 'utils', 'previewRules.ts'))
 const diff = await import(url('src', 'utils', 'projectDiff.ts'))
+const settingsData = await import(url('src', 'data', 'defaultSiteSettings.ts'))
 const worker = await import(url('worker', 'index.ts'))
 
 const { PREVIEW_IMAGE_LIMIT, galleryRowIssues, sanitizeImageUrl } = rules
 const { changedColumns } = diff
+const { mergeSiteSettings, DEFAULT_SITE_SETTINGS } = settingsData
 const { validatePreviewInput, USAGE_EVENTS } = worker
 
 /** 抽屉的关闭判断就是"改动集是否非空"，这里包一层只为把断言写得像人话 */
@@ -167,6 +169,25 @@ check('新建项目的基线就是空白模板：没动过不算改动，动过�
   assert.deepEqual(changedColumns(template, template), {}, '与空白模板一致 → 不算改动')
   assert.equal(dirty(template, { ...template, name: '真名' }), true)
   assert.equal(dirty(template, { ...template, features: ['x'] }), true)
+})
+
+// —— 站点设置的改动集：以前保存 PUT 的是整份 mergeSiteSettings 结果，
+// 于是任何一次保存都会把当时的内置默认抄进 site_settings 那一行，之后改默认值再也传不到线上。
+check('载入后原样点保存 = 零改动（内置默认不允许被抄进库）', () => {
+  // 库里一片空白：管理端看到的是套了默认值的那一份
+  const blankRow = mergeSiteSettings({})
+  assert.equal(blankRow.heroEn, DEFAULT_SITE_SETTINGS.heroEn, '空库里读到的是内置默认')
+  assert.deepEqual(changedColumns(blankRow, { ...blankRow }), {}, '没动过 → 一列都不发')
+  // 库里已有值：套默认后原样回读同样不该产生改动
+  const realRow = mergeSiteSettings({ heroEn: 'Stored copy', icpEnabled: true, navItems: [{ id: 'curator', labelEn: 'C', labelZh: '中', visible: true }] })
+  assert.deepEqual(changedColumns(realRow, { ...realRow }), {}, '已有配置原样回读 → 零改动')
+})
+
+check('动过的列才发，清空的列发空串（清空=回退默认要能落库）', () => {
+  const loaded = mergeSiteSettings({ heroEn: 'Stored copy' })
+  const changed = changedColumns(loaded, { ...loaded, heroEn: '', subtitleZh: '新副标题' })
+  assert.deepEqual(Object.keys(changed).sort(), ['heroEn', 'subtitleZh'])
+  assert.equal(changed.heroEn, '', "清空要写成空串，不能因为「空」被当成没改动")
 })
 
 // —— 埋点事件白名单：客户端只可能发这些，其余服务端 400 ——

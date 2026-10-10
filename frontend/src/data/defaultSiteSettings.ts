@@ -58,8 +58,11 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   footerColophonLinkZh: '版本信息',
   footerColophonLineEn: 'Collected with care, since {since}',
   footerColophonLineZh: '自 {since} 年起，悉心收藏',
-  footerCopyrightEn: '© {year} NESTSPACE · OPEN SOURCE UNDER MIT',
-  footerCopyrightZh: '© {year} NESTSPACE · 以 MIT 协议开源',
+  // 版权行只留署名：曾写「· OPEN SOURCE UNDER MIT」/「· 以 MIT 协议开源」，
+  // 但仓库里并没有 LICENSE，那等于无凭的许可声明（法律上默认"保留所有权利"）。
+  // 补上 LICENSE 之后再考虑加回。
+  footerCopyrightEn: '© {year} NESTSPACE',
+  footerCopyrightZh: '© {year} NESTSPACE',
 
   // 馆藏数据与活跃度配置
   statsSinceYear: '',
@@ -79,6 +82,12 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   curatorHabitat: 'Shanghai / Remote',
   curatorField: 'Design & Engineering',
 
+  // 详情页小标题：默认等于改造前写死在组件里的两句英文；中文默认留空（前台回退英文）
+  challengeHeadlineEn: 'Why it needed to exist.',
+  challengeHeadlineZh: '',
+  solutionHeadlineEn: 'A narrow tool, carefully shaped.',
+  solutionHeadlineZh: '',
+
   // 展示偏好：默认值等于既有行为（跟随浏览器/系统，统计与两个切换按钮全部开启）
   defaultLanguage: 'auto',
   defaultTheme: 'auto',
@@ -87,7 +96,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   languageToggleEnabled: true,
 }
 
-/** 将服务端返回的设置与默认值合并：字符串空值回退默认，布尔值及数组直接生效 */
+/** 将服务端返回的设置与默认值合并：字符串空/纯空白回退默认，布尔值及数组直接生效 */
 export function mergeSiteSettings(data: Partial<SiteSettings> | null | undefined): SiteSettings {
   const merged: SiteSettings = {
     ...DEFAULT_SITE_SETTINGS,
@@ -133,7 +142,9 @@ export function mergeSiteSettings(data: Partial<SiteSettings> | null | undefined
     } else if (typeof value === 'boolean') {
       target[key] = value
     } else if (typeof value === 'string') {
-      if (value !== '') {
+      // "空"按 trim 后判定：Worker 存的是原样字符串（不裁空白），管理端只敲一个空格就会
+      // 存成 '  '，按老判据它算"已填写"，前台于是渲染一个空白文案而不是回退默认。
+      if (value.trim() !== '') {
         target[key] = value
       }
     } else {

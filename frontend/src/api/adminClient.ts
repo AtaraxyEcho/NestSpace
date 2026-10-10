@@ -131,9 +131,13 @@ export async function fetchAdminSiteSettings(): Promise<{ success: boolean; data
 }
 
 /**
- * 管理端保存站点文案设置到 D1 数据库
+ * 管理端保存站点文案设置到 D1 数据库。
+ * 这个接口本来就是**部分更新**（只写请求体里出现、且在白名单映射里的字段），
+ * 所以调用方传"改动的那几列"即可——不要图省事传整份，那会把内置默认抄进库（见 App.tsx saveSettings）。
  */
-export async function saveAdminSiteSettings(settings: SiteSettings): Promise<{ success: boolean; error?: string }> {
+export async function saveAdminSiteSettings(
+  settings: Partial<SiteSettings>,
+): Promise<{ success: boolean; error?: string }> {
   try {
     const res = await fetch('/api/admin/site-settings', {
       method: 'PUT',

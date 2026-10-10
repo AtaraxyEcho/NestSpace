@@ -38,7 +38,7 @@ NestSpace/
 │   ├── test/                     # 单元测试（纯函数 / 前后端判据一致性；npm test 依次跑这十个文件）
 │   │   ├── jwt_verify.test.mjs   # JWT 校验与 Access 白名单
 │   │   ├── demo_url.test.mjs     # 演示地址规范化
-│   │   ├── sync_update.test.mjs  # GitHub 同步字段归属 / 时间线生成 / 代码列 ⊆ 迁移列（17f）
+│   │   ├── sync_update.test.mjs  # GitHub 同步字段归属 / 时间线生成 / 代码列 ⊆ 迁移列（17f）/ 站点设置三份清单对齐（18）
 │   │   ├── image_proxy.test.mjs  # 图片代理：宽度夹取 / 图源白名单 / 转换地址构造
 │   │   ├── preview_frames.test.mjs # 观察台：在场张数 / 环形去重 / +N 口径 / URL 解析兜底
 │   │   ├── preview_dir.test.mjs  # 预览图目录导入：地址解析 / 位图筛选 / 排序 / 拼接 / 异常兜底
@@ -60,8 +60,14 @@ NestSpace/
 │   ├── 0008_add_demo_fields.sql  # 项目演示入口：演示地址与演示开关
 │   ├── 0009_add_curator_copy.sql # 馆长手记栏目文案（标签 / 标题 / 引言 / 属性值）
 │   ├── 0010_add_preview_image.sql# 详情页标本托板预览图：项目图片 + 相册（同步从 README 提取，管理端可覆盖）
-│   └── 0011_add_bilingual_narrative.sql
-│                                 # 挑战 / 解决方案双语列（challenge_json / solution_json，旧单列只读兜底）
+│   ├── 0011_add_bilingual_narrative.sql
+│   │                             # 挑战 / 解决方案双语列（challenge_json / solution_json，旧单列只读兜底）
+│   ├── 0012_add_project_license.sql
+│   │                             # 标本开源协议列（管理端填写；同步只填空白，不覆盖手工值）
+│   └── 0013_add_detail_headlines.sql
+│                                 # 详情页「挑战 / 方案」两段小标题（原先写死在组件里，现由管理端配置）
+│
+├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十个闸门 + 构建（见第四节末）
 │
 ├── scripts/                      # 运维脚本
 │   ├── d1-migrate.sh             # 一键按序执行全部 D1 迁移（local / remote，可反复执行）
@@ -128,6 +134,8 @@ bash scripts/d1-migrate.sh remote
 | `0009` 馆长手记 | `site_settings` 写白名单（`curator_*`，`worker/index.ts` 映射表） | 「站点设置」保存报 500（读侧同样静默回退，所以只有保存才暴露） |
 | `0010` 预览图 | 项目列表/详情的 SELECT 与同步写路径 | `GET /api/projects` 每条都 500（列表 SELECT 引用了不存在的列），首页与陈列整体空白 |
 | `0011` 双语叙述 | 项目列表/详情的 SELECT 与管理端写路径 | 同上两条 500；且「挑战 / 解决方案」保存写不进库（`challenge_json` / `solution_json` 不存在） |
+| `0012` 标本协议 | 公开列表/详情的显式 SELECT（`license`）、管理端写路径与同步写路径 | `GET /api/projects` 每条都 500（首页与陈列空白），管理端保存项目同样 500 |
+| `0013` 详情页小标题 | `site_settings` 写白名单（`challenge_headline_*` / `solution_headline_*`） | 「内容管理 → 详情页」保存报 500（读侧 `SELECT *`，只会静默回退内置文案） |
 
 > ⚠️ **顺序是硬约束，而且 Git 自动构建不会替你把关**：第 4 节的 Workers Builds 是"push 即部署"，
 > 一旦你为了跑迁移而先 push 了代码，部署就已经发生了。正确顺序是
@@ -304,6 +312,25 @@ bash scripts/usage-probe.sh
 > 后续探针会打到"旧代码的幽灵"上（表现：路由明明存在却 404，或 D1 报 `no such table`）。
 > 怀疑时先看 `netstat -ano | grep :<端口>`，只清理自己起的那些 PID。
 
+### CI（`.github/workflows/ci.yml`）
+
+push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十个纯函数闸门）、
+`pnpm run build`。用 **pnpm** 不是风格问题：仓库里只有 `pnpm-lock.yaml`，`npm ci` 会直接 ENOLOCK 失败。
+版本钉在 `frontend/.mise.toml` 的同一套（node 22 / pnpm 10.34.3）。
+
+闸门里 `17f` 与 `18` 两条是 CI 真正的价值所在：**代码引用的列必须存在于 `migrations/`**、
+**站点设置的三份清单（内置默认 / Worker 白名单 / 迁移列）必须双向对齐**。这两种错在本地全是运行时问题
+（保存 500、或"保存成功但字段被丢弃"），以前只能靠我记得手动跑测试。
+
+两点刻意的取舍：
+- **没有 `wrangler deploy --dry-run` 这一步**：wrangler 不在 `devDependencies` 里（本地用的是全局二进制），
+  为它在 CI 单独装一次只会把这一步变成"能不能联网装工具"的噪声。要预检就在本地跑
+  `npx wrangler deploy --dry-run`（实测不需要账号凭据，只打印解析后的绑定列表）。
+- **CI 跑不了 `scripts/usage-probe.sh`**：它要起 Worker、要 `.dev.vars` 里的本地口令，也会写库。
+
+本工作流在本机没有被"执行"过（没有 GitHub runner、且装依赖要联网），能验的都验了：YAML 可解析、
+步骤里的三条命令在本地用 pnpm 逐条跑过并退出 0、`cache-dependency-path` 指向的锁文件真实存在。
+
 ---
 
 ## 五、 搜索引擎收录配置
@@ -345,6 +372,12 @@ bash scripts/usage-probe.sh
 - **内容管理 → 手记栏目文案**（迁移 `0009`）：栏目标签、引言（按语言切换）、主标题（每行一句，
   两种语言模式下都会显示）、中文尾注（斜体，留空则不显示）、HABITAT / FIELD 属性值；
   改名或改文案都在此完成，无需改代码。
+- **内容管理 → 「挑战 / 方案」小标题**（迁移 `0013`）：详情页 FIELD NOTES 两栏 `THE CONDITION` /
+  `THE RESPONSE` 下面的那两句标题，原先写死在组件里，现由管理端配置，中英各一份、随访客语言切换。
+  内置默认就是原来那两句英文（`Why it needed to exist.` / `A narrow tool, carefully shaped.`），
+  中文默认留空 = 中文模式也显示这两句英文；两栏都留空则回退内置默认（清空 = 恢复默认，不是删掉标题；
+  只敲空格同样算留空——库里存的是原样字符串，判据按 trim 后是否为空）。
+  栏名本身（`THE CONDITION` / `THE RESPONSE`）是排版语汇，刻意不做双语、也不可配置。
 - **项目管理 → 顺序**：表格每行的 ▲ / ▼ 直接调整公开站点与后台列表的展示顺序
   （按 `sort_order` 升序落库，只写顺序真正变化的行）；抽屉里的「排序权重」仍可手工指定数值。
 - **底部栏**：中英文各一份，随访客语言切换。含品牌区小标与说明段落、三列标题、
@@ -364,7 +397,20 @@ bash scripts/usage-probe.sh
   管理端子域由 Cloudflare 部署配置和代码中的跳转规则决定，后台不提供修改。
 
 数据库字段为空时，公开站自动回退到 `frontend/src/data/defaultSiteSettings.ts` 的内置默认文案，
-因此未做任何配置的部署也始终有完整可读的内容。
+因此未做任何配置的部署也始终有完整可读的内容。**"空"按 trim 后判定**：只填空格等同于没填
+（写侧 `PUT /api/admin/site-settings` 会裁掉首尾空白后入库，读侧 `mergeSiteSettings` 也把纯空白当空处理，
+SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<title>` 覆写成空白）。
+
+保存的语义有两条，都是为了让"默认值"保持是默认值：
+
+- **只发改动的列**：管理端「保存并发布」 PUT 的是与库里那份**不同的字段**（判据与项目抽屉共用
+  `changedColumns`），不再整份回传。以前整份传的是"已套内置默认"的那一份，于是**任何一次保存都会把
+  当时所有内置默认抄进 `site_settings` 那一行**，之后在代码里改默认文案就再也传不到线上（库值赢）。
+  零改动时直接短路、不发请求。
+- **超长值点名拒绝，不静默截断**：单个文本/JSON 字段上限 5000 字符，超了返回 400 并写明是哪个字段
+  （`「heroEn」有 6000 字符，超过 5000 字符上限`）；截断后再回"已保存"就是假状态。
+  上限常量在 Worker 里刻意**不导出**：Workers 运行时把入口模块的每个具名导出当 handler 映射，
+  函数和对象可以、**标量会直接把 workerd 打死**（`Incorrect type for map entry …`，dev 与生产同一 runtime）。
 
 另有两点使用约定：
 
@@ -380,13 +426,18 @@ bash scripts/usage-probe.sh
   （频率超限）**立即停止后续请求**，其余标本标记为"已跳过"而不是逐个白白重试；仓库列表接口
   最多取 3 页（300 个），超出时管理端会明确提示"仅列出最近更新的 N 个"；所有列表类查询统一
   带 `LIMIT 500` 安全阀（当前馆藏规模远低于该值）。
-- **同步的字段归属**（迁移 `0007/0008` 之后）：
+- **同步的字段归属**（迁移 `0007/0008/0012` 之后）：
   - **GitHub 权威、每次覆盖**：`stars`、`updated`、`version`、`language`、`date`/`year`（仓库创建时间）、
     `metrics_json`（STARS / FORKS / OPEN ISSUES）、`features_json`（仓库 topics，前 4 个）、
     `timeline_json`（按仓库事实生成：建档 / 最多 4 个 Release / 最近推送，按月倒序，最多 8 条）；
     管理端「Stars 展示值 / 版本 / 技术语言 / 特性列表 / 指标」这几个输入框因此会被同步覆盖，界面已标注。
-  - **编辑所有、只在空白时填充**：`description_json`、README/Compose 文档与预览图（项目图片 `preview_image_url` + 相册 `preview_images_json`）；后台手写内容一律不覆盖。
+  - **编辑所有、只在空白时填充**：`description_json`、README/Compose 文档与预览图（项目图片 `preview_image_url` + 相册 `preview_images_json`）、
+    以及**开源协议 `license`**（迁移 `0012`，管理端「项目管理 → 编辑 → 开源协议」可填，展示在首页标本卡片右下角）；
+    后台手写内容一律不覆盖。
     「空」= 待填：主动清空后下次同步会重新自动填充（详见下一节）。
+    > 协议取自仓库响应里的 `license.spdx_id`（`GET /repos/{owner}/{repo}` 已带，**不额外发请求**）；
+    > GitHub 识别不出协议时的 `NOASSERTION` 与我们认不出的情形都不写；没有 LICENSE 文件时该字段为 `null`，同样不写。
+    > 为什么不让同步覆盖：协议是"作者怎么授权"的声明，不能让一次同步替作者改口。
   - 星数展示口径统一为一份实现（≥1000 用 `2.8k`），卡片与指标卡不会再出现 `2.8k` 与 `2800` 并存。
 - **无 Release 的项目**：`version` 保持空串（不再编造 `v1.0.0`），前台会省略版本位而不是显示空占位。
 - **同步的健壮性**：所有 GitHub 出网请求带 10 秒超时（含 Access 证书端点），单个卡住的响应不会拖住整个同步；
