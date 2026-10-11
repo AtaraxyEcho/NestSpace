@@ -106,6 +106,19 @@ check('存储可用时原样读写', () => {
   }
 })
 
+// ——— 卡片布局与简介换行：两条都是"顺手清理就会改回去"的判据 ———
+
+check('卡片正文行用 minmax(0,1fr)：页脚不会被内容顶出卡框', () => {
+  // 1fr 带 auto 下限，内容比行高时行会被顶大 ⇒ 40px 的页脚整行被推到卡框外
+  assert.match(css, /\.specimen-card \{[^}]*grid-template-rows: 52px minmax\(0, 1fr\) 40px/, '正文行丢了 minmax 下限')
+  assert.match(css, /\.project-copy \{ display: flex; flex-direction: column;/, '右列不再是 flex 列，简介就没法当弹性项')
+  assert.match(css, /\.description \{[^}]*flex: 0 1 auto/, '简介必须是唯一能收缩的那一项，否则被顶出去的是按钮')
+})
+
+check('详情页简介保留录入时的换行（textarea 里的回车是意图）', () => {
+  assert.match(css, /\.detail-intro \{ white-space: pre-line;/, '少了 pre-line，多行简介会被折叠成一整段')
+})
+
 let failed = 0
 for (const [name, fn] of cases) {
   try {
@@ -120,5 +133,5 @@ if (failed) {
   process.exit(1)
 }
 console.log(
-  `shell_guards：全部 ${cases.length} 个用例通过（深色两份取值一致 / 注入与首屏取值同源 / 存储不可用不白屏）✓`,
+  `shell_guards：全部 ${cases.length} 个用例通过（深色两份取值一致 / 注入与首屏取值同源 / 存储不可用不白屏 / 卡片布局与简介换行）✓`,
 )

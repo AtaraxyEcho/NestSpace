@@ -248,12 +248,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   perspective: 2400px; perspective-origin: 50% 50%; transform-style: preserve-3d;
 }
 .spiral-card-wrap {
-  position: absolute; width: min(880px, 76vw); height: min(540px, 64vh);
+  position: absolute; width: min(880px, 76vw); height: min(560px, 66vh);
   will-change: transform, opacity, filter; transform-style: preserve-3d;
 }
 .specimen-card {
   height: 100%; background: var(--bg-elevated); border: 1px solid var(--line-strong);
-  position: relative; display: grid; grid-template-rows: 52px 1fr 40px;
+  position: relative; display: grid; grid-template-rows: 52px minmax(0, 1fr) 40px;
   box-shadow:
     inset 0 1px 0 rgba(255,253,240,.45), 0 1px 0 var(--bg-surface), 0 2px 0 var(--line-hair),
     0 3px 0 rgba(42,38,32,.02), 0 40px 80px -50px rgba(42,38,32,.35),
@@ -294,24 +294,30 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 /* 卡片高度是固定的（3D 封面流按它摆位），简介长度却不受控：不裁剪时最坏内容会把
    「View specimen / GitHub」挤出卡片框（实测 4K 档溢出 43px）。所以桌面各档也给简介
    加行数裁剪——与移动端同一套写法，只是行数更多；完整简介在详情页。 */
-.project-copy { padding: 28px 40px 20px; min-width: 0; }
+/* 卡片高度是固定的（3D 封面流按它摆位），右列内容却由数据决定；差的那几十像素以前会把
+   40px 页脚顶出卡框（1fr 行有 auto 下限，会被内容顶大）。三层保险：
+   ① .specimen-card 的 1fr 改成 minmax(0,1fr)：行不再被内容顶大；
+   ② 右列改成 flex 列，简介是唯一的弹性项——真放不下时先缩简介，按钮永远留在卡内；
+   ③ 非内容间距收紧 ~20px（实测差的就是这一点点）。 */
+.project-copy { display: flex; flex-direction: column; padding: 26px 40px 16px; min-width: 0; }
 .latin { margin: 0 0 2px; color: var(--accent-text); font-size: 17px; font-style: italic; overflow-wrap: anywhere; }
 /* 项目名来自仓库/后台填写，长度不受我们控制：一个不换行的长词会横向溢出卡片（卡片没有 overflow:hidden，
    字会爬出边框），而硬把它折成多行又会把下面的按钮顶出去（就是首页那次按钮溢出的同一族）。
    所以两件事一起做：允许在任意处断词 + 名称最多两行，多出来的用省略号收掉。 */
-.project-copy h2 { margin: 0; font-size: clamp(36px, 4vw, 52px); line-height: .98; letter-spacing: -.025em; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
-.cn-name { margin: 4px 0 0; font-style: italic; color: var(--ink-tertiary); font-family: "Noto Serif SC", serif; font-size: 14px; overflow-wrap: anywhere; }
+.project-copy h2 { flex: 0 0 auto; margin: 0; font-size: clamp(36px, 4vw, 52px); line-height: .98; letter-spacing: -.025em; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.cn-name { flex: 0 0 auto; margin: 2px 0 0; font-style: italic; color: var(--ink-tertiary); font-family: "Noto Serif SC", serif; font-size: 14px; overflow-wrap: anywhere; }
 .description {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
-  font-size: 15px; line-height: 1.7; margin: 14px 0; color: var(--ink-secondary); max-width: 480px;
+  flex: 0 1 auto; min-height: 0;
+  font-size: 15px; line-height: 1.7; margin: 12px 0; color: var(--ink-secondary); max-width: 480px;
 }
-.attributes { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line-default); }
-.attributes div { min-height: 50px; padding: 8px 12px; }
+.attributes { flex: 0 0 auto; display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line-default); }
+.attributes div { min-height: 46px; padding: 8px 12px; }
 .attributes div:nth-child(odd) { border-right: 1px solid var(--line-default); }
 .attributes div:nth-child(-n+2) { border-bottom: 1px solid var(--line-default); }
 .attributes span { display: block; font: 7px/1.4 var(--font-mono); letter-spacing: .19em; color: var(--ink-tertiary); }
 .attributes strong { display: block; margin-top: 2px; font-size: 13px; font-weight: 600; }
-.card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+.card-actions { flex: 0 0 auto; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .button {
   min-height: 38px; padding: 0 16px; display: inline-flex; align-items: center; justify-content: center; gap: 18px;
   border: 1px solid var(--ink-primary); font: 500 11px/1 var(--font-mono); letter-spacing: .1em;
@@ -494,7 +500,8 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .detail-title .latin { font-size: 19px; margin: 20px 0 7px; }
 .detail-title h1 { margin: 0; font-size: clamp(72px, 10vw, 148px); line-height: .9; letter-spacing: -.055em; font-weight: 600; }
 .detail-cn { margin: 24px 0 0; font: italic 18px "Noto Serif SC", serif; color: var(--accent-text); }
-.detail-intro { max-width: 600px; margin: 24px 0 0; font-size: 19px; line-height: 1.65; color: var(--ink-secondary); }
+/* pre-line：简介是 textarea 录入的（管理员按回车就是分段意图），普通文本渲染会把换行整个折叠掉 */
+.detail-intro { white-space: pre-line; max-width: 600px; margin: 24px 0 0; font-size: 19px; line-height: 1.65; color: var(--ink-secondary); }
 .detail-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 34px; }
 .detail-plate {
   justify-self: center; width: min(450px, 100%); aspect-ratio: 4 / 5; position: relative;
@@ -1420,7 +1427,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .spiral-card-wrap { height: 78vh; }
   .card-topline { height: 38px; }
   .card-footer { display: none; }
-  .specimen-card { grid-template-rows: 38px 1fr; }
+  .specimen-card { grid-template-rows: 38px minmax(0, 1fr); }
   .specimen-panel svg { max-height: 180px; }
 }
 
@@ -1449,7 +1456,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
     height: min(640px, 66vh);
   }
   .specimen-card {
-    grid-template-rows: 60px 1fr 46px;
+    grid-template-rows: 60px minmax(0, 1fr) 46px;
   }
   .card-topline, .card-footer {
     padding: 0 32px;
@@ -1466,7 +1473,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
     font-size: 20px;
   }
   .project-copy {
-    padding: 36px 48px 28px;
+    padding: 30px 48px 22px;
   }
   .latin {
     font-size: 19px;
@@ -1483,7 +1490,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
     max-width: 580px;
   }
   .attributes div {
-    min-height: 58px;
+    min-height: 52px;
     padding: 10px 16px;
   }
   .attributes span {
@@ -1521,7 +1528,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
     height: min(780px, 68vh);
   }
   .specimen-card {
-    grid-template-rows: 72px 1fr 54px;
+    grid-template-rows: 72px minmax(0, 1fr) 54px;
   }
   .card-topline, .card-footer {
     padding: 0 42px;
@@ -1558,11 +1565,11 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
     margin-top: 6px;
   }
   .project-copy {
-    padding: 48px 64px 36px;
+    padding: 40px 64px 28px;
   }
   .latin {
     font-size: 22px;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
   }
   .project-copy h2 {
     font-size: clamp(56px, 3.6vw, 78px);
@@ -1570,19 +1577,19 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   }
   .cn-name {
     font-size: 19px;
-    margin-top: 8px;
+    margin-top: 4px;
   }
   .description {
     font-size: 19px;
     line-height: 1.8;
     max-width: 720px;
-    margin: 20px 0;
+    margin: 16px 0;
   }
   .attributes {
     margin-top: 10px;
   }
   .attributes div {
-    min-height: 70px;
+    min-height: 62px;
     padding: 14px 20px;
   }
   .attributes span {
