@@ -1419,21 +1419,6 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .field-row { grid-template-columns: 1fr; gap: 0; }
 }
 
-@media (max-height: 700px) and (min-width: 761px) {
-  .spiral-card-wrap { height: 72vh; }
-  .project-copy { padding-top: 18px; padding-bottom: 12px; }
-  .description { margin: 8px 0; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .attributes div { min-height: 42px; padding: 5px 10px; }
-  .card-actions { margin-top: 10px; }
-}
-
-@media (max-height: 620px) {
-  .spiral-card-wrap { height: 78vh; }
-  .card-topline { height: 38px; }
-  .card-footer { display: none; }
-  .specimen-card { grid-template-rows: 38px minmax(0, 1fr); }
-  .specimen-panel svg { max-height: 180px; }
-}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition-duration: 0.01ms !important; }
@@ -1654,4 +1639,38 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .spiral-sticky { height: 100dvh; }
   .section { min-height: 100dvh; }
   .detail-page { min-height: 100dvh; }
+}
+
+/* ── 短窗降级必须排在**最后** ─────────────────────────────────────────────
+   这两块以前夹在中间，被后面的 ≥1600 / ≥2200 宽屏块原样顶了回去（宽屏块把高度、内边距、
+   属性表行高全恢复成"大屏那一套"）——于是"宽而矮"的窗口里卡片内容被裁在属性表中间、
+   按钮整个消失（实测 2000×580 复现）。CSS 里同权重按出现顺序取后者，所以降级规则一律放最后。 */
+@media (max-height: 700px) and (min-width: 761px) {
+  .spiral-card-wrap { height: 72vh; }
+  .project-copy { padding-top: 18px; padding-bottom: 12px; }
+  .description { margin: 8px 0; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .attributes div { min-height: 42px; padding: 5px 10px; }
+  .card-actions { margin-top: 10px; }
+}
+
+@media (max-height: 620px) {
+  .spiral-card-wrap { height: 78vh; }
+  .card-topline { height: 38px; }
+  .card-footer { display: none; }
+  .specimen-card { grid-template-rows: 38px minmax(0, 1fr); }
+  .specimen-panel svg { max-height: 180px; }
+}
+
+/* 再矮一档：属性表让位给「名字 + 简介 + 按钮」——那三项才是这一屏的存在理由，
+   四项指标在详情页一条不少 */
+@media (max-height: 540px) {
+  .attributes { display: none; }
+  .project-copy { padding-top: 14px; padding-bottom: 10px; }
+}
+
+/* 环境标注（右侧那组站名/副题）宽 220px 钉在右上，而卡片是 min(880px, 76vw) 居中——
+   视口窄于 ~1400px 时两者在数学上必然重叠（实测 900 宽时标注压在简介文字上）。
+   它是装饰性的，站名在标头里另有一份，所以窄窗直接收起，不挤卡片。 */
+@media (max-width: 1400px) {
+  .ambient-mark { display: none; }
 }
