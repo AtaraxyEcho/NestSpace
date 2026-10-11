@@ -111,6 +111,8 @@ check('存储可用时原样读写', () => {
 check('卡片正文行用 minmax(0,1fr)：页脚不会被内容顶出卡框', () => {
   // 1fr 带 auto 下限，内容比行高时行会被顶大 ⇒ 40px 的页脚整行被推到卡框外
   assert.match(css, /\.specimen-card \{[^}]*grid-template-rows: 52px minmax\(0, 1fr\) 40px/, '正文行丢了 minmax 下限')
+  // 光有下限还不够：两列仍会把内容画到行框之外（截图里就是页脚被盖、按钮跑到卡框下面）
+  assert.match(css, /\.card-body \{[^}]*overflow: hidden/, '正文行没有裁住两列，内容会溢到页脚与卡框外')
   assert.match(css, /\.project-copy \{ display: flex; flex-direction: column;/, '右列不再是 flex 列，简介就没法当弹性项')
   assert.match(css, /\.description \{[^}]*flex: 0 1 auto/, '简介必须是唯一能收缩的那一项，否则被顶出去的是按钮')
 })

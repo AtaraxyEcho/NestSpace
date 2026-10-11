@@ -604,3 +604,11 @@ Worker"只在显式 dark/light 时注入"与 `App` 首屏取值同源（源码�
 验证靠的是：算出的三档差值 → 收紧量；隔离实例上建了一件带四段中文简介的临时标本，
 实测 `.project-copy` 是 flex 列、`.description` 是 `flex: 0 1 auto`、`.detail-intro` 的 `white-space` 为 `pre-line`
 且文本节点里确实有 4 个换行；随后删掉该标本（库里回到 4 件）。
+
+**补二（同日，第二张截图）**：窗口缩小后他又报"仍然溢出"，新截图把形态拍清楚了：
+**左列的「Habitat: GitHub Field」与页脚的「Collected by NestSpace」叠在同一行，按钮整排跑到卡片下边框之外**。
+这说明我上一轮只做对了一半——`minmax(0,1fr)` 只保证"**行**不被内容顶大"，**两列仍然把内容画到行框之外**。
+真正彻底的一刀是让正文行自己裁住：`.card-body { overflow: hidden }`（**不能裁 `.specimen-card`**：
+卡片自己的 `::after` 是那道"叠纸"阴影条，裁了会消失）。
+至此四层结构都在：行不被顶大（minmax）→ 内容不外溢（body 裁剪）→ 放不下时先缩简介（flex 弹性）+ 各档间距已收紧 → 真挤不下也只是简介变短，
+**页脚与卡框永远各就各位**。闸门那一组断言也补上了 `overflow: hidden` 这条。

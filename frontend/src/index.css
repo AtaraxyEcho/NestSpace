@@ -274,7 +274,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .status b { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); animation: pulse 2s infinite; }
 @keyframes pulse { 50% { opacity: .35; } }
-.card-body { display: grid; min-height: 0; grid-template-columns: 35% 65%; }
+/* overflow: hidden 是这组修复的关键一半：行改成 minmax(0,1fr) 只保证"行不被内容顶大"，
+   两列仍然会把内容画到行框之外——于是页脚被盖住、按钮整排跑到卡片下边框下面（实测截图就是这个形态）。
+   在这里裁住正文行以后，最坏情况是简介被裁短，页脚与卡片边框永远各就各位。
+   注意别裁到 .specimen-card 上：卡片自己的 ::after 是"叠纸"那道阴影条（bottom: -5px），裁了会消失。 */
+.card-body { display: grid; min-height: 0; grid-template-columns: 35% 65%; overflow: hidden; }
 .specimen-panel {
   position: relative; border-right: 1px solid var(--line-default); min-width: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px 20px 12px;
