@@ -9,6 +9,7 @@ import { getCookie } from 'hono/cookie'
 import { PREVIEW_IMAGE_LIMIT, sanitizeImageUrl } from '../src/utils/previewRules.ts'
 // 双语字段（挑战/方案）的读侧规则，与前台/管理端共用同一份（旧单列只读兜底）
 import { asBilingual, pairFromSingleText } from '../src/utils/bilingual.ts'
+import { canonicalPathFor, isValidProjectId } from '../src/utils/siteRoute.ts'
 
 // 环境变量与 D1 数据库绑定定义
 type Env = {
@@ -700,9 +701,10 @@ adminApp.post('/projects', async (c) => {
     if (!body.id || !body.name || !body.status) {
       return c.json({ error: 'Missing required fields: id, name, status' }, 400)
     }
-    // id 是主键、也是公开详情的路径参数：只判"存在"不够，限定字符集与长度（与仓库名同等对待）
-    if (!/^[A-Za-z0-9._-]{1,32}$/.test(String(body.id))) {
-      return c.json({ error: 'id 只允许字母/数字/点/下划线/连字符，长度 1–32' }, 400)
+    // id 是主键、也是公开详情的路径参数：只判"存在"不够，限定字符集与长度（与仓库名同等对待）。
+    // 判据与前端路由共用一份（siteRoute.ts）：`.` / `..` 会被路径规范化吃掉，那种编号的详情页永远打不开。
+    if (!isValidProjectId(String(body.id))) {
+      return c.json({ error: 'id 只允许字母/数字/点/下划线/连字符，长度 1–32，且不能是 . 或 ..' }, 400)
     }
     if (!ALLOWED_STATUSES.includes(body.status)) {
       return c.json(
@@ -2770,7 +2772,12 @@ function escapeHtmlAttribute(value: string): string {
     .replace(/"/g, '&quot;')
 }
 
-function injectSeoOverrides(html: string, seo: SeoOverrides, origin: string): string {
+function injectSeoOverrides(
+  html: string,
+  seo: SeoOverrides,
+  origin: string,
+  requestPath: string,
+): string {
   let out = html
   // 一律用替换函数、不用替换串：文案里出现 $& / $' / $1 时，替换串会把它当成"引用匹配到的内容"改写坏
   if (seo.title) {
@@ -2794,12 +2801,14 @@ function injectSeoOverrides(html: string, seo: SeoOverrides, origin: string): st
   }
   // 规范地址与社交卡片：构建产物里只有一个标记、不含任何域名（见 index.html），
   // 这里按当前请求的 origin 注入——换域名、上 preview 子域都不必重新构建。
+  // 路径部分走 siteRoute 的同一份判据：详情页有自己的规范地址（/project/005），
+  // 其余（含各种拼错的路径）一律回站点根，免得"首页的内容"被声明成别的地址。
   if (origin && out.includes(SEO_ORIGIN_MARKER)) {
-    const root = escapeHtmlAttribute(`${origin}/`)
+    const canonical = escapeHtmlAttribute(`${origin}${canonicalPathFor(requestPath)}`)
     out = out.replace(
       SEO_ORIGIN_MARKER,
       () =>
-        `<link rel="canonical" href="${root}" />\n    <meta property="og:url" content="${root}" />`,
+        `<link rel="canonical" href="${canonical}" />\n    <meta property="og:url" content="${canonical}" />`,
     )
   }
   // 显式设成"日/夜"的站点：把主题打在 <html> 上，第一帧就是对的（不必等 JS 起来）。
@@ -2853,10 +2862,13 @@ async function serveIndexWithSeo(c: any) {
     headers.delete('etag')
     headers.delete('last-modified')
     headers.delete('content-encoding')
-    return new Response(injectSeoOverrides(html, seo, origin), {
-      status: assetRes.status,
-      headers,
-    })
+    return new Response(
+      injectSeoOverrides(html, seo, origin, new URL(c.req.raw.url).pathname),
+      {
+        status: assetRes.status,
+        headers,
+      },
+    )
   } catch (err) {
     console.error('SEO injection failed, serving asset as-is:', err)
     try {
@@ -2872,5 +2884,9 @@ const root = new Hono<Env>()
 root.route('/api', app)
 root.get('/', serveIndexWithSeo)
 root.get('/index.html', serveIndexWithSeo)
+// 路径路由后的深链：详情页与 /admin 也要由 Worker 取回首页 HTML 再注入
+// （canonical/og:url/主题标记都在这条路径上；不加这两行，深链会直接由资产层 SPA 兜底返回未注入的那份）
+root.get('/project/*', serveIndexWithSeo)
+root.get('/admin', serveIndexWithSeo)
 
 export default root

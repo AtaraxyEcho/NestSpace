@@ -34,7 +34,8 @@ NestSpace/
 │   │   │                         #   usage.ts 匿名埋点、navOrder.ts 首页栏目顺序、bilingual.ts 双语读侧规则、
 │   │   │                         #   safeStorage.ts 浏览器存储的安全读写（存储被禁时不白屏）、
 │   │   │                         #   siteHost.ts 前后台互跳地址推导（admin.X ↔ X，代码里不写死域名）、
-│   │   │                         #   sectionCopy.ts 栏目标题与页面文案的读侧判据（四处消费者同源）
+│   │   │                         #   sectionCopy.ts 栏目标题与页面文案的读侧判据（四处消费者同源）、
+│   │   │                         #   siteRoute.ts 路径↔路由的判据（前端渲染与 Worker 的 canonical 同一份）
 │   │   ├── App.tsx               # 动态数据渲染与安全管理端
 │   │   ├── main.tsx              # React 入口（挂载 #root，引入 index.css）
 │   │   └── index.css             # 全局样式与设计 token（Tailwind v4 导入 + 主题变量）
@@ -43,7 +44,7 @@ NestSpace/
 │   ├── vite.config.ts            # Vite + Tailwind v4 + Figma Make 插件；dev 下把 /api 代理到本地 wrangler
 │   ├── tsconfig.json             # 前端 TS 配置（worker/tsconfig.json 单独一套）
 │   ├── .figma/make/site.json     # 站点标题 / 描述 / 收录开关（构建期注入 HTML 头部）
-│   ├── test/                     # 单元测试（纯函数 / 前后端判据一致性；pnpm test 依次跑这十五个文件）
+│   ├── test/                     # 单元测试（纯函数 / 前后端判据一致性；pnpm test 依次跑这十六个文件）
 │   │   ├── jwt_verify.test.mjs   # JWT 校验与 Access 白名单
 │   │   ├── demo_url.test.mjs     # 演示地址规范化
 │   │   ├── sync_update.test.mjs  # GitHub 同步字段归属 / 时间线生成 / 代码列 ⊆ 迁移列（17f）/ 站点设置三份清单对齐（18）
@@ -58,6 +59,7 @@ NestSpace/
 │   │   ├── sync_scope.test.mjs   # 同步范围 ids：省略=全表、空数组=拒绝、形态与上限、去重
 │   │   ├── site_host.test.mjs    # 前后台互跳地址推导（admin.X ↔ X）/ 出货源码不写死域名与账号 / canonical 按 origin 补全
 │   │   ├── shell_guards.test.mjs # 首屏主题（深色两份取值一致 + 注入）与浏览器存储不可用时不白屏
+│   │   ├── route_path.test.mjs   # 路径↔路由（/project/<id>、/admin、未知路径回首页、旧哈希兼容、canonical 只给真路由）
 │   │   └── test_chain.test.mjs   # 闸门注册链与 test/ 目录一一对应（漏登记的闸门会在 CI 里静默不跑）
 │   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（Analytics Engine 数据集默认注释、按需开启）
 │   └── package.json
@@ -84,7 +86,7 @@ NestSpace/
 │   └── 0015_fill_seed_narrative.sql
 │                                 # 纯数据：给种子的「挑战 / 方案」补上双语 JSON（只在列为空、且是种子行时）
 │
-├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十五个闸门 + 构建（见第四节末）
+├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十六个闸门 + 构建（见第四节末）
 │
 ├── scripts/                      # 运维脚本
 │   ├── d1-migrate.sh             # 一键按序执行全部 D1 迁移（local / remote，可反复执行）
@@ -354,7 +356,7 @@ bash scripts/usage-probe.sh
 
 ### CI（`.github/workflows/ci.yml`）
 
-push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十五个纯函数闸门）、
+push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十六个纯函数闸门）、
 `pnpm run build`。用 **pnpm** 不是风格问题：仓库里只有 `pnpm-lock.yaml`，`npm ci` 会直接 ENOLOCK 失败。
 版本钉在 `frontend/.mise.toml` 的同一套（node 22 / pnpm 10.34.3）。
 
@@ -390,10 +392,12 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
 - `frontend/public/robots.txt`：显式声明允许收录全站、屏蔽 `/api/`（JSON 接口无需进索引）；
 - 未配置 `title` 时会回退为默认值 "Figma Make App"，改标题务必在 site.json 中改。
 
-**收录范围说明**：本项目是哈希路由 SPA（如 `#project/001`），搜索引擎只会把根路径
-作为一个页面收录（Google 会执行 JS 渲染，首页动态内容可被索引）；各项目详情页不会
-成为独立的搜索结果。若未来需要每个项目拥有独立的搜索落地页，需改造为 History 路由
-并配合 sitemap.xml，属于架构级变更，届时再评估。
+**收录范围说明**：站点用 **History 路由**，每个标本有自己的地址（`/project/001`）——
+未命中具体路线时回退首页，并在页面头部注入相应的 canonical 与 og:url；
+深链（`/project/*`、`/admin`）与首页一样经过 Worker 注入，所以爬虫与社交平台拿到的是同一份头部。
+**旧地址仍然可用**：哈希路由时代分享出去的 `#project/001` / `#admin` 会在进站时被替换成路径地址。
+`robots.txt` 允许全站（仅屏蔽 `/api/`）；没有 sitemap.xml —— 收藏量在几十件这个量级，
+交给 Search Console 的常规抓取足够，为它维护一份生成器不划算。
 
 **上线后加速收录**：在 [Google Search Console](https://search.google.com/search-console)
 添加站点属性并请求编入索引；Bing Webmaster Tools 同理。
@@ -498,7 +502,7 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
 另有两点使用约定：
 
 - **管理端入口**：公开界面（页头/详情页/页脚）不展示任何管理入口按钮。直接访问 `https://admin.你的域名`
-  （建议收藏）；在公开站上敲 `https://你的域名/#admin` 会自动跳到该子域。**没有 `admin.` 兄弟域可用的环境**
+  （建议收藏）；在公开站上敲 `https://你的域名/admin`（旧的 `#admin` 也认）会自动跳到该子域。**没有 `admin.` 兄弟域可用的环境**
   （本地、IP 直连、`*.workers.dev` / `*.pages.dev` 预览域）不做跳转，`#admin` 就地打开后台——
   判据是 `src/utils/siteHost.ts` 的 `hasAdminSibling()`，所以不存在"跳到不存在的域名"这种死链。
   这只是减少暴露面，真正的安全边界在管理 API 层（见第三节三层防线）。

@@ -395,9 +395,9 @@ export default function App() {
 
 ## 6. 管理端零信任防护落地（Cloudflare Zero Trust 实操）
 
-当前实现里管理界面有两种进入形态：**公开 SPA 内的 `#admin` 哈希路由**（每个访客都能下载到管理界面代码，
-但其中不含任何密钥），以及**受 Access 保护的专属子域** `admin.<域名>`（生产环境下访问主站的 `#admin`
-会被直接跳转过去；代码里的 `isAdminHost()` 与那条跳转 effect 就是为它准备的）。
+当前实现里管理界面有两种进入形态：**公开 SPA 内的 `/admin` 路径**（每个访客都能下载到管理界面代码，
+但其中不含任何密钥），以及**受 Access 保护的专属子域** `admin.<域名>`（生产环境下访问主站的 `/admin`
+或旧的 `#admin` 会被直接跳转过去；代码里的 `isAdminHost()` 与那条跳转 effect 就是为它准备的）。
 两种形态的安全边界都完全落在**管理 API（`/api/admin/*`）**上，由三层防线组成：
 边缘 Access 拦截 + 代码层 Bearer 密钥（常量时间比较）+ 代码层 Access JWT 签名校验。
 配置步骤见 `DEPLOYMENT_GUIDE.md` 第三节，要点如下：
@@ -407,7 +407,7 @@ export default function App() {
    - 类型选择：**Self-hosted（自托管）**。
    - Application Name：`NestSpace Admin Console`。
    - Application Domain：两种绑法任选其一——绑到主域名的 `/api/admin*` 路径
-     （`/admin*` 对哈希路由无意义——`#` 之后的部分不会发送到服务器），
+     （绑路径时用 `/api/admin*`：页面本身走的是 `/admin` 路径，真正需要边缘拦截的是 API），
      或直接绑到专用管理子域 `admin.<域名>`（部署手册第三节用的就是这一种）。
      二者可同时存在，代码层都会照常校验 Bearer / JWT，不依赖边缘是否拦住。
 3. **配置策略（Policy）**：

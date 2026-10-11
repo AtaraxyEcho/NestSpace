@@ -8,13 +8,15 @@ preview_urls = false
 
 # 静态资产配置（vite 构建产出 ./dist）：
 # - binding: 暴露 ASSETS，Worker 才能取到首页 HTML 做 SEO 注入（删掉会导致首页 503！）
-# - run_worker_first: /api/* 与管理端首页先进入 Worker 处理（取代 Pages 的 _routes.json）
-# - not_found_handling: 未知路径回退 index.html（SPA 哈希路由兜底）
+# - run_worker_first: /api/*、首页与**路径路由的深链**（/project/*、/admin）先进入 Worker 处理
+#   （取代 Pages 的 _routes.json）。深链也必须进来，否则拿到的是资产层 SPA 兜底那份**没注入**的 HTML：
+#   canonical / og:url / 主题标记全在 Worker 的注入里
+# - not_found_handling: 未知路径回退 index.html（SPA 兜底；前端把它们渲染成首页，canonical 回站点根）
 [assets]
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/", "/index.html"]
+run_worker_first = ["/api/*", "/", "/index.html", "/project/*", "/admin"]
 
 # Cloudflare D1 边缘数据库绑定
 [[d1_databases]]

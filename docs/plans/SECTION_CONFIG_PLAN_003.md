@@ -612,3 +612,35 @@ Worker"只在显式 dark/light 时注入"与 `App` 首屏取值同源（源码�
 卡片自己的 `::after` 是那道"叠纸"阴影条，裁了会消失）。
 至此四层结构都在：行不被顶大（minmax）→ 内容不外溢（body 裁剪）→ 放不下时先缩简介（flex 弹性）+ 各档间距已收紧 → 真挤不下也只是简介变短，
 **页脚与卡框永远各就各位**。闸门那一组断言也补上了 `overflow: hidden` 这条。
+
+## 25. 换掉哈希路由：详情页有自己的地址（2026-10-11）
+
+他贴了 `https://nestspace.online/#project/005` 问"为什么仍然带 #"，要求修掉。根因不是 bug：
+站点一直是**哈希路由**（`#` 之后的部分不会发给服务器），所以详情页在服务端看来永远是首页那一份 HTML——
+这也正是之前审查里记过的"各项目详情页不会成为独立的搜索结果"。要彻底去掉 `#`，只有换成 History 路由。
+
+- **判据抽成纯函数** `src/utils/siteRoute.ts`（`routeFromPath` / `pathForRoute` / `legacyRouteFromHash` /
+  `canonicalPathFor`），**前端渲染与 Worker 的 canonical 共用同一份**——各写一遍迟早分叉（前端认领了
+  Worker 不认的地址，canonical 就会指向一个它不当回事的路径）。新闸门 `route_path.test.mjs`（第 16 条）整张表钉住：
+  路径↔路由互逆、结尾斜杠、非法编号回首页（**不发请求**）、旧哈希只认 `#project/<id>` 与 `#admin`、
+  canonical 只给真路由、其余一律站点根。
+- **闸门当场抓到两个真问题**：① `PROJECT_ID_RE` 允许 `..` —— 而 `/project/..` 会被路径规范化吃成站点根，
+  那件标本的详情页永远打不开；于是加了 `isValidProjectId()`（字符集 + 排除 `.` / `..`），
+  **Worker 的项目新建校验也换成同一份**（写侧原本会收下 `..` 这种 id）；② 路由→路径的前缀切错了（`project/` 与 `/project/` 混用）。
+- **前端**：`routeFromPath(pathname)` 取代 `routeFromHash`；`navigate()` 走 `pushState`；监听 `popstate`。
+  `hashchange` 只保留两件事：旧地址替换（`#project/<id>` / `#admin` → 路径），
+  以及**站在详情页点章节锚点先切回首页**（以前靠"设 hash 就重算路由"侥幸成立，换成路径路由后必须显式做）。
+  未知路径（含 `/index.html`、`/project/` 残形）渲染首页时顺手把地址归一成 `/`，免得同一个首页有无数个 URL 变体。
+- **Worker**：`run_worker_first` 加上 `/project/*` 与 `/admin`——**深链也必须进 Worker**，
+  否则拿到的是资产层 SPA 兜底那份**没注入**的 HTML（canonical / og:url / 主题标记全在注入里）；
+  `serveIndexWithSeo` 接这两类路径，canonical 用 `canonicalPathFor(请求路径)`。
+  实测：`/project/001` → canonical `/project/001`、`/project/001/` 归一、`/admin` → `/`、`/typo-path` → `/`。
+- **旧链接全部继续可用**：`https://…/#project/005` 进站即被替换成 `/project/005`（实测 URL 干净、详情正常渲染）；
+  已经分享出去的哈希链接不会 404。节章节锚点（`#cabinet` 等）照旧只在首页滚动。
+- **文档**：README 的本地管理端入口改 `/admin`（旧 `#admin` 也认）；指南的收录范围段从"哈希路由、详情页不会单独收录"
+  改成 History 路由的现状（每件标本一个地址、canonical 按路径、没有 sitemap 的理由）；规划稿里那段"现状"同步。
+
+验证：两套 `tsc`、**16 条闸门**、`build` 全绿；浏览器实测——直开 `/project/001` 渲染详情且 canonical 正确、
+`/?h=1#project/001` 自动变 `/project/001`、首页点卡片 pushState 出 `/project/001`、
+详情页点页脚章节链接切回 `/#index` 并落在首页、`/admin` 在本地就地开后台（含"只剩口令一层"警示）、
+浏览器后退能回到上一屏。（中途一次"看起来回归"是 bfcache 恢复了部署前加载的旧文档，用全新加载复验即正常。）

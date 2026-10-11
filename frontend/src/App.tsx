@@ -48,6 +48,12 @@ import { asBilingual, pickBilingual, pickSiteHeading, type BilingualText } from 
 // 相册判据与 Worker 写侧共用这一份（坏行即时点名与 400 点名必然是同一批）
 import { PREVIEW_IMAGE_LIMIT, galleryRowIssues } from "./utils/previewRules"
 import { changedColumns } from "./utils/projectDiff"
+import {
+  routeFromPath,
+  pathForRoute,
+  legacyRouteFromHash,
+  type SiteRoute,
+} from "./utils/siteRoute"
 import { readSession, writeSession, clearSession } from "./utils/safeStorage"
 import {
   trackImageFailure,
@@ -375,21 +381,21 @@ function canSwitchToAdminHost(): boolean {
   return typeof window !== "undefined" && hasAdminSibling(window.location.hostname)
 }
 
-function routeFromHash(hash: string) {
+/**
+ * 首屏路由：**只做纯解析、不做跳转**（这个函数会在 useState 初始化、render 期间被调用，
+ * 在那里改 location 属于渲染期副作用）。旧地址的替换、#admin 的子域跳转都由路由 effect 负责。
+ */
+function initialRoute(): SiteRoute {
   if (isAdminHost()) return "admin"
-  // 这里只做**纯解析**、不做跳转：本函数会在 useState 初始化（render 期间）被调用，
-  // 在其中改 location 属于渲染期副作用。
-  const clean = hash.replace(/^#/, "")
-  // 公开站上的 #admin 有两种归宿：能上 admin 子域就留在首页交给路由 effect 跳走（免得登录页闪一下），
+  // 旧链接：哈希路由时代分享出去的 #project/<id> 与 #admin（章节锚点不算路由）
+  const legacy = legacyRouteFromHash(window.location.hash)
+  if (legacy) return legacy
+  // 公开站上的 /admin 有两种归宿：能上 admin 子域就交给路由 effect 跳走（免得登录页闪一下），
   // 没有子域的环境（本地、IP 直连、*.workers.dev/*.pages.dev 预览域）**就地渲染后台**——
   // 鉴权靠口令与 Access，不靠"域名长什么样"。
-  if (clean === "admin" && canSwitchToAdminHost()) return "home"
-  if (!clean || SECTION_ANCHORS.includes(clean)) return "home"
-  // 只有 admin 与 project/<id> 是真路由；其余（比如导航里一个手工写进库的未知锚点）
-  // 必须留在首页分支——否则首页虽然渲染，但进场动画与深链定位两个 effect 都因
-  // `route !== "home"` 早退，`.reveal-section` 一类初始 opacity:0 的段落会整片看不见。
-  if (!clean.startsWith("project/") && clean !== "admin") return "home"
-  return clean
+  const route = routeFromPath(window.location.pathname)
+  if (route === "admin" && canSwitchToAdminHost()) return "home"
+  return route
 }
 
 /**
@@ -6311,7 +6317,7 @@ function ProjectRoute({
 export default function App() {
   const [language, setLanguage] = useState<Language>(detectBrowserLanguage)
   const [dark, setDark] = useState(initialDark)
-  const [route, setRoute] = useState(routeFromHash(window.location.hash))
+  const [route, setRoute] = useState<SiteRoute>(initialRoute)
   // 内置演示标本：首屏立即有内容（不等接口），接口不可达时也仍有东西可看。
   // 注意它只是**占位/兜底**，不是「接口返回空就当非空」——成功响应（含空数组）一律采纳，见 refreshPublicData。
   const [items, setItems] = useState<Project[]>(projects)
@@ -6446,14 +6452,28 @@ export default function App() {
     document.documentElement.lang = language === "zh" ? "zh-CN" : "en"
   }, [language])
 
-  // useLayoutEffect 而不是 useEffect：这个跳转必须在**首次绘制之前**发生，
-  // 否则生产站点访问 #admin 会先闪一下公开首页再跳走（routeFromHash 如今只做纯解析、不再在渲染期跳转）。
+  // useLayoutEffect 而不是 useEffect：这两件事都必须在**首次绘制之前**发生——
+  // ① 旧地址（#project/<id>、#admin）换成路径地址；② 生产站点上的 /admin 跳到子域，
+  // 否则会先闪一下公开首页再跳走（initialRoute 只做纯解析、不在渲染期跳转）。
   useLayoutEffect(() => {
-    // 公开主站上敲 #admin：能上 admin 子域就交给受 Zero Trust 保护的专属子域去处理；
-    // 没有子域可用的环境**不跳**（跳过去是不存在的域名），由 routeFromHash 就地开后台。
+    // 旧链接兼容：`/#project/005` → `/project/005`（用 replace，别在历史里多留一条）
+    const legacy = legacyRouteFromHash(window.location.hash)
+    if (legacy) {
+      window.history.replaceState(null, "", pathForRoute(legacy))
+    } else if (
+      // 未知路径（含 `/index.html`、`/project/` 这种残形）都渲染首页，顺手把地址也归一成 `/`：
+      // 否则同一个首页会有无数个 URL 变体，爬虫把它们当重复内容
+      routeFromPath(window.location.pathname) === "home" &&
+      window.location.pathname !== "/"
+    ) {
+      window.history.replaceState(null, "", `/${window.location.hash}`)
+    }
+
+    // 公开主站上敲 /admin（或旧的 #admin）：能上 admin 子域就交给受 Zero Trust 保护的专属子域去处理；
+    // 没有子域可用的环境**不跳**（跳过去是不存在的域名），由 initialRoute 就地开后台。
     const checkRedirect = () => {
       const target = canSwitchToAdminHost() ? adminSiteOrigin() : ""
-      if (window.location.hash === "#admin" && target) {
+      if (target && (legacy === "admin" || window.location.pathname === "/admin")) {
         window.location.href = target
         return true
       }
@@ -6462,20 +6482,39 @@ export default function App() {
 
     if (checkRedirect()) return
 
-    const onHashChange = () => {
-      if (checkRedirect()) return
-      const clean = window.location.hash.replace(/^#/, "")
-      setRoute(routeFromHash(window.location.hash))
+    const scrollUnlessAnchor = () => {
       // 章节锚点交由浏览器原生滚动定位；其余路由（详情页/管理端/返回）回到顶部
-      if (!clean || !SECTION_ANCHORS.includes(clean)) {
+      const anchor = window.location.hash.replace(/^#/, "")
+      if (!anchor || !SECTION_ANCHORS.includes(anchor)) window.scrollTo({ top: 0 })
+    }
+
+    const onPopState = () => {
+      setRoute(routeFromPath(window.location.pathname))
+      scrollUnlessAnchor()
+    }
+    const onHashChange = () => {
+      const hashRoute = legacyRouteFromHash(window.location.hash)
+      if (hashRoute) {
+        // 有人手动敲了旧地址
+        if (checkRedirect()) return
+        window.history.replaceState(null, "", pathForRoute(hashRoute))
+        setRoute(hashRoute)
         window.scrollTo({ top: 0 })
+        return
+      }
+      // 章节锚点：在本页滚（原生）。但若当前不在首页（例如站在标本详情页点页脚的章节链接），
+      // 先切回首页——URL 与视图不能脱钩，这一条以前靠"设 hash 就会重算路由"侥幸成立，改成路径路由后必须显式做
+      const anchor = window.location.hash.replace(/^#/, "")
+      if (SECTION_ANCHORS.includes(anchor) && window.location.pathname !== "/") {
+        window.history.replaceState(null, "", `/#${anchor}`)
+        setRoute("home")
       }
     }
+    window.addEventListener("popstate", onPopState)
     window.addEventListener("hashchange", onHashChange)
-    window.addEventListener("popstate", onHashChange)
     return () => {
+      window.removeEventListener("popstate", onPopState)
       window.removeEventListener("hashchange", onHashChange)
-      window.removeEventListener("popstate", onHashChange)
     }
   }, [])
 
@@ -6514,19 +6553,15 @@ export default function App() {
     // 里面的 .stat-card 一类初始 opacity:0 的内容会整片看不见。
   }, [route, items.length, siteSettings, effectiveSettings.navItems])
 
-  const navigate = (next: string) => {
-    if (next === "home") {
-      if (window.location.hash) {
-        window.history.pushState(null, "", window.location.pathname)
-      }
-      setRoute("home")
-      window.scrollTo({ top: 0 })
-    } else {
-      window.location.hash = next
-    }
+  // 路径路由：pushState 换地址、setRoute 换视图，字母表里没有 hash ——
+  // 详情页从此有自己的地址（`/project/005`），爬虫与社交平台抓到的不再永远是首页。
+  const navigate = (next: SiteRoute) => {
+    window.history.pushState(null, "", pathForRoute(next))
+    setRoute(next)
+    window.scrollTo({ top: 0 })
   }
 
-  const openProject = (project: Project) => navigate(`project/${project.id}`)
+  const openProject = (project: Project) => navigate(`project/${project.id}` as SiteRoute)
 
   // 首页与后台各算一次浏览；详情浏览在 ProjectRoute 里记（它才知道记录到底有没有取到）。
   // 必须**只认这两种路由**：按"非 admin 即 home"写，会让每次进详情都额外记一次 home。

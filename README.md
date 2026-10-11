@@ -37,8 +37,8 @@ npx wrangler dev                    # http://localhost:8787
 ```
 
 - 公开站：<http://localhost:8787/>
-- 管理端：<http://localhost:8787/#admin>，口令就是 `.dev.vars` 里的 `ADMIN_SECRET_KEY`
-  （本地/单域名场景直接走 hash 路由；生产环境 `#admin` 会被自动重定向到 `admin.<主域>`）
+- 管理端：<http://localhost:8787/admin>（旧的 `#admin` 也认），口令就是 `.dev.vars` 里的 `ADMIN_SECRET_KEY`
+  （生产环境 `/admin` 与旧的 `#admin` 都会被重定向到 `admin.<主域>`）
 - 想要前端热更：另开一个终端跑 `pnpm run dev`（Vite 固定 8443，`/api` 代理到并行起的 8787，
   可用 `WRANGLER_DEV_URL` 覆盖目标）
 
@@ -76,7 +76,7 @@ npx wrangler dev                    # http://localhost:8787
 ```bash
 cd frontend
 pnpm run typecheck    # 前端 + Worker 两套 tsconfig
-pnpm test             # 15 个闸门：纯函数、不联网、不起服务
+pnpm test             # 16 个闸门：纯函数、不联网、不起服务
 pnpm run build
 ```
 
