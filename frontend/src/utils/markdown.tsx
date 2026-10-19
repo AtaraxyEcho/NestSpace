@@ -5,6 +5,7 @@ import {
   joinParagraphLines,
   splitParagraphLines,
 } from './markdownLines'
+import { safeMarkdownUrl } from './markdownUrls'
 
 // 极简 Markdown 渲染器：只解析本项目 README 会用到的语法，全程产出 React 元素，
 // 既不解析也不透传任何原始 HTML，因此不存在 HTML 注入面。
@@ -250,16 +251,6 @@ function parseBlocks(markdown: string, breaks: boolean): Block[] {
   return blocks
 }
 
-/** 只放行安全协议，挡掉 javascript: / data: / 协议相对(//host) 之类的可执行或误导链接 */
-function safeUrl(raw: string): string | null {
-  const url = raw.trim()
-  if (!url) return null
-  if (/^(https?:|mailto:)/i.test(url)) return url
-  // 站内锚点与绝对路径可以放行；`//evil.com` 这种协议相对地址不行
-  if (url.startsWith('#') || (url.startsWith('/') && !url.startsWith('//'))) return url
-  return null
-}
-
 const INLINE = /(`[^`]+`)|(!?\[[^\]]*\]\([^)\s]+(?:\s"[^"]*")?\))|(\*\*[^*]+\*\*)|(\*[^*]+\*)/g
 
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
@@ -282,7 +273,7 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
       const isImage = token.startsWith('![')
       const label = /^!?\[([^\]]*)\]/.exec(token)?.[1] ?? ''
       const rawUrl = /\(([^)\s]+)/.exec(token)?.[1] ?? ''
-      const href = safeUrl(rawUrl)
+      const href = safeMarkdownUrl(rawUrl)
       const caption = label || rawUrl
       nodes.push(
         href ? (

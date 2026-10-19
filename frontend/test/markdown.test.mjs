@@ -15,6 +15,9 @@ const lines = await import(
   pathToFileURL(join(FRONTEND, 'src', 'utils', 'markdownLines.ts')).href
 )
 const { joinParagraphLines, splitParagraphLines } = lines
+const { safeMarkdownUrl } = await import(
+  pathToFileURL(join(FRONTEND, 'src', 'utils', 'markdownUrls.ts')).href
+)
 
 const mdSrc = readFileSync(join(FRONTEND, 'src', 'utils', 'markdown.tsx'), 'utf8')
 const appSrc = readFileSync(join(FRONTEND, 'src', 'App.tsx'), 'utf8')
@@ -61,4 +64,15 @@ assert.ok(MD_TEXT_PARSE_MAX >= 4000 && MD_TEXT_PARSE_MAX <= 50000, `case 5c: 上
 assert.match(mdSrc, /exceedsInlineParseLimit\(line\)/, 'case 5d: 去标签那条要先过守卫')
 assert.match(mdSrc, /exceedsInlineParseLimit\(text\)/, 'case 5e: 行内解析那条要先过守卫')
 
-console.log('markdown：全部用例通过（段落两种口径 / 渲染器接线 / 正文走 breaks / README 口径不变 / 抽屉预览同口径 / 零原始 HTML / 超长段守卫）✓')
+// —— 链接协议：`/\evil.com` 会被 URL 解析成 `//evil.com`，必须拒 ——
+assert.equal(safeMarkdownUrl('https://github.com/x'), 'https://github.com/x', 'case 6a: https 放行')
+assert.equal(safeMarkdownUrl('mailto:a@b.co'), 'mailto:a@b.co', 'case 6b: mailto 放行')
+assert.equal(safeMarkdownUrl('/docs/5c'), '/docs/5c', 'case 6c: 普通站内路径放行（含 5c 不是 %5c）')
+assert.equal(safeMarkdownUrl('#section'), '#section', 'case 6d: 锚点放行')
+assert.equal(safeMarkdownUrl('javascript:alert(1)'), null, 'case 6e: javascript 拒绝')
+assert.equal(safeMarkdownUrl('data:text/html,x'), null, 'case 6f: data 拒绝')
+assert.equal(safeMarkdownUrl('//evil.example'), null, 'case 6g: 协议相对拒绝')
+assert.equal(safeMarkdownUrl('/\\evil.example'), null, 'case 6h: 反斜杠变体拒绝（浏览器会当 //）')
+assert.equal(safeMarkdownUrl('/%5cevil.example'), null, 'case 6i: %5c 变体拒绝')
+
+console.log('markdown：全部用例通过（段落两种口径 / 渲染器接线 / 正文走 breaks / README 口径不变 / 抽屉预览同口径 / 零原始 HTML / 超长段守卫 / 链接协议）✓')
