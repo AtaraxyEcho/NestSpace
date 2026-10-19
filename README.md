@@ -63,6 +63,17 @@ npx wrangler deploy
 配额边界与运维细节见 [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md)。`0002` 会带进 4 个占位项目
 （仓库地址是虚构的 `github.com/nestspace/*`），按需删除或替换。
 
+> [!WARNING]
+> **本项目带管理端（可改全站内容），生产务必加一层 Zero Trust。** Cloudflare Access 的免费档覆盖最多
+> 50 个用户，把 `/admin` 与 `/api/admin/*` 放到 Access 应用后面即可，不需要付费。
+>
+> 裸部署（只有 Worker）时，**`ADMIN_SECRET_KEY` 就是唯一闸门**：它本身不会泄漏——存为 Worker secret、
+> 不进仓库与响应、比较是常量时间——但它是**长期有效的静态口令**，没有过期与自动轮换。客户端会把它放在
+> 当前标签页的 sessionStorage 里，任何 XSS 都能读走；代码里的失败锁定只活在单个 isolate，挡不住多 IP
+> 轮换的爆破，安全性因此完全取决于熵。所以：用 `openssl rand -base64 32` 生成、只通过
+> `wrangler secret put` 下发、怀疑泄露立即轮换；`workers_dev` 与 `preview_urls` 保持关闭。
+> 具体接法与字段见部署手册第三节。
+
 ---
 
 ## 开发与核对
