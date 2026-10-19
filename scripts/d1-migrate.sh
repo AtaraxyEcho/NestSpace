@@ -159,7 +159,19 @@ if [ "$BASELINE" -eq 0 ] && [ -z "$applied" ] && sql_command "SELECT name FROM s
 fi
 
 record() {
-  sql_command "INSERT OR REPLACE INTO $TRACK_TABLE (name) VALUES ('$1');" > /dev/null
+  local output
+  output="$(sql_command "INSERT OR REPLACE INTO $TRACK_TABLE (name) VALUES ('$1');")"
+  # 登记失败不能静默：下次运行会重跑该迁移，0002 这类 INSERT OR REPLACE 会覆盖编辑过的种子行
+  printf '%s' "$output" | grep -q '"success": *true'
+}
+
+record_or_fail() {
+  local name="$1"
+  if record "$name"; then return 0; fi
+  echo "✗ 已应用但登记失败（$name；下次会重跑该迁移，0002 等覆盖型迁移有丢数据风险）"
+  failed=$((failed + 1))
+  failed_list="$failed_list$name"
+  return 1
 }
 
 # 输出文件里"目标列尚不存在"的 ADD COLUMN 语句（用于部分应用后的定向补齐）
@@ -192,19 +204,23 @@ run_migration() {
   output="$(cd "$FRONTEND_DIR" && wrangler d1 execute "$DB_NAME" --"$SCOPE" --file="../migrations/$name" 2>&1)"
 
   if printf '%s' "$output" | grep -q '"success": *true'; then
-    record "$name"
-    echo "✓ 已执行"
-    executed=$((executed + 1))
-    return 0
+    if record_or_fail "$name"; then
+      echo "✓ 已执行"
+      executed=$((executed + 1))
+      return 0
+    fi
+    return 1
   fi
 
   if printf '%s' "$output" | grep -qiE 'duplicate column name|already exists'; then
     load_schema
     if migration_structurally_applied "$file"; then
-      record "$name"
-      echo "· 结构已存在，补记录"
-      recorded=$((recorded + 1))
-      return 0
+      if record_or_fail "$name"; then
+        echo "· 结构已存在，补记录"
+        recorded=$((recorded + 1))
+        return 0
+      fi
+      return 1
     fi
     # 部分应用（例如整文件两条 ADD COLUMN、只缺其中一条时）：
     # 整文件重跑会因已存在的列报错并整体回滚，因此改为逐条补跑缺失语句
@@ -216,10 +232,12 @@ run_migration() {
       done <<< "$missing"
       load_schema
       if migration_structurally_applied "$file"; then
-        record "$name"
-        echo "· 部分应用，已补齐缺失列"
-        recorded=$((recorded + 1))
-        return 0
+        if record_or_fail "$name"; then
+          echo "· 部分应用，已补齐缺失列"
+          recorded=$((recorded + 1))
+          return 0
+        fi
+        return 1
       fi
     fi
     echo "✗ 失败（缺少：$(missing_targets "$file")）"
@@ -243,6 +261,11 @@ recorded=0
 healed=0
 failed=0
 failed_list=""
+pending=0
+pending_list=""
+unverified=0
+unverified_list=""
+sawPending=0
 
 while IFS= read -r file; do
   name="$(basename "$file")"
@@ -265,11 +288,29 @@ while IFS= read -r file; do
 
   if [ "$BASELINE" -eq 1 ]; then
     if migration_structurally_applied "$file"; then
-      record "$name"
-      echo "· 结构已在，登记为已应用"
-      recorded=$((recorded + 1))
+      # 前面还有结构未落地的文件时，不能把后面的纯数据迁移登记成"已应用"：
+      # 新库上跑 --baseline 会把 0002 种子登记掉，下一次正常执行跳过它 ⇒ 空馆藏。
+      if [ -z "$(migration_targets "$file")" ] && [ "$sawPending" -eq 1 ]; then
+        echo "· 纯数据迁移，但前面还有未落地的结构；不登记"
+        pending=$((pending + 1))
+        pending_list="$pending_list$name "
+        continue
+      fi
+      if record_or_fail "$name"; then
+        echo "· 结构已在，登记为已应用"
+        recorded=$((recorded + 1))
+        # 纯数据迁移没有可核对的结构目标：基线只能登记文件名，必须明说
+        if [ -z "$(migration_targets "$file")" ]; then
+          echo "  ⚠ 无可核对结构（纯数据迁移），基线只登记文件名，不代表数据已写入"
+          unverified=$((unverified + 1))
+          unverified_list="$unverified_list$name "
+        fi
+      fi
     else
-      echo "· 结构缺失，未登记（正常执行时会真正执行它）"
+      echo "· 结构缺失，未登记"
+      sawPending=1
+      pending=$((pending + 1))
+      pending_list="$pending_list$name "
     fi
     continue
   fi
@@ -283,6 +324,17 @@ if [ "$failed" -gt 0 ]; then
   echo "失败文件："
   printf '  - %s\n' $failed_list
   exit 1
+fi
+if [ "$pending" -gt 0 ]; then
+  echo "还有 $pending 个迁移的结构未落地：$pending_list" >&2
+  echo "它们没有被登记。请正常执行（不要用 --baseline）后再确认。" >&2
+  exit 1
+fi
+if [ "$unverified" -gt 0 ]; then
+  echo "⚠ 以下纯数据迁移没有可核对的结构目标，基线只登记了文件名：$unverified_list"
+  echo "  若它们是种子/回填数据，请确认确实执行过；这次基线不代表数据已就绪。"
+  echo "结构核对完成（数据迁移未核对）。"
+  exit 0
 fi
 
 echo "全部迁移已就绪。"
