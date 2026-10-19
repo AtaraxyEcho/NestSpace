@@ -968,19 +968,20 @@ assert.match(
 // 控制台在"已被 Access 放行、没输过口令"时是纯 Cookie 认证，跨站页面发出的 text/plain 简单请求
 // 也会带上 CF_Authorization；要求 application/json 之后，跨站表单发不出这个类型。
 // 这条能真跑：把 Worker 当 Hono app 直接请求，用一个只回 changes=0 的 DB 桩（不碰真库）。
-const app = (await import(ROUTE_URL)).default
+const worker = (await import(ROUTE_URL)).default
 const gateEnv = {
   ADMIN_SECRET_KEY: 'gate-key',
   DB: { prepare: () => ({ bind: () => ({ run: async () => ({ meta: { changes: 0 } }) }) }) },
 }
+// 入口的默认导出是 { fetch, scheduled }（scheduled 负责每日清理访问索引）；
+// 测试直接调用 fetch，等价于 Hono 的 app.request，但不依赖它挂在默认导出上。
 const put = (contentType) =>
-  app.request(
-    'http://gate/api/admin/projects/001',
-    {
+  worker.fetch(
+    new Request('http://gate/api/admin/projects/001', {
       method: 'PUT',
       headers: { 'Content-Type': contentType, Authorization: 'Bearer gate-key' },
       body: '{"name":"x"}',
-    },
+    }),
     gateEnv,
   )
 const plainRes = await put('text/plain')

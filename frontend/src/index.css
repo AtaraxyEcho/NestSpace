@@ -187,6 +187,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .header-tools { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
 .header-tools .volume { font-size: 10px; letter-spacing: 0.16em; color: var(--ink-tertiary); }
+.header-tools .header-github {
+  display: inline-flex; align-items: center; gap: 4px;
+  min-height: 44px; padding: 0 6px;
+  color: var(--ink-secondary); text-decoration: none;
+  font-size: 10.5px; letter-spacing: 0.14em;
+  transition: color 200ms ease;
+}
+.header-tools .header-github:hover { color: var(--accent-text); }
+.header-tools .header-github span { font-size: 9px; }
 .header-tools button {
   min-width: 44px; height: 44px; border: 0; border-left: 1px solid var(--line-default);
   background: transparent; font: inherit; font-size: 10.5px; letter-spacing: 0.14em; cursor: pointer;
@@ -1001,6 +1010,51 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .admin-stats strong { display: block; margin: 22px 0 12px; font: 500 42px var(--font-mono); letter-spacing: -.06em; }
 .admin-stats .status-word { margin-top: 29px; font-size: 20px; letter-spacing: .04em; color: #60765c; }
 .admin-overview-grid { display: grid; grid-template-columns: 1.65fr 1fr; gap: 18px; margin-top: 18px; }
+/* 访问统计：数据卡沿用 .admin-stats，曲线/维度/事件在这里补齐 */
+.visit-range { display: flex; gap: 6px; }
+.visit-range button {
+  min-height: 44px; padding: 0 14px; border: 1px solid #c6c6bd; background: transparent;
+  color: #666b61; cursor: pointer; font: 9px var(--font-mono); letter-spacing: .08em;
+}
+.visit-range button.active { border-color: #263126; background: #263126; color: #f4f3ee; }
+.visit-stats { margin-bottom: 18px; }
+.visit-grid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; }
+.visit-note { font: 8px var(--font-mono); letter-spacing: .08em; color: #85887f; }
+.visit-bars { height: 220px; padding: 22px 20px 16px; display: flex; align-items: flex-end; gap: 4px; }
+.visit-bar { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; gap: 6px; }
+.visit-bar-track { flex: 1; display: flex; align-items: flex-end; }
+.visit-bar-track i { width: 100%; min-height: 2px; background: #8ea189; }
+.visit-bar small { min-height: 10px; text-align: center; font: 7px var(--font-mono); color: #85887f; white-space: nowrap; }
+.visit-list { list-style: none; margin: 0; padding: 0; }
+.visit-list li { min-height: 52px; padding: 10px 22px; display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; align-items: center; border-top: 1px solid #dedcd5; }
+.visit-list li:first-child { border-top: 0; }
+.visit-list strong { font-size: 12px; }
+.visit-list small { font: 8px var(--font-mono); color: #85887f; }
+.visit-list em { grid-column: 2; grid-row: 1 / 3; font: 500 17px var(--font-mono); font-style: normal; }
+.visit-dims { margin-top: 18px; }
+.visit-dim-card { padding: 22px 24px; border: 1px solid #c8c7bf; background: #f4f3ee; }
+.visit-dim-card h3 { margin: 0 0 14px; font-size: 16px; }
+.visit-dim-card dl { margin: 0; }
+.visit-dim-card dl > div { min-height: 28px; display: flex; justify-content: space-between; gap: 12px; align-items: center; border-top: 1px solid #e3e1da; }
+.visit-dim-card dl > div:first-child { border-top: 0; }
+.visit-dim-card dt { font-size: 11px; color: #5f635a; }
+.visit-dim-card dd { margin: 0; font: 500 11px var(--font-mono); }
+.visit-hours-panel, .visit-events-panel { margin-top: 18px; }
+.visit-hours { height: 120px; padding: 16px 20px 12px; display: flex; align-items: flex-end; gap: 3px; }
+.visit-hour { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; gap: 5px; }
+.visit-hour-track { flex: 1; display: flex; align-items: flex-end; }
+.visit-hour-track i { width: 100%; min-height: 2px; background: #b1bfac; }
+.visit-hour small { min-height: 9px; text-align: center; font: 7px var(--font-mono); color: #85887f; }
+.visit-events { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.visit-events > article { padding: 18px 22px; border-top: 1px solid #dedcd5; }
+.visit-events article > header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+.visit-events article > header strong { font-size: 12px; }
+.visit-events article > header span { font: 500 16px var(--font-mono); }
+.visit-events ul { list-style: none; margin: 0; padding: 0; }
+.visit-events li { min-height: 26px; display: flex; justify-content: space-between; gap: 12px; align-items: center; font-size: 10px; color: #666b61; }
+.visit-events li em { font-style: normal; font: 500 10px var(--font-mono); color: #4f544b; }
+.visit-optout { margin-top: 18px; }
+.visit-optout > p { margin: 0 0 18px; color: #777b70; font-size: 12px; line-height: 1.7; }
 .admin-panel { border: 1px solid #c8c7bf; background: #f4f3ee; }
 .admin-panel > header { min-height: 84px; padding: 20px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #d4d2ca; }
 .admin-panel > header h2 { margin: 5px 0 0; font-size: 21px; }
@@ -1067,6 +1121,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 /* 同步范围勾选卡：默认全选（等价于以前的"全表同步"），但把"只刷这几个"变成可能 */
 .sync-scope-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .sync-scope-head h2 { margin: 4px 0 0; font-size: 19px; }
+.sync-scope-limit { display: block; margin-top: 6px; color: #898c84; font: 10px var(--font-mono); }
 .sync-scope-quick { display: flex; gap: 6px; flex: 0 0 auto; }
 .sync-scope-quick button { min-height: 30px; padding: 0 12px; border: 1px solid #bfc0b8; background: transparent; cursor: pointer; font-size: 11px; }
 .sync-scope-quick button:hover { background: #eeeee8; }
@@ -1287,6 +1342,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .source-notice { top: 64px; }
   .site-header nav { display: none; }
   .header-tools { gap: 4px; }
+  .header-tools .volume { display: none; }
   .spiral-card-wrap { width: 92vw; height: 76vh; }
   .specimen-card { grid-template-rows: 44px 1fr 34px; }
   .card-topline, .card-footer { padding: 0 16px; letter-spacing: .12em; font-size: 7px; }
@@ -1409,7 +1465,7 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .admin-stats { gap: 9px; }
   .admin-stats article { min-height: 142px; padding: 17px; }
   .admin-stats strong { font-size: 34px; }
-  .admin-overview-grid, .settings-grid, .content-editor-grid, .sync-layout { grid-template-columns: 1fr; }
+  .admin-overview-grid, .settings-grid, .content-editor-grid, .sync-layout, .visit-grid { grid-template-columns: 1fr; }
   .footer-preview-cols { grid-template-columns: 1fr; }
   .project-toolbar { flex-wrap: wrap; }
   .search-field { max-width: none; flex-basis: 100%; }
@@ -1673,4 +1729,13 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
    它是装饰性的，站名在标头里另有一份，所以窄窗直接收起，不挤卡片。 */
 @media (max-width: 1400px) {
   .ambient-mark { display: none; }
+}
+
+/* 320px 窄屏：页头要同时容纳 logo、GitHub、语言/主题。收掉品牌副题与工具间距，
+   GitHub 文字保留（不隐藏入口）；两枚 44px 按钮与 logo 仍在可用宽度内。 */
+@media (max-width: 380px) {
+  .site-header { padding: 0 12px; }
+  .header-tools { gap: 0; }
+  .header-tools .header-github { padding: 0 2px; font-size: 9px; letter-spacing: .08em; }
+  .wordmark span { display: none; }
 }

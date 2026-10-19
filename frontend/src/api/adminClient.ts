@@ -4,12 +4,19 @@ import { mergeSiteSettings } from '../data/defaultSiteSettings'
 import { readSession, writeSession, clearSession } from '../utils/safeStorage'
 
 const TOKEN_KEY = 'nestspace_admin_secret'
+// 本次标签页的内存副本：sessionStorage 被禁用时，登录成功的口令仍然要能用于后续请求。
+// 否则"验证成功→立刻 403"（getAdminToken 读回空串），管理端在隐私模式/企业策略下完全不可用。
+let memoryToken = ''
 
 export function getAdminToken(): string {
-  return readSession(TOKEN_KEY)
+  if (memoryToken) return memoryToken
+  const stored = readSession(TOKEN_KEY)
+  if (stored) memoryToken = stored
+  return stored
 }
 
 export function setAdminToken(token: string) {
+  memoryToken = token
   if (token) {
     writeSession(TOKEN_KEY, token)
   } else {
@@ -365,5 +372,150 @@ export async function deleteAdminProject(id: string): Promise<{ success: boolean
     return { success: true }
   } catch (err: any) {
     return { success: false, error: `网络异常: ${err.message}` }
+  }
+}
+
+export type VisitStatBucket = { value: string; pv: number }
+
+export type VisitStats = {
+  generatedAt: string
+  range: { days: number; since: string; today: string }
+  totals: {
+    pv: number
+    uv: number
+    todayPv: number
+    todayUv: number
+    rangePv: number
+    rangeUv: number
+    adminPv: number
+  }
+  daily: { day: string; pv: number; uv: number }[]
+  pages: { surface: string; ref: string; pv: number }[]
+  dims: {
+    country: VisitStatBucket[]
+    device: VisitStatBucket[]
+    lang: VisitStatBucket[]
+    source: VisitStatBucket[]
+  }
+  hours: { hour: number; pv: number }[]
+  events: {
+    event: string
+    total: number
+    items: { method: string; host: string; ref: string; count: number }[]
+  }[]
+}
+
+/** 管理端读取访问统计；`days` 只影响曲线与分布窗口，累计值始终是全量 */
+export async function fetchVisitStats(
+  days = 30,
+): Promise<{ success: boolean; data?: VisitStats; error?: string }> {
+  try {
+    const params = new URLSearchParams({ days: String(days) })
+    const res = await fetch(`/api/admin/visits?${params.toString()}`, {
+      headers: getAuthHeaders(),
+    })
+
+    clearTokenIfUnauthorized(res.status)
+    const json: any = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      return { success: false, error: json?.error || `加载失败: HTTP ${res.status}` }
+    }
+    // 2xx 不代表形状正确（204、代理 HTML、半截 JSON 都会走到这里）。
+    // 面板会直接解引用 totals/dims/daily/pages/events，先校验再交出去，
+    // 否则一次异常响应就把整个管理端白屏。
+    const dims = json?.dims
+    if (
+      !json ||
+      typeof json !== 'object' ||
+      !json.totals ||
+      typeof json.totals !== 'object' ||
+      !json.range ||
+      typeof json.range !== 'object' ||
+      !dims ||
+      !Array.isArray(dims.country) ||
+      !Array.isArray(dims.device) ||
+      !Array.isArray(dims.lang) ||
+      !Array.isArray(dims.source) ||
+      !Array.isArray(json.daily) ||
+      !Array.isArray(json.pages) ||
+      !Array.isArray(json.hours) ||
+      !Array.isArray(json.events)
+    ) {
+      return { success: false, error: '访问统计返回了无法识别的数据（迁移或代理异常）' }
+    }
+
+    // 顶层数组存在不代表每一项都能解引用：daily:[null] 之类的半截响应会让面板白屏。
+    // 这里统一归一化，坏项被过滤/补默认值，渲染层拿到的始终是完整形状。
+    const raw = json as any
+    const num = (value: unknown): number =>
+      typeof value === 'number' && Number.isFinite(value) ? value : 0
+    const text = (value: unknown): string => (typeof value === 'string' ? value : '')
+    const objects = (value: unknown): Record<string, any>[] =>
+      (Array.isArray(value) ? value : []).filter(
+        (entry): entry is Record<string, any> =>
+          Boolean(entry) && typeof entry === 'object',
+      )
+    const data: VisitStats = {
+      generatedAt: text(raw.generatedAt),
+      range: {
+        days: num(raw.range.days) || days,
+        since: text(raw.range.since),
+        today: text(raw.range.today),
+      },
+      totals: {
+        pv: num(raw.totals.pv),
+        uv: num(raw.totals.uv),
+        todayPv: num(raw.totals.todayPv),
+        todayUv: num(raw.totals.todayUv),
+        rangePv: num(raw.totals.rangePv),
+        rangeUv: num(raw.totals.rangeUv),
+        adminPv: num(raw.totals.adminPv),
+      },
+      daily: objects(raw.daily).map((entry) => ({
+        day: text(entry.day),
+        pv: num(entry.pv),
+        uv: num(entry.uv),
+      })),
+      pages: objects(raw.pages).map((entry) => ({
+        surface: text(entry.surface),
+        ref: text(entry.ref),
+        pv: num(entry.pv),
+      })),
+      dims: {
+        country: objects(raw.dims.country).map((entry) => ({
+          value: text(entry.value),
+          pv: num(entry.pv),
+        })),
+        device: objects(raw.dims.device).map((entry) => ({
+          value: text(entry.value),
+          pv: num(entry.pv),
+        })),
+        lang: objects(raw.dims.lang).map((entry) => ({
+          value: text(entry.value),
+          pv: num(entry.pv),
+        })),
+        source: objects(raw.dims.source).map((entry) => ({
+          value: text(entry.value),
+          pv: num(entry.pv),
+        })),
+      },
+      hours: objects(raw.hours).map((entry) => ({
+        hour: num(entry.hour),
+        pv: num(entry.pv),
+      })),
+      events: objects(raw.events).map((entry) => ({
+        event: text(entry.event),
+        total: num(entry.total),
+        items: objects(entry.items).map((item) => ({
+          method: text(item.method),
+          host: text(item.host),
+          ref: text(item.ref),
+          count: num(item.count),
+        })),
+      })),
+    }
+    return { success: true, data }
+  } catch (err: any) {
+    return { success: false, error: `网络连接失败: ${err.message}` }
   }
 }

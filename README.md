@@ -1,15 +1,16 @@
 # NestSpace · 开源项目标本馆
 
 把仓库当标本陈列的静态站点：每件"标本"记录它做了什么、怎么装的、以及为什么能活下来。
-单个 Cloudflare Worker 同时提供公开只读 API、管理端 API 与静态资产，内容全部存在一个 D1 数据库的**一行**里。
+单个 Cloudflare Worker 同时提供公开只读 API、管理端 API 与静态资产；项目正文与站点文案存在 D1，
+按天聚合的访问台账也落在同一个库里。
 
 | 层 | 选型 |
 |---|---|
 | 前端 | React 19 + Vite 8 + Tailwind v4，构建为纯静态资产（`frontend/dist`） |
 | 后端 | Cloudflare Workers + Hono（`frontend/worker/index.ts`） |
-| 数据 | D1（边缘 SQLite）：`projects` 每件一行 + `site_settings` 全站文案一行 |
-| 管理端 | 与前台同源代码的 `#admin` 视图；生产部署在 `admin.<主域>`，由 Zero Trust Access 拦截 |
-| 度量 | Analytics Engine（**默认不绑定**，未启用时写入端点自动降级为 no-op） |
+| 数据 | D1（边缘 SQLite）：`projects` 每件一行 + `site_settings` 全站文案一行 + 按天聚合的 `visit_*` 访问台账 |
+| 管理端 | 与前台同源代码的 `/admin` 路径（旧 `#admin` 仍兼容）；生产部署在 `admin.<主域>`，由 Zero Trust Access 拦截 |
+| 度量 | D1 访问台账（管理端「访问统计」：累计 PV/UV、来源、设备、语言、地域、时段、事件）；Analytics Engine 可选 |
 
 ---
 
@@ -24,13 +25,13 @@ cd frontend
 pnpm install --frozen-lockfile
 cp .dev.vars.example .dev.vars
 # 编辑 .dev.vars：ADMIN_SECRET_KEY 填 `openssl rand -base64 32` 的输出。
-# 留空 = 管理端一律 401（fail-closed），公开站不受影响。
+# 留空 = 管理端 fail-closed：无凭据 401、凭据无效 403；公开站不受影响。
 ```
 
 回到仓库根目录：
 
 ```bash
-bash scripts/d1-migrate.sh local    # 首次执行会自建本地库，按序跑 0001–0014（含 4 件演示标本）
+bash scripts/d1-migrate.sh local    # 首次执行会自建本地库，按序跑 0001–0016（含 4 件演示标本）
 cd frontend
 pnpm run build                      # Worker 的资产目录指向 dist，必须先构建才取得到首页
 npx wrangler dev                    # http://localhost:8787
@@ -61,6 +62,7 @@ npx wrangler dev                    # http://localhost:8787
 | 06 项目管理 | 每件标本的增删改与排序 |
 | 07 GitHub 同步 | 按编号选择范围拉取仓库指标与文档（勾选后连同 README 里的图一起提取预览图） |
 | 08 站点设置 | 站点信息、展示偏好（语言 / 主题 / 开关）、SEO 标题与描述、ICP 备案号、域名只读信息 |
+| 09 访问统计 | 累计/近 7·30·90 天 PV·UV、热门页面、来源/设备/语言/地域、时段分布、行为事件与本设备排除开关 |
 
 两条容易踩的规则：
 
@@ -76,7 +78,7 @@ npx wrangler dev                    # http://localhost:8787
 ```bash
 cd frontend
 pnpm run typecheck    # 前端 + Worker 两套 tsconfig
-pnpm test             # 16 个闸门：纯函数、不联网、不起服务
+pnpm test             # 17 个闸门：纯函数、不联网、不起服务
 pnpm run build
 ```
 
@@ -112,18 +114,30 @@ bash scripts/usage-probe.sh     # 自己起 8898 的 dev、自己收尾，只杀
 
 ---
 
-## 度量（默认关闭）
+## 度量（D1 访问台账）
 
 `POST /api/usage` 接受六个事件（`pageview` / `deck` / `specimen_open` / `outbound` / `imgfail` / `dirimport`），
-只收白名单内的名字与形态，其余一律拒绝。Analytics Engine 绑定**默认注释掉**：
-未启用 AE 的账号部署会在 `wrangler deploy` 阶段直接失败（`code 10089`），而本地 dev 模拟绑定、测不出来。
-要收数就在控制台启用 AE（免费额度 10 万写入/天），把 `wrangler.toml` 里那三行加回来再部署，然后：
+只收白名单内的名字与形态，其余一律拒绝。
 
-```bash
-npx wrangler analytics query nestspace_usage --since 7d
-```
+落点是 **D1 访问台账**（迁移 `0016_add_visit_ledger.sql`）：按天聚合、永久保留，不存单次访问行。
 
-转化率 = `outbound ÷ specimen_open`（按 `r` 分组看哪件作品带走点击，按 `m` 分组看哪一段版面在带量）。
+- **累计访问次数** = `visit_day.pv` 求和；**累计独立访客** = `visit_identity` 行数。
+- 每日 UV 由浏览器端一个随机匿名 ID（localStorage）去重，服务端用 HMAC 派生后才落库；
+  不存 IP/UA/来源 URL。清缓存、隐私模式、多设备会各算一个新访客——这是 UV 的固有误差。
+- 另存每日来源类别 / 设备档 / 语言 / 国家 / 24 小时分布，以及 `deck`、`specimen_open`、
+  `outbound`、`imgfail`、`dirimport` 的计数。
+- 管理端左侧「访问统计」查看；页底有 **「本设备不计入访问」** 开关
+  （localStorage；生产环境用一枚跨子域的功能性偏好 cookie 同步到公开站，不含任何标识）。
+- `/admin` 的浏览单独计，不进受众口径；会跑 JS 的爬虫按 UA 剔除。
+
+Analytics Engine 绑定仍是**可选的第二通道**（默认注释；未启用 AE 的账号部署会 `code 10089`）。
+不开也不影响 D1 台账。`/api/usage` 的限流走免费代码路径：isolate 内存 +
+Cloudflare Cache API 的分钟/日桶（同 colo 共享、不占 D1/KV 配额），不依赖 WAF。
+
+**部署顺序**：先 `bash scripts/d1-migrate.sh`（本地）→ `bash scripts/d1-migrate.sh remote` → 再部署新 Worker。
+顺序反了不会 500，但 `/api/admin/visits` 会明确返回 503「表尚未迁移」，不会把 0 当成"没有访问"。
+
+转化率 = `outbound ÷ specimen_open`；按访客口径也可以看 `outbound ÷ 窗口 UV`。
 
 ---
 
@@ -131,8 +145,8 @@ npx wrangler analytics query nestspace_usage --since 7d
 
 ```text
 frontend/            # 唯一的工作区：src/ 前端 · worker/ 后端 · test/ 闸门 · public/ 静态资产（含 _headers）
-migrations/          # D1 建表与种子，按文件名顺序执行（0001–0014）
-scripts/             # d1-migrate.sh · usage-probe.sh · probe-bilingual-payload.mjs · make-brand-logos.py
+migrations/          # D1 建表与种子，按文件名顺序执行（0001–0016）
+scripts/             # d1-migrate.sh · usage-probe.sh · probe-visit-ledger.mjs · probe-bilingual-payload.mjs · make-brand-logos.py
 docs/                # DEPLOYMENT_GUIDE.md（部署与安全运营手册）· ARCHITECTURE_PLAN.md · plans/
 ```
 

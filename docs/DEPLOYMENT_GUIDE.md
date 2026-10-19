@@ -35,7 +35,9 @@ NestSpace/
 │   │   │                         #   safeStorage.ts 浏览器存储的安全读写（存储被禁时不白屏）、
 │   │   │                         #   siteHost.ts 前后台互跳地址推导（admin.X ↔ X，代码里不写死域名）、
 │   │   │                         #   sectionCopy.ts 栏目标题与页面文案的读侧判据（四处消费者同源）、
-│   │   │                         #   siteRoute.ts 路径↔路由的判据（前端渲染与 Worker 的 canonical 同一份）
+│   │   │                         #   siteRoute.ts 路径↔路由的判据（前端渲染与 Worker 的 canonical 同一份）、
+│   │   │                         #   visitStats.ts 访问统计分类判据（+8 切日/设备/语言/来源/国家）、
+│   │   │                         #   markdownUrls.ts Markdown 链接协议判据（拒绝 javascript/协议相对/反斜杠变体）
 │   │   ├── App.tsx               # 动态数据渲染与安全管理端
 │   │   ├── main.tsx              # React 入口（挂载 #root，引入 index.css）
 │   │   └── index.css             # 全局样式与设计 token（Tailwind v4 导入 + 主题变量）
@@ -44,7 +46,7 @@ NestSpace/
 │   ├── vite.config.ts            # Vite + Tailwind v4 + Figma Make 插件；dev 下把 /api 代理到本地 wrangler
 │   ├── tsconfig.json             # 前端 TS 配置（worker/tsconfig.json 单独一套）
 │   ├── .figma/make/site.json     # 站点标题 / 描述 / 收录开关（构建期注入 HTML 头部）
-│   ├── test/                     # 单元测试（纯函数 / 前后端判据一致性；pnpm test 依次跑这十六个文件）
+│   ├── test/                     # 单元测试（纯函数 / 前后端判据一致性；pnpm test 依次跑这十七个文件）
 │   │   ├── jwt_verify.test.mjs   # JWT 校验与 Access 白名单
 │   │   ├── demo_url.test.mjs     # 演示地址规范化
 │   │   ├── sync_update.test.mjs  # GitHub 同步字段归属 / 时间线生成 / 代码列 ⊆ 迁移列（17f）/ 站点设置三份清单对齐（18）
@@ -60,8 +62,9 @@ NestSpace/
 │   │   ├── site_host.test.mjs    # 前后台互跳地址推导（admin.X ↔ X）/ 出货源码不写死域名与账号 / canonical 按 origin 补全
 │   │   ├── shell_guards.test.mjs # 首屏主题（深色两份取值一致 + 注入）与浏览器存储不可用时不白屏
 │   │   ├── route_path.test.mjs   # 路径↔路由（/project/<id>、/admin、未知路径回首页、旧哈希兼容、canonical 只给真路由）
+│   │   ├── visit_stats.test.mjs  # 访问统计分类判据（+8 切日 / 设备与语言分档 / 来源只归类 / 国家码）
 │   │   └── test_chain.test.mjs   # 闸门注册链与 test/ 目录一一对应（漏登记的闸门会在 CI 里静默不跑）
-│   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（Analytics Engine 数据集默认注释、按需开启）
+│   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（Analytics Engine 数据集可选、默认注释）
 │   └── package.json
 │
 ├── migrations/                   # Cloudflare D1 边缘数据库建表与种子数据
@@ -83,14 +86,17 @@ NestSpace/
 │   │                             # 详情页「挑战 / 方案」两段小标题（原先写死在组件里，现由管理端配置）
 │   ├── 0014_add_section_copy.sql
 │   │                             # 栏目与页面文案槽位（section_copy_json：首页描述行 + 详情页三处标题）
-│   └── 0015_fill_seed_narrative.sql
-│                                 # 纯数据：给种子的「挑战 / 方案」补上双语 JSON（只在列为空、且是种子行时）
+│   ├── 0015_fill_seed_narrative.sql
+│   │                             # 纯数据：给种子的「挑战 / 方案」补上双语 JSON（只在列为空、且是种子行时）
+│   └── 0016_add_visit_ledger.sql
+│                                 # 访问台账（按天聚合 + 永久身份 + 90 天去重索引 + 哈希盐）
 │
-├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十六个闸门 + 构建（见第四节末）
+├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十七个闸门 + 构建（见第四节末）
 │
 ├── scripts/                      # 运维脚本
 │   ├── d1-migrate.sh             # 一键按序执行全部 D1 迁移（local / remote，可反复执行）
-│   ├── usage-probe.sh            # 接口探针：起 8898 的本地 Worker，自收进程（埋点 / 图片 / 双语写读）
+│   ├── usage-probe.sh            # 接口探针：起 8898 的本地 Worker，自收进程（埋点 / 图片 / 双语写读 / 访问台账）
+│   ├── probe-visit-ledger.mjs    # 访问台账实测：PV/UV 去重、爬虫与管理端排除、跨站拒绝、事件计数（探针第 6 节）
 │   ├── probe-bilingual-payload.mjs # 生成双语写读往返的请求载荷（供探针第 4 节 --data-binary 用）
 │   └── make-brand-logos.py       # 由 frontend/design/ 原件派生 frontend/public/brand/ 的 logo 与浏览器图标
 │
@@ -110,10 +116,10 @@ NestSpace/
 ## 二、 部署到 Cloudflare Workers（步骤指引）
 
 本项目为 **Workers 形态**：单一 Worker（`worker/index.ts`，Hono）+ 静态资产（`dist/`）+ D1。
-`/api/*`、`/` 与 `/index.html` 由配置中的 `run_worker_first` 优先进入 Worker，其余路径走静态资产
-（未知路径回退 index.html）。`[assets]` 里的 `binding = "ASSETS"` **不可删除**——Worker 依赖它取回首页
-HTML 做 SEO 注入（见第六节）；删掉会导致首页 503。注意：只有 `/` 会被改写头部，深链（如 `/some/path`
-由 SPA 兜底）仍返回构建产物原文。
+`/api/*`、`/`、`/index.html`、`/project/*` 与 `/admin` 由配置中的 `run_worker_first` 优先进入 Worker
+（深链也必须进来，canonical / og:url / 主题标记都在 Worker 的注入里）；其余未知路径走静态资产并回退
+`index.html`（SPA 兜底）。`[assets]` 里的 `binding = "ASSETS"` **不可删除**——Worker 依赖它取回首页
+HTML 做 SEO 注入（见第六节）；删掉会导致首页 503。
 
 ### 1. 创建 Cloudflare D1 数据库（免费）
 在终端运行：
@@ -140,12 +146,12 @@ database_id = "xxxx-xxxx-xxxx-xxxx"
 bash scripts/d1-migrate.sh remote
 ```
 
-脚本会按 `0001 → 0014` 的文件名顺序逐条执行、打印每条的 `✓ 已执行 / · 已记录，跳过 / ✗ 失败`，
+脚本会按 `0001 → 0016` 的文件名顺序逐条执行、打印每条的 `✓ 已执行 / · 已记录，跳过 / ✗ 失败`，
 并在结尾给出汇总；**已经应用过的迁移（重复的 ADD COLUMN、已存在的表）会被识别为跳过而不是报错，
 因此可以反复执行**。只有真正的错误（SQL 语法、约束冲突等）才会以非 0 退出并点名失败文件。
 需要指定库名时：`bash scripts/d1-migrate.sh remote nestspace-prod`。
 
-**顺序要求**：迁移必须先于 Worker 代码生效。新版 Worker 引用了这几批新列，任何一批没先落到生产库就部署代码都会失败——**写路径由 `writeColumnErrorResponse` 翻成 400 并点名缺的那一列**（项目新建/更新、站点文案、逐仓库导入、同步的逐行失败都接了），**读路径用的是显式列清单，缺列仍是 500**。（`0015` 是纯数据迁移：不引入新列、代码不依赖它，单独跑或补跑都不会让任何请求失败。）
+**顺序要求**：迁移必须先于 Worker 代码生效。新版 Worker 引用了这几批新列，任何一批没先落到生产库就部署代码都会失败——**写路径由 `writeColumnErrorResponse` 翻成 400 并点名缺的那一列**（项目新建/更新、站点文案、逐仓库导入、同步的逐行失败都接了），**读路径用的是显式列清单，缺列仍是 500**。（`0015` 是纯数据迁移：不引入新列、代码不依赖它，单独跑或补跑都不会让任何请求失败。`0016` 是新建表：公开站不受影响，但 `/api/usage` 的统计写入会被静默丢弃、`/api/admin/visits` 会明确返回 503 并点名 0016。）
 
 | 缺哪批 | 引用的代码位置 | 表现 |
 |---|---|---|
@@ -159,6 +165,7 @@ bash scripts/d1-migrate.sh remote
 | `0012` 标本协议 | 公开列表/详情的显式 SELECT（`license`）、管理端写路径与同步写路径 | `GET /api/projects` 每条都 500（首页与陈列空白），管理端保存项目同样 500 |
 | `0013` 详情页小标题 | `site_settings` 写白名单（`challenge_headline_*` / `solution_headline_*`） | 「04 详情页文案」保存报 **400 并点名缺的那一列**（读侧 `SELECT *`，只会静默回退内置文案） |
 | `0014` 栏目与页面文案 | `site_settings` 写白名单（`section_copy_json`） | 栏目文案卡保存报 **400 并点名 `section_copy_json`**；读侧同样静默回退内置标题，所以只有保存才暴露 |
+| `0016` 访问台账 | `/api/usage` 的 D1 写入、`GET /api/admin/visits` | 公开站与 204 行为不受影响；统计写入被静默丢弃，管理端「访问统计」明确 **503** 并点名 0016 |
 
 > ⚠️ **顺序是硬约束，而且 Git 自动构建不会替你把关**：第 4 节的 Workers Builds 是"push 即部署"，
 > 一旦你为了跑迁移而先 push 了代码，部署就已经发生了。正确顺序是
@@ -197,7 +204,7 @@ npx wrangler secret put GITHUB_TOKEN
    - **Root directory（根目录）**：`frontend`（Advanced settings 中设置，关键）
    - **Build command**：`npm run build`
    - **Deploy command**：保持默认 `npx wrangler deploy`（Workers 形态开箱即用）
-   - **Enable Preview builds**：开启
+   - **Enable Preview builds**：保持关闭（`frontend/wrangler.toml` 的 `preview_urls = false` 刻意不留预览入口；确需预览见下方安全说明，必须同时加 Access 且注意默认连同一个 D1）
    - **Protect with Cloudflare Access**：开启（保护 preview 部署，不影响公开生产站）
 3. D1 绑定由 `frontend/wrangler.toml` 声明，Git 构建自动生效，无需控制台手动绑定。
 
@@ -212,7 +219,7 @@ npx wrangler secret put GITHUB_TOKEN
 | Bearer `ADMIN_SECRET_KEY`（常量时间比较） | 代码层 | 一切未持密钥的调用，含 workers.dev / preview 等任意入口 |
 | Access JWT 签名校验（`Cf-Access-Jwt-Assertion` 头或 `CF_Authorization` Cookie） | 代码层 | 伪造身份头——明文头一律不信任，只认通过 RS256 签名验证的 JWT |
 | Zero Trust Access 边缘拦截 | 边缘层 | 让未认证请求根本到不了 Functions |
-| 鉴权失败限流 | 代码层 | 同一来源（按 `CF-Connecting-IP`）连续 10 次鉴权失败后返回 `429` 并带 `Retry-After: 600`，抑制在线口令爆破。计数器存在于 Worker isolate 内存中，属尽力而为的抑制手段，**不能替代强口令**，建议在 Cloudflare 侧叠加 WAF / Rate limiting 规则 |
+| 鉴权失败限流 | 代码层 | 同一来源（按 `CF-Connecting-IP`）连续 10 次鉴权失败后返回 `429` 并带 `Retry-After: 600`，抑制在线口令爆破。计数器活在 Worker isolate 内存里（每个机房各一份），属尽力而为的抑制手段，**不能替代强口令**；付费的 WAF / Rate limiting 规则不在本方案内（见下段的边界说明） |
 
 另有一条**防跨站写入的纵深**：控制台在"已被 Access 放行、没输过口令"时是**纯 Cookie 认证**
 （凭 `CF_Authorization`），此时一个跨站页面发出的简单请求也可能带上它。所以管理端**写操作要求
@@ -220,11 +227,15 @@ npx wrangler secret put GITHUB_TOKEN
 头的调用天然免疫 CSRF，因为跨站 JS 设不了这个头）。这条只有在 `CF_Authorization` 被设为
 `SameSite=None` 时才是必需的——但由于该属性由边缘下发、代码里看不到，索性一直开着。
 
-**代码层的三条按 IP 限流**（`worker/index.ts` 的 `createRateLimiter`）：`/api/usage` 120/分钟（超出静默 204，不打扰访客）、
+**代码层的按 IP 限流**（`worker/index.ts`）分两层：`createRateLimiter` 的 isolate 内存桶，加上
+`allowCachedRate` 用 Cloudflare Cache API 落的分钟/日桶（同 colo 内共享、免费、不占 D1/KV 配额）。
+`/api/usage` 120/分钟 + 1000/天（超出静默 204，不打扰访客）、`pageview` 另有一道 30/分钟（一次 pageview 要写 7–9 行 D1）、
 公开读接口 `/api/projects`（列表与详情）与 `/api/site-settings` 共用 240/分钟（超出 `429` + `Retry-After: 60`；一次浏览是这三条），
-`/api/img` 300/分钟（图片一页要十来张，给得更宽；被限的表现就是那张图裂掉，客户端有 `imgfail` 埋点兜着）。
-共同前提要说清楚：**计数只活在当前 isolate**——Cloudflare 会把请求散到很多 isolate 与机房，
-所以它挡的是"同一来源的脚本化连打"，不是分布式压力，后者只能靠边缘的速率限制规则（见第三节第 3 条）。
+`/api/img` 300/分钟（图片一页要十来张，给得更宽；被限的表现就是那张图裂掉，客户端有 `imgfail` 埋点兜着），
+HTML 240/分钟。
+共同前提要说清楚：**isolate 桶只活在当前实例，Cache API 桶只在同一个 colo 内共享且是"读改写"（会少计）**，
+所以这两层挡的是"同一来源的脚本化连打"，不是分布式压力。跨机房、IP 轮换的那一类要靠边缘速率规则，
+而那是付费项、不在本方案内 ⇒ 这条边界保持敞开，靠强口令 + Access + 只读公开接口 + 聚合表基数防线兜着。
 阈值都留了十倍以上余量，正常访客碰不到。此外，登录页在**没有 `admin.` 兄弟域**的环境
 （本地、IP 直连、`*.workers.dev` 预览域）会多出一条警示：那里没有 Access 那一层，后台只剩口令。
 
@@ -297,10 +308,9 @@ Zero Trust 应用只对**配置的自定义域名**生效。以下入口默认�
 1. **`nestspace.<你的子域>.workers.dev` 默认域名**：自定义域名上线后，在 Worker 的
    **Settings ➔ Domains & Routes** 中停用 workers.dev 域名；
    若需保留，则为该域名单独创建一个 Access 应用兜底。
-2. **Preview 部署**：导入向导的 **Protect with Cloudflare Access** 开关即为 preview
-   部署而设计（勾选后未认证者无法访问 preview URL）；若当时未勾选，在
-   **Settings ➔ Domains & Routes ➔ Preview URLs** 中补开。注意 preview 环境默认连接
-   同一个 D1 数据库。
+2. **Preview 部署**：仓库默认 `preview_urls = false` / `workers_dev = false`，不生成任何绕过自定义域名的入口
+   （README 已说明这是刻意的）。若你手动开启：必须给 preview 域名单独加 Access，并注意 preview 环境默认连接
+   **同一个 D1 数据库**——写操作会直接影响生产数据；要隔离就另建库。
 3. **速率限制（建议，先确认套餐）**：在 **Security ➔ WAF ➔ Rate limiting rules** 里配规则
    （例：1 分钟内每 IP 超过 60 次就质询或拦截；`/api/admin/*` 可以更严，如 1 分钟 10 次）。
    免费版**是否包含**这条规则各账号/时期并不一致——控制台里看得到就配上；看不到也不必为此升级套餐：
@@ -356,7 +366,7 @@ bash scripts/usage-probe.sh
 
 ### CI（`.github/workflows/ci.yml`）
 
-push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十六个纯函数闸门）、
+push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十七个纯函数闸门）、
 `pnpm run build`。用 **pnpm** 不是风格问题：仓库里只有 `pnpm-lock.yaml`，`npm ci` 会直接 ENOLOCK 失败。
 版本钉在 `frontend/.mise.toml` 的同一套（node 22 / pnpm 10.34.3）。
 
@@ -515,6 +525,12 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   （频率超限）**立即停止后续请求**，其余标本标记为"已跳过"而不是逐个白白重试；仓库列表接口
   最多取 3 页（300 个），超出时管理端会明确提示"仅列出最近更新的 N 个"；所有列表类查询统一
   带 `LIMIT 500` 安全阀（当前馆藏规模远低于该值）。
+  **每次调用最多处理 10 个标本；开启「同时抓取 README / Compose 文档」时最多 2 个**——
+  上限是从免费版 Workers **每次调用 50 个子请求**（GitHub fetch 与 D1 查询都计入）算出来的：
+  一行不开文档最坏 3 个（仓库 + releases + 写库），开文档最坏 20 个（README 中英/通用与两个
+  Compose 的候选路径逐个探测），故 10×3+2=32、2×20+2=42。超过就会在循环中途被平台掐断，
+  留下"已写几行、后面的行没有结果"的半更新状态；因此接口在**任何写入之前**返回 400，让管理端分批操作。
+  `frontend/test/sync_scope.test.mjs` 用导出的 `syncRowCost` 钉住这套算术，改动候选路径或上限都会红。
 - **同步的字段归属**（迁移 `0007/0008/0012` 之后）：
   - **GitHub 权威、每次覆盖**：`stars`、`updated`、`version`、`language`、`date`/`year`（仓库创建时间）、
     `metrics_json`（STARS / FORKS / OPEN ISSUES）、`features_json`（仓库 topics，前 4 个）、
@@ -769,46 +785,86 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   并标注「原文」；DEPLOYMENT tab 展示 dev/prod Compose 原文并可复制。详情页由 `ProjectRoute` 按 id 自行
   拉取，深链或刷新时先显示骨架、查不到则给出「未找到标本」页，不再闪回首页。
 
-## 七、 匿名使用度量（Analytics Engine，免费、无迁移；默认关闭）
+## 七、 访问台账（D1，永久聚合）与可选的 Analytics Engine
 
-改版前先回答一句"怎么知道有没有变好"。此前整站**零度量**，所有判断只能靠专家走查，所以这轮补了六个聚合事件。
+改版前整站**零度量**，所有判断只能靠专家走查，所以补了六个聚合事件；
+真正的持久落点是 **D1 访问台账（迁移 0016）**，管理端「访问统计」面板直接读它。
 
-- ⚠️ **默认不挂绑定（重要）**：`frontend/wrangler.toml` 里的 `[[analytics_engine_datasets]]` 是**注释掉的**。
-  该绑定要求账号先启用 Analytics Engine，未启用时 `wrangler deploy` 会直接失败
-  （`code 10089: You need to enable Analytics Engine`）——而本地 `wrangler dev` 是模拟绑定，测不出这个问题，
-  只在部署时才炸（本项目已踩过一次）。默认部署因此不带它，`/api/usage` 降级为 no-op、站点行为不变。
-  **要真正收数**：控制台启用 Analytics Engine（免费，10 万写入/天）后把三行取消注释再部署。
-- **为什么用 Analytics Engine 而不是新开 D1 表**：免费额度每天 10 万个数据点（约合每月 300 万）足够、**不需要数据库迁移**
-  （因此不涉及生产写库）、数据天然按时间分桶。数据集 `nestspace_usage`，绑定名 `METRICS`。
+- **存什么**：按天聚合的 PV/UV、页面（home/detail/admin × 标本编号）、来源类别 / 设备档 / 语言 /
+  国家 / 24 小时分布，以及六个事件的计数。**不存单次访问行、不存 IP/UA/来源 URL。**
+- **累计口径**：累计 PV = `visit_day.pv` 求和；累计 UV = `visit_identity` 行数（永久保留）。
+  每日 UV 快照在 `visit_day.uv`；`visit_day_visitor` 只是当天的去重索引，由 `wrangler.toml` 里
+  每日 03:17 UTC 的 cron（`scheduled` handler）清理 90 天前的行——清理只删"哪一天来过"的索引，
+  累计与日快照都不受影响。读接口不再承担清理写操作。
+- **访客标识**：浏览器在 localStorage 生成一个随机匿名 ID，随请求的 `v` 字段上报；
+  Worker 用 `visit_meta.hash_salt` 做 HMAC-SHA256 后才落库。清缓存、隐私模式、多设备会各算一个新访客。
+- **排除规则**：管理端自己的 `/admin` 浏览单独计数，不进 PV/UV/维度分布；会跑 JS 的爬虫按 UA 剔除。
+  管理端面板底部有 **「本设备不计入访问」** 开关：管理端在 `admin.<主域>`、公开站在 `<主域>`，
+  两边 localStorage 不互通，因此生产环境用一枚 `Domain=<主域>` 的**功能性偏好 cookie**
+  （值只有 `1`/删除，不含任何标识）让公开站也读到；本地/IP/无兄弟域时退回 localStorage。
+- **为什么不用 Analytics Engine 当主落点**：AE 只能写、不能从 Worker 读，要在自己的管理端展示
+  还得额外引 CF API token；D1 按天聚合后正常流量一天只有几十行。
+  ⚠️ **但每次 pageview 会写 7–9 行**（日聚合 + 页面 + 小时 + 四个维度 + 身份 + 去重索引）。
+  代码侧限流是**免费路径**：isolate 内存桶挡住同实例连打，Cloudflare Cache API 的分钟/日桶
+  在同一 colo 内共享、不占 D1/KV 配额（单 IP 日配额 1000 条 ≈ 最坏 9k 行，约日额度的 9%）。Cache API 不是全局原子计数
+  （可能被淘汰、并发读改写会少计），跨机房/IP 轮换的分布式压力仍超出免费代码侧的能力边界；
+  WAF 或 Durable Objects 是可选的进一步收紧项，**不配置也能上线**。
+  AE 绑定仍是**可选的第二通道**（默认注释；未启用 AE 的账号部署会 `code 10089`，本地 dev 测不出来）。
+- **部署顺序（硬前提）**：先本地、再远程，最后部署新 Worker：
+  ```bash
+  bash scripts/d1-migrate.sh
+  bash scripts/d1-migrate.sh remote
+  ```
+  新 Worker 先上而表未建时，`/api/admin/visits` 会返回 **503** 并点名 0016，
+  不会把 0 当成"没有访问"。
 - **收什么**（白名单在 `worker/index.ts` 的 `USAGE_EVENTS`，白名单外一律 **400**，`test/preview_rules.test.mjs` 会核对这份表）：
   | 事件 | 方式（`m`） | 回答的问题 |
   | --- | --- | --- |
   | `deck` | `view` / `thumb` / `plate` / `arrow` / `drag` / `key` / `zoom` | 观察台有没有让人看图、翻图；缩略图索引与放大被用到没有 |
   | `imgfail` | —（带图源主机名 `h`） | 图片加载失败率，分母用 `deck view`；哪个图源在坏 |
   | `dirimport` | `ok` / `ratelimited` / `notfound` / `error` | 批量导入到底用了多少次、卡在哪一步（对应"减少手工粘贴"这个诉求） |
-  | `pageview` | `home` / `detail` / `admin` | 哪个页面有人在看（首页与详情各自只记一次，不叠加） |
+  | `pageview` | `home` / `detail` / `admin` | 哪个页面有人在看；详情带标本编号 `r`，整段会话带同一个入口来源主机名 `s` |
   | `specimen_open` | `card` / `index` / `related` / `footer` | 标本是从哪一段被打开的（带标本编号 `r`） |
   | `outbound` | `github` / `demo` | 真的出站了没有（带标本编号 `r`）；转化率 = `outbound ÷ specimen_open` |
-- **不收什么**：IP、User-Agent、cookie、访客标识、项目 id、URL 查询串都不写。`/api/usage` 是**公开无鉴权**的，
-  因此带**按 IP 的粗限流**（每分钟 120 条，超出静默丢弃并返回 204，不给访客报错），主机名只收
-  `[a-z0-9.-]{1,63}` 形态，其余当没给。
+- **不收什么**：IP、原始 User-Agent、完整 URL 与查询串都不写；`v` 是随机匿名 ID，
+  `s` 只收主机名并在落库前归类成 direct / search / github / linkedin / social / other。
+  入口来源取 `document.referrer` 的主机名，**同站与子域互跳（`admin.X` ↔ `X`）一律算没有来源**，
+  否则站内翻页会被记成外部引流；判据在 `utils/visitStats.ts` 的 `entrySourceOf`（闸门 `test/visit_stats.test.mjs`），
+  会话内缓存在 sessionStorage 的 `nestspace_entry_source`（只存主机名或占位符 `-`，关标签页即消失，不参与身份识别）。
+  唯一的一枚 cookie 是上面说的退出统计偏好（值只有 `1`/删除），不参与身份识别。
+  `/api/usage` 是**公开无鉴权**的，带按 IP 的代码限流（isolate 内存 + Cache API 分钟/日桶：
+  通用 120/分钟、pageview 30/分钟、单 IP 日配额 1000 条；超出静默丢弃并返回 204，不给访客报错），
+  并要求浏览器侧的 `Sec-Fetch-Site` / `Origin` 为同源——
+  第三方页面无法直接用 sendBeacon 往台账灌数据；HTML 页面另有 240/分钟的宽松兜底。
+  主机名只收 `[a-z0-9.-]{1,63}` 形态，其余当没给。
+  > 诚实标注：UV 由客户端上报的匿名 ID 去重，公开端点理论上可伪造；这个数字用于自省，不是审计口径。
 - **前端怎么发**：`src/utils/usage.ts` 用 `navigator.sendBeacon`（页面正在卸载也能发出），
   没有 Beacon 时退到 `fetch(..., { keepalive: true, credentials: "omit" })`；**任何失败都静默吞掉**——
-  埋点不该产生用户可见的错误，绑定缺失时整条端点也照样返回 204。
-- **怎么看**（部署后，本地 dev 的数据不进远端数据集）：
-  ```bash
-  cd frontend
-  npx wrangler analytics query nestspace_usage --since 7d --limit 20
-  ```
-  子命令名随 wrangler 版本可能不同（旧版为 `wrangler analytics engine query`）；
-  也可以在 Cloudflare 控制台 → Analytics Engine Explorer → `nestspace_usage` 里按 `indexes[0]`（事件名）分组看。
-  > 诚实标注：本仓库**未在真实数据集上验证过查询命令的输出形态**（那需要一次 `wrangler deploy`，属线上动作）。
-  > 端点侧的写入与拒绝行为已在本地 `wrangler dev` 实测。
+  埋点不该产生用户可见的错误，D1 写不进去时端点也照样返回 204。
+- **怎么看**：管理端左侧「访问统计」支持 7 / 30 / 90 天窗口（累计值始终全量）；
+  本地验证跑 `bash scripts/usage-probe.sh`，第 6 节实测 PV/UV 去重、爬虫与管理端排除、事件计数。
+  AE 开启后仍可用 `npx wrangler analytics query nestspace_usage --since 7d` 作为旁路，
+  但不要把 AE 与 D1 的数字混在一起对账（两边的剔除规则不同）。
 - **workerd 的一条硬约束（踩过）**：Worker **入口模块的导出**只接受 handler 或函数，
   把数字常量（如 `export { PREVIEW_IMAGE_LIMIT }`）从入口再导出会让 workerd 直接启动失败：
   `Incorrect type for map entry 'PREVIEW_IMAGE_LIMIT': the provided value is not of type 'function or ExportedHandler'`。
   因此 `worker/index.ts` 只再导出 `sanitizeImageUrl`（函数）；上限的一致性改由闸门测试做**行为断言**
   （13 张必须被服务端 400，且话术里的数字取自那一个常量）。
+
+### 回滚与发布后核验
+
+- **Worker 回滚**：`npx wrangler rollback`（或控制台 Deployments → 选上一版 → Rollback）。
+- **迁移不回滚**：0016 是纯新增表，回滚 Worker 到上一版不影响数据；**不要为了"回滚干净"删表**，
+  否则累计台账与 90 天去重索引一起丢失（聚合表一删不可恢复）。
+- **回滚后检查 cron**：上一版本没有 `[triggers]`，回滚可能把每日清理任务一起带走。到
+  Worker → Settings → Triggers 确认 `17 3 * * *` 仍在；若不在，恢复新版后重新部署，
+  或在 D1 手工执行 `DELETE FROM visit_day_visitor WHERE day < date('now','-90 day')`。
+- **发布后核验**：
+  1. `GET /api/projects` 返回 200；
+  2. 管理端能登录，`GET /api/admin/visits?days=7` 返回 200；
+  3. 打开一次公开页，`/api/usage` 返回 204，管理端「访问统计」的今日 PV 增长；
+  4. 若 `/api/admin/visits` 返回 503，按提示先跑 0016，不要先找前端问题。
+- **本地/远程顺序**：本地迁移 → 远程迁移 → 部署；反序不会让公开站挂掉，但统计写入会被静默丢弃。
 
 ## 八、 品牌标 / 栏目顺序 / 双语叙述 / 同步范围
 
@@ -884,10 +940,12 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
 - **同步可以只挑几个标本**：`POST /api/admin/github-sync` 现在接受可选 `ids`（参数化 `IN` 列表）。
   - 语义：**省略 = 全表**（老行为不变）；**空数组 = 400 拒绝**，绝不退化成全表——
     那会变成"界面显示选了 0 个、实际把整个馆藏都刷了一遍"的假状态（闸门：`test/sync_scope.test.mjs`）。
-  - 未知 id 只是匹配不到，返回 200 + 空结果，不报错；一次上限 500 条（与 `QUERY_ROW_LIMIT` 同值）。
+  - 未知 id 只是匹配不到，返回 200 + 空结果，不报错；`ids` 入参最多 100 条（D1 单语句绑定参数上限），
+    单次实际处理最多 10 个（抓取文档时 2 个，见上方子请求预算），超出 400 并提示分批。
   - 管理端「GitHub 同步」新增「同步范围」勾选卡：默认全选（等价于以前点一下按钮的效果），
     另有全选 / 反选 / 清空，按钮上直接写「(${N})」，一个都没选时按钮禁用并说明原因。
     附带收益：GitHub 匿名配额只有 60/小时，现在能只刷刚改过的那一两个仓库。
-  - 探针 `bash scripts/usage-probe.sh` 的第 5 节实测这四条；第 4 节实测双语写读往返（先快照、测完按快照复原）。
+  - 探针 `bash scripts/usage-probe.sh` 的第 5 节实测这五条（单个=只跑它 / 抓文档选 3 个=400 且不发出任何
+    GitHub 请求 / 空数组=400 / 形态不对=400 / 未知 id=200 且 0 条）；第 4 节实测双语写读往返（先快照、测完按快照复原）。
     双语载荷由 `scripts/probe-bilingual-payload.mjs` 生成到文件再 `--data-binary @文件` 送出——
     Git Bash 会按本地码页改写命令行里的中文，内联写法会让探针自己造出乱码再误判成接口缺陷。

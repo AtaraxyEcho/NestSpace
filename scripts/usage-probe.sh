@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # 一次性把本地 Worker 起在 8898（用默认 .wrangler/state，绝不碰生产），探完
-# /api/usage 的接受与拒绝、/api/img 的缩略图档、管理端写路径与双语写读往返，
+# /api/usage 的接受与拒绝、/api/img 的缩略图档、管理端写路径与双语写读往返、
+# 以及访问台账的 D1 落地（PV/UV 去重、爬虫与管理端排除、事件计数），
 # 最后把**我自己**起的进程连同子进程收干净（并把探针写过的种子行复原）。
 set -u
+VISIT_FAIL=0
+PROBE_FAIL=0
 export LANG=C.UTF-8
 # 路径全部相对脚本自身解析，不再写死本机绝对路径（换机器/换用户名都能跑）
 ROOT="$(cd "$(dirname "$0")/.." && pwd -W 2>/dev/null || pwd)"
@@ -18,29 +21,48 @@ pnpm run build >/dev/null 2>&1 || { echo "BUILD FAILED"; exit 1; }
 PORT="${PROBE_PORT:-8898}"
 LOG="$WORK/wrangler-usage.log"
 npx wrangler dev --port "$PORT" --log-level warn > "$LOG" 2>&1 &
-cleanup() {
+kill_probe_tree() {
   # Windows 下 wrangler dev 的进程树是 bash→cmd→node→node→workerd 多层，
-  # 而且 $! 抓到的外层 PID 常常不是这棵树的根（实测收不干净、workerd 会被 supervisor 重新拉起）。
-  # 所以主收路径交给 PowerShell：按**端口**精确匹配这一支
-  #   - wrangler 的 node 进程命令行含 `--port <PORT>`
-  #   - workerd 的进程命令行含 `<127.0.0.1:PORT>`
-  # 再连带它们的子进程一并收，循环三轮吃掉被重新拉起的子进程。只匹配本端口，不动别人的服务。
-  powershell.exe -NoProfile -Command "
-    for (\$i = 0; \$i -lt 3; \$i++) {
+  # 而且 $! 抓到的外层 PID 常常不是这棵树的根。所以主收路径交给 PowerShell：按**端口**精确匹配这一支
+  #   - workerd 的命令行含 `--socket-addr=entry=127.0.0.1:<PORT>`
+  #   - wrangler 的 node 命令行含 `--port <PORT>`
+  # 再连带它们的子进程一并收。只匹配本端口，不动别人的服务。
+  # 必须按 Name 限定成 node/workerd：**不能**只看"命令行里有没有 --port 8898"。这条 PS 文本本身就带
+  # `--port 8898`，所以 bash.exe / cmd.exe / powershell.exe 全都会被匹配上（实测 10 条），
+  # 而 Stop-Process 按 PID 升序处理——先把自己这条收了，workerd 排在后面就永远留下来了。
+  if command -v powershell.exe >/dev/null 2>&1; then
+    powershell.exe -NoProfile -Command "
       \$hit = @(Get-CimInstance Win32_Process | Where-Object {
-        (\$_.Name -eq 'workerd.exe' -or \$_.CommandLine -match 'wrangler') -and
-        (\$_.CommandLine -like \"*--port $PORT*\" -or \$_.CommandLine -like \"*127.0.0.1:$PORT*\")
+        (\$_.Name -eq 'workerd.exe' -and \$_.CommandLine -like \"*127.0.0.1:$PORT*\") -or
+        (\$_.Name -eq 'node.exe' -and \$_.CommandLine -like \"*--port $PORT*\")
       })
       \$pids = @(\$hit | ForEach-Object { \$_.ProcessId })
-      \$kids = @(Get-CimInstance Win32_Process | Where-Object { \$pids -contains \$_.ParentProcessId })
+      \$kids = @(Get-CimInstance Win32_Process | Where-Object {
+        \$pids -contains \$_.ParentProcessId -and @('bash.exe','sh.exe','powershell.exe') -notcontains \$_.Name
+      })
       \$all = @(\$pids + (\$kids | ForEach-Object { \$_.ProcessId })) | Sort-Object -Unique
-      if (\$all.Count -eq 0) { break }
       \$all | ForEach-Object { Stop-Process -Id \$_ -Force -ErrorAction SilentlyContinue }
-      Start-Sleep -Milliseconds 600
-    }
-  " >/dev/null 2>&1 || true
-  sleep 1
-  if netstat -ano 2>/dev/null | tr -d '\r' | grep -i LISTENING | grep -q ":$PORT "; then
+    " >/dev/null 2>&1 || true
+  else
+    # Linux/macOS：按端口精确匹配，只收自己起的那一支
+    pkill -f "wrangler dev.*--port $PORT" 2>/dev/null || true
+    pkill -f "workerd.*127.0.0.1:$PORT" 2>/dev/null || true
+  fi
+}
+
+port_busy() {
+  netstat -ano 2>/dev/null | tr -d '\r' | grep -i LISTENING | grep -q ":$PORT "
+}
+
+cleanup() {
+  # 收一轮就够的情况是少数：workerd 会被 wrangler 的 supervisor 重新拉起，而拉起发生在收完之后。
+  # 所以按"收 → 看端口 → 再收"有界重试，端口空了才走人（以前只收一轮就宣布释放，实测留过孤儿进程）。
+  for _ in $(seq 1 8); do
+    kill_probe_tree
+    port_busy || break
+    sleep 1
+  done
+  if port_busy; then
     echo "!! 警告：端口 $PORT 仍被占用，请手动清理后再跑"
   else
     echo "== dev worker 已停止，端口 $PORT 已释放 =="
@@ -50,16 +72,35 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== 等就绪 =="
+READY=0
 for _ in $(seq 1 40); do
-  if curl -s -o /dev/null "http://127.0.0.1:$PORT/api/projects"; then break; fi
+  if curl -s -o /dev/null "http://127.0.0.1:$PORT/api/projects"; then READY=1; break; fi
   sleep 1
 done
+# 没起来就别往下跑：以前会打出一整屏 HTTP 000 的真失败，却看不出原因，
+# 而唯一的原因在 $LOG 里——cleanup 会连工作目录一起删掉。
+worker_log_tail() {
+  echo "  wrangler 日志尾部："
+  grep -vE '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -15 | sed 's/^/    /'
+}
+if [ "$READY" -ne 1 ]; then
+  echo "!! dev worker 未在 $PORT 应答，探针终止"
+  worker_log_tail
+  exit 1
+fi
 
 probe() {
   local label="$1"; shift
   local code
   code=$(curl -s -D "$WORK/usage-head.txt" \
     -o "$WORK/usage-body.bin" -w '%{http_code}' "$@")
+  # 标签里写了「（要 NNN）」的，实际状态码不符时记失败（以前只打印，回归不会让脚本变红）
+  local expected
+  expected=$(printf '%s' "$label" | grep -oE '要 [0-9]{3}' | grep -oE '[0-9]{3}' | head -1)
+  if [ -n "$expected" ] && [ "$code" != "$expected" ]; then
+    PROBE_FAIL=1
+    echo "  !! 期望 HTTP $expected，实际 $code"
+  fi
   # 响应体可能是二进制图片：只留可打印字符（含中文，Git Bash 的 [:print:] 会把 CJK 全滤掉）
   local peek ctype
   peek=$(node -e '
@@ -148,7 +189,7 @@ else
       }))
     })
   ')
-  [ -n "$ORIG" ] || { echo "读 001 失败，跳过写侧实测"; exit 1; }
+  [ -n "$ORIG" ] || { echo "读 001 失败，跳过写侧实测"; worker_log_tail; exit 1; }
   echo "001 现值：项目图片长度 $(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).preview_image_url.length))' "$ORIG")，相册项数 $(node -e 'process.stdout.write(String(JSON.parse(JSON.parse(process.argv[1]).preview_images_json).length))' "$ORIG")（值不打印）"
 
   BAD=$(node -e 'process.stdout.write(JSON.stringify(Array.from({length:13},(_,i)=>`https://a.example/${i}.png`)))')
@@ -170,17 +211,22 @@ else
   probe "PUT 合法两行（要 200）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     --data-raw "$GOOD"
-  echo "回读确认：写入的相册项数 = $(admin_row | node -e '
+  GALLERY_COUNT=$(admin_row | node -e '
     let s = ""
     process.stdin.on("data", (d) => (s += d)).on("end", () =>
       process.stdout.write(String(JSON.parse(JSON.parse(s).preview_images_json ?? "[]").length)),
     )
-  ')（应为 2）"
+  ')
+  echo "回读确认：写入的相册项数 = ${GALLERY_COUNT}（应为 2）"
+  if [ "$GALLERY_COUNT" != "2" ]; then
+    PROBE_FAIL=1
+    echo "  !! 相册回读项数不是 2"
+  fi
 
   probe "PUT 恢复原值（要 200）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     --data-raw "$ORIG"
-  admin_row | node -e '
+  if ! admin_row | node -e '
     let s = ""
     const want = JSON.parse(process.argv[1])
     process.stdin.on("data", (d) => (s += d)).on("end", () => {
@@ -190,8 +236,12 @@ else
         JSON.stringify(JSON.parse(r.preview_images_json ?? "[]")) ===
           JSON.stringify(JSON.parse(want.preview_images_json))
       console.log("原值已复原：", same ? "是" : "否（需要手工检查 001 的预览两列）")
+      if (!same) process.exitCode = 1
     })
-  ' "$ORIG"
+  ' "$ORIG"; then
+    PROBE_FAIL=1
+    echo "  !! 相册原值未复原"
+  fi
 fi
 
 echo
@@ -245,17 +295,22 @@ if [ -n "$TOKEN" ]; then
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     --data-binary "@$PAIRFILE"
   curl -s -o "$BODY" "http://127.0.0.1:$PORT/api/projects/$TARGET"
-  node -e '
+  if ! node -e '
     const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
     const want = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8"))
     const same = JSON.stringify(r.challenge) === JSON.stringify(want.challenge)
       && JSON.stringify(r.solution) === JSON.stringify(want.solution)
       && JSON.stringify(r.description) === JSON.stringify(want.description)
+    const onlyEnglish = Boolean(r.description?.en && !r.description?.zh)
     console.log("  公开详情返回双语对象：", same ? "是（en/zh 各一份，中文未乱码）"
       : `否（challenge=${JSON.stringify(r.challenge)} description=${JSON.stringify(r.description)}）`)
     console.log("  只填英文的简介没被同塞两份：",
-      r.description?.en && !r.description?.zh ? "是" : `否（${JSON.stringify(r.description)}）`)
-  ' "$BODY" "$PAIRFILE"
+      onlyEnglish ? "是" : `否（${JSON.stringify(r.description)}）`)
+    if (!same || !onlyEnglish) process.exitCode = 1
+  ' "$BODY" "$PAIRFILE"; then
+    PROBE_FAIL=1
+    echo "  !! 双语写读不一致"
+  fi
 
   # 复原体必须**落到文件**再 --data-binary @文件 送出：curl 的**命令行参数**会被 MSYS 按控制台
   # 码页改写，含中文的 JSON 走 `--data-raw "$VAR"` 出去时已成乱码（实测把乱码写进了本地 001 的简介，
@@ -274,7 +329,7 @@ if [ -n "$TOKEN" ]; then
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     --data-binary "@$RESTORE_FILE"
   curl -s -o "$BODY" "http://127.0.0.1:$PORT/api/projects/$TARGET"
-  node -e '
+  if ! node -e '
     const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
     const want = JSON.parse(process.argv[2])
     const same = JSON.stringify(r.challenge) === JSON.stringify(want.expect.challenge)
@@ -282,7 +337,11 @@ if [ -n "$TOKEN" ]; then
       && JSON.stringify(r.description) === JSON.stringify(want.expect.description)
     console.log(`  ${want.id} 三栏已复原（按可见内容比对，含只填一种语言的简介）：`, same ? "是"
       : `否（现 description=${JSON.stringify(r.description)} 期望 ${JSON.stringify(want.expect.description)}）`)
-  ' "$BODY" "$SNAPSHOT"
+    if (!same) process.exitCode = 1
+  ' "$BODY" "$SNAPSHOT"; then
+    PROBE_FAIL=1
+    echo "  !! 双语原值未复原"
+  fi
 
   echo
   echo "== 5. 同步范围 ids 过滤（只跑选中的那一个，不真跑全表——GitHub 配额要留给需要时） =="
@@ -290,25 +349,70 @@ if [ -n "$TOKEN" ]; then
   probe "同步单个 $ONE（要 200，结果应只有它）" -X POST "http://127.0.0.1:$PORT/api/admin/github-sync" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     --data-raw "{\"ids\":[\"$ONE\"]}"
-  node -e '
+  if ! node -e '
     const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
     const ids = (j.results || []).map((r) => r.id)
     const ok = ids.length === 1 && ids[0] === process.argv[2]
     console.log(`  返回 ${ids.length} 条 [${ids.join(",")}]：`, ok ? "只跑了选中的那个" : "范围不对",
       `（status=${(j.results || [])[0]?.status}，配额/skipped 不影响范围判定）`)
-  ' "$WORK/usage-body.bin" "$ONE"
+    if (!ok) process.exitCode = 1
+  ' "$WORK/usage-body.bin" "$ONE"; then
+    PROBE_FAIL=1
+    echo "  !! 同步范围不对"
+  fi
+  # 抓取文档的批次上限来自免费版每次调用 50 个子请求（每行最多 20 个）：必须在**发出任何
+  # GitHub 请求之前**就 400，否则调用跑到一半被平台掐断 = 部分落库 + 后面的行没有结果。
+  # 载荷写进文件再 --data-binary @文件：命令行里的中文会被 MSYS 按控制台码页改写。
+  THREEFILE="$WORK/probe-sync-three.json"
+  admin_list > "$BODY"
+  THREE_COUNT=$(node -e '
+    const rows = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
+    const ids = (Array.isArray(rows) ? rows : []).slice(0, 3).map((r) => String(r.id))
+    require("fs").writeFileSync(process.argv[2], JSON.stringify({ ids, fetchDocs: true }), "utf8")
+    process.stdout.write(String(ids.length))
+  ' "$BODY" "$THREEFILE")
+  if [ "${THREE_COUNT:-0}" -ge 3 ]; then
+    probe "抓文档选 3 个（要 400：上限 2，且在任何 GitHub 请求之前）" -X POST \
+      "http://127.0.0.1:$PORT/api/admin/github-sync" \
+      -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+      --data-binary "@$THREEFILE"
+  else
+    echo "  本地馆藏不足 3 个标本，跳过抓文档批次上限实测（当前 $THREE_COUNT 个）"
+  fi
   probe "ids 为空数组（要 400，不能退化成全表）" -X POST "http://127.0.0.1:$PORT/api/admin/github-sync" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' --data-raw '{"ids":[]}'
   probe "ids 形态不对（要 400）" -X POST "http://127.0.0.1:$PORT/api/admin/github-sync" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' --data-raw '{"ids":"001"}'
   probe "未知 id（要 200 且返回 0 条）" -X POST "http://127.0.0.1:$PORT/api/admin/github-sync" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' --data-raw '{"ids":["999999"]}'
-  node -e '
+  UNKNOWN_COUNT=$(node -e '
     const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
-    console.log("  未知 id 返回条数：", (j.results || []).length, "（应为 0；参数化 IN 不该报错）")
-  ' "$WORK/usage-body.bin"
+    process.stdout.write(String((j.results || []).length))
+  ' "$WORK/usage-body.bin")
+  echo "  未知 id 返回条数：${UNKNOWN_COUNT}（应为 0；参数化 IN 不该报错）"
+  if [ "$UNKNOWN_COUNT" != "0" ]; then
+    PROBE_FAIL=1
+    echo "  !! 未知 id 返回了结果"
+  fi
+fi
+
+echo
+echo "== 6. 访问台账（D1 聚合 / UV 去重 / 爬虫与管理端排除） =="
+if [ -n "$TOKEN" ]; then
+  if ! node "$ROOT/scripts/probe-visit-ledger.mjs" "$PORT" "$TOKEN"; then
+    VISIT_FAIL=1
+  fi
+else
+  echo "ADMIN_SECRET_KEY 不在 .dev.vars 里，跳过（管理端接口需要鉴权）"
+  VISIT_FAIL=1
 fi
 
 echo
 echo "== dev 日志尾部 =="
-tail -6 "$LOG"
+worker_log_tail
+
+if [ "$VISIT_FAIL" -ne 0 ] || [ "$PROBE_FAIL" -ne 0 ]; then
+  echo "!! 探针未通过（VISIT_FAIL=$VISIT_FAIL，PROBE_FAIL=$PROBE_FAIL，见上方 ✗ / !!）"
+  exit 1
+fi
+echo "全部探针通过 ✓"

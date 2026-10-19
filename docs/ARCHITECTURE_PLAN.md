@@ -5,7 +5,7 @@
 > | 本文（规划） | 现状 |
 > |---|---|
 > | 域名 `nestspace.dev`、管理端路径 `/admin*` | 主域 + `admin.<主域>` 子域（Access 拦截），公开站上敲 `#admin` 会跳到该子域；无 `/admin*` 路径 |
-> | 逐条 `wrangler d1 execute --file=./migrations/0001…`（当时 2 条迁移） | `bash scripts/d1-migrate.sh [local\|remote]`，按序执行 15 条迁移（登记表 + 自愈） |
+> | 逐条 `wrangler d1 execute --file=./migrations/0001…`（当时 2 条迁移） | `bash scripts/d1-migrate.sh [local\|remote]`，按序执行 16 条迁移（登记表 + 自愈） |
 > | 目录树里的 `worker/api/[[route]].ts`、`admin/`、`src/components/` | 实际是单个 `frontend/worker/index.ts`（Hono）+ `frontend/src/App.tsx`；这些路径不存在 |
 > | "写死的 2000 多行常量数据" | `App.tsx` 已约 6.5k 行，数据来自 D1 + 内置回退 |
 >

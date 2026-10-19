@@ -10,6 +10,15 @@ import { PREVIEW_IMAGE_LIMIT, sanitizeImageUrl } from '../src/utils/previewRules
 // 双语字段（挑战/方案）的读侧规则，与前台/管理端共用同一份（旧单列只读兜底）
 import { asBilingual, pairFromSingleText } from '../src/utils/bilingual.ts'
 import { canonicalPathFor, isValidProjectId } from '../src/utils/siteRoute.ts'
+// 访问统计的纯分类判据（+8 切日、设备/语言/来源/国家分档）
+import {
+  beijingDayHour,
+  countryOf,
+  deviceOf,
+  languageOf,
+  shiftDay,
+  sourceOf,
+} from '../src/utils/visitStats.ts'
 
 // 环境变量与 D1 数据库绑定定义
 type Env = {
@@ -40,6 +49,18 @@ const ALLOWED_STATUSES = ['LIVE', 'BETA', 'DRAFT', 'ARCHIVED']
 
 // 列表类查询统一上限：当前馆藏规模远低于此值，仅作为 Worker 内存与响应体量的安全阀
 const QUERY_ROW_LIMIT = 500
+// D1 单条语句最多绑定 100 个参数；同步接口的 IN (...) 直接由 ids 占位，超过会在执行层报错
+const SYNC_ID_LIMIT = 100
+// 免费版每次调用 50 个子请求（GitHub fetch 与 D1 查询都计入），D1 也是每次调用 50 次查询。
+// 批次上限就从这里算出来（每行的最坏成本见 syncRowCost，闸门 case 钉住算术）：
+//   不开文档：10 行 × 3 + SELECT + Access 取证书 = 32
+//   开文档抓取：2 行 × 20 + 2 = 42
+// 超了就让管理员分批，绝不写到一半再 500——那是"部分落库 + 没有逐行结果"的最糟形态。
+const SYNC_MAX_ROWS = 10
+const SYNC_MAX_DOC_ROWS = 2
+// 入口模块的具名导出只能是函数或 ExportedHandler：标量导出会让 workerd 直接起不来
+// （踩过两次，闸门 test/sync_scope.test.mjs 有一条静态钉子）。需要给闸门读的就包成函数。
+export const syncCaps = () => ({ ids: SYNC_ID_LIMIT, rows: SYNC_MAX_ROWS, docRows: SYNC_MAX_DOC_ROWS })
 
 // API 子应用（挂在 /api 下）
 const app = new Hono<Env>()
@@ -344,13 +365,14 @@ app.get('/img', async (c) => {
 })
 
 // ==========================================
-// 1b. 匿名使用度量（Analytics Engine）
+// 1b. 匿名使用度量（D1 访问台账 + 可选的 Analytics Engine）
 // ==========================================
 // 为什么要这一条：本轮改版（观察台 + 批量导入）此前没有任何度量，"有没有让人多看几张图"
-// "批量导入是否真的减少了手工粘贴"都无法回答。这里只收三类聚合事件，**不落 D1、不需要迁移、
-// 不存 IP/UA/cookie/项目 id 以外的任何个人数据**，免费额度每天 10 万个数据点（约合每月 300 万）远够用。
-// 查询：npx wrangler analytics query nestspace_usage（或在 Cloudflare 控制台 Analytics Engine 看）。
-// 绑定缺失时整条降级为 no-op——埋点永远不该让一次页面访问失败。
+// "批量导入是否真的减少了手工粘贴"都无法回答。这里只收聚合事件：持久落点是下方 1c 的
+// D1 访问台账（迁移 0016），AE 只是可选的旁路（缺绑定即 no-op）。
+// 不存 IP/UA/完整来源 URL；访客只落 HMAC 后的匿名 ID。
+// 查询：管理端「访问统计」，或（启用 AE 后）npx wrangler analytics query nestspace_usage。
+// 写入失败永远不该让一次页面访问失败。
 
 /** 事件名 → 允许的 m（方式）取值。不在表里的组合一律 400，避免脏数据把数据集写花 */
 export const USAGE_EVENTS: Record<string, readonly string[]> = {
@@ -421,6 +443,109 @@ const allowUsageEvent = createRateLimiter({
   storeMax: USAGE_STORE_MAX,
 })
 
+// 页面浏览单独更严：一次 pageview 会写 7–9 行 D1（日聚合 + 页面 + 小时 + 四个维度 + 身份 + 去重索引），
+// 120/分钟的通用桶对它是放大的。正常访客一分钟不会打开 30 个页面；脚本连打会在这里先被削掉。
+const PAGEVIEW_RATE_LIMIT = 30
+const allowPageView = createRateLimiter({
+  limit: PAGEVIEW_RATE_LIMIT,
+  windowMs: 60 * 1000,
+  storeMax: USAGE_STORE_MAX,
+})
+
+// 单 IP 的日配额：正常访客一天几十条；脚本一小时内就能把 D1 免费写入额度（10 万行/天）打满。
+// 1000 条/天 ≈ 最坏 9000 行写入，给正常流量留足空间，也把单 IP 的放大倍数压到日额度的 ~9%。
+// 同样是 isolate/Cache API 的尽力而为状态，挡不住 IP 轮换——跨机房压力仍是免费方案的边界。
+const USAGE_DAILY_LIMIT = 1000
+const allowUsageDaily = createRateLimiter({
+  limit: USAGE_DAILY_LIMIT,
+  windowMs: 24 * 60 * 60 * 1000,
+  storeMax: USAGE_STORE_MAX,
+})
+
+/**
+ * 免费版的跨 isolate 限流：Cloudflare Cache API。
+ *
+ * isolate 内存态只能挡住"同一个 isolate 的连打"，而 Cloudflare 会把请求散到多个 isolate。
+ * Cache API 是同一 colo 内共享、且不占 D1/KV 配额的免费状态：用 "名称 + 桶 + IP 哈希"
+ * 做键，读计数、超限拒绝、未超限时把 count+1 写回。缓存是尽力而为的（可能被淘汰、
+ * 并发读改写会少计），所以它是"把单 IP 的放大倍数压下来"，不是全局精确配额。
+ * 跨机房、IP 轮换的分布式压力仍超出免费代码侧的能力边界；WAF/DO 是可选收紧项。
+ */
+async function allowCachedRate(
+  c: any,
+  name: string,
+  limit: number,
+  windowSec: number,
+  bucket: string,
+): Promise<boolean> {
+  try {
+    const cache = (globalThis as any).caches?.default as Cache | undefined
+    if (!cache) return true
+    const digest = await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(`${name}|${bucket}|${clientIpOf(c)}`),
+    )
+    const token = [...new Uint8Array(digest).slice(0, 16)]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+    const key = `https://nestspace-rate.invalid/${name}/${token}`
+    const hit = await cache.match(key)
+    const count = hit ? Number(await hit.text()) || 0 : 0
+    if (count >= limit) return false
+    const write = cache
+      .put(
+        key,
+        new Response(String(count + 1), {
+          headers: { 'Cache-Control': `max-age=${windowSec}`, 'Content-Type': 'text/plain' },
+        }),
+      )
+      .catch(() => {})
+    try {
+      c.executionCtx.waitUntil(write)
+    } catch {
+      void write
+    }
+    return true
+  } catch {
+    // 缓存不可用时不阻断真实访客；isolate 限流仍然兜底
+    return true
+  }
+}
+
+/** 按真实字节数读请求体：声明了 Content-Length 的已在调用前拦掉，这里防 chunked/谎报 */
+async function readTextWithLimit(request: Request, max: number): Promise<string | null> {
+  if (!request.body) return ''
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      total += value.byteLength
+      if (total > max) {
+        await reader.cancel().catch(() => {})
+        return null
+      }
+      chunks.push(value)
+    }
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // 已释放/已取消都无所谓
+    }
+  }
+  const merged = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(merged)
+}
+
 // 两个公开读接口共用一个桶：一次页面浏览就是两条（列表 + 站点文案），
 // 240/分钟 ≈ 每分钟 120 次浏览，正常访客碰不到，脚本连打几百次就会撞上
 const PUBLIC_READ_RATE_LIMIT = 240
@@ -440,24 +565,58 @@ const allowImageRequest = createRateLimiter({
   storeMax: USAGE_STORE_MAX,
 })
 
+// HTML 页面（/、/index.html、/project/*、/admin）每个请求都要读一次 SEO 覆写（60s 缓存）+ 取资产；
+// 给一个宽松兜底，避免脚本把 Worker/D1 读打满。240/分钟 ≈ 4 次/秒，正常浏览与爬虫都碰不到。
+const allowHtmlRequest = createRateLimiter({
+  limit: 240,
+  windowMs: 60 * 1000,
+  storeMax: USAGE_STORE_MAX,
+})
+
 const clientIpOf = (c: any): string => c.req.header('CF-Connecting-IP') ?? 'unknown'
 
 const HOSTNAME_RE = /^[a-z0-9.-]{1,63}$/
+// 浏览器端第一方匿名 ID：只接受标准 UUID 形态（小写化后再比对）
+const VISITOR_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 app.post('/usage', async (c) => {
-  if (!allowUsageEvent(clientIpOf(c), Date.now())) {
+  const ip = clientIpOf(c)
+  const now = Date.now()
+  const minuteBucket = String(Math.floor(now / 60_000))
+  const dayBucket = beijingDayHour(now).day
+  if (
+    !allowUsageEvent(ip, now) ||
+    !allowUsageDaily(ip, now) ||
+    !(await allowCachedRate(c, 'usage-min', USAGE_RATE_LIMIT, 60, minuteBucket)) ||
+    !(await allowCachedRate(c, 'usage-day', USAGE_DAILY_LIMIT, 86_400, dayBucket))
+  ) {
     // 静默丢弃：埋点被刷不该变成给访客的错误，也不该占满数据集
     return c.body(null, 204)
   }
 
+  // 拒绝第三方页面直接写台账：浏览器会带 Sec-Fetch-Site / Origin。无头客户端没有这两项，
+  // 仍受按 IP 的限流；这条挡的是"任意网站用 sendBeacon 往这里灌数据"的简单请求。
+  const fetchSite = c.req.header('Sec-Fetch-Site')
+  if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+    return c.body(null, 204)
+  }
+  const origin = c.req.header('Origin')
+  if (origin) {
+    try {
+      if (origin !== new URL(c.req.url).origin) return c.body(null, 204)
+    } catch {
+      return c.body(null, 204)
+    }
+  }
+
   // 这是个公开无鉴权端点，不能让人用大 body 把 CPU/内存买走：
-  // 有 Content-Length 就直接按声明拒（连读都不读），没声明才退回按真实字节数判断
+  // 有 Content-Length 就直接按声明拒（连读都不读），没声明/谎报才按真实字节数边读边停。
   const declaredLength = Number(c.req.header('Content-Length') ?? '')
   if (Number.isFinite(declaredLength) && declaredLength > USAGE_BODY_MAX) {
     return c.json({ error: `请求体过大（上限 ${USAGE_BODY_MAX} 字节）` }, 413)
   }
-  const text = await c.req.text()
-  if (new TextEncoder().encode(text).byteLength > USAGE_BODY_MAX) {
+  const text = await readTextWithLimit(c.req.raw, USAGE_BODY_MAX)
+  if (text === null) {
     return c.json({ error: `请求体过大（上限 ${USAGE_BODY_MAX} 字节）` }, 413)
   }
   let raw: unknown
@@ -471,6 +630,14 @@ app.post('/usage', async (c) => {
   // 用下标判白名单会让 __proto__ / constructor / toString 这类原型键混进来（后者.includes 还会抛 500）
   if (typeof event !== 'string' || !Object.prototype.hasOwnProperty.call(USAGE_EVENTS, event)) {
     return c.json({ error: `未知事件：${String(event).slice(0, 32)}` }, 400)
+  }
+  if (
+    event === 'pageview' &&
+    (!allowPageView(ip, now) ||
+      !(await allowCachedRate(c, 'pageview-min', PAGEVIEW_RATE_LIMIT, 60, minuteBucket)))
+  ) {
+    // 与通用桶一样静默丢弃：统计可以少，不能让访客看到错误
+    return c.body(null, 204)
   }
   const method = (raw as Record<string, unknown>)?.m
   if (method !== undefined && method !== '') {
@@ -488,6 +655,34 @@ app.post('/usage', async (c) => {
   // r = 项目引用（标本编号）。不是个人数据，且只收安全形态；不给就是空串，绝不收任意字符串
   const refInput = (raw as Record<string, unknown>)?.r
   const reference = typeof refInput === 'string' && REFERENCE_RE.test(refInput.trim()) ? refInput.trim() : ''
+  // v = 浏览器端第一方随机匿名 ID（UUID）；s = 这一段会话的入口来源主机名（归类后只落类别）
+  const visitorInput = (raw as Record<string, unknown>)?.v
+  const visitorId =
+    typeof visitorInput === 'string' && VISITOR_ID_RE.test(visitorInput.trim().toLowerCase())
+      ? visitorInput.trim().toLowerCase()
+      : ''
+  const sourceInput = (raw as Record<string, unknown>)?.s
+  let sourceHost = ''
+  if (typeof sourceInput === 'string') {
+    const lower = sourceInput.trim().toLowerCase()
+    if (HOSTNAME_RE.test(lower)) sourceHost = lower
+  }
+
+  // D1 落库走 waitUntil：页面卸载时的 sendBeacon 不该等数据库写完，
+  // 写入失败也只丢一条统计，不改变 204。
+  const visitTask = recordVisitEvent(c, {
+    event,
+    method: typeof method === 'string' ? method : '',
+    host,
+    reference,
+    sourceHost,
+    visitorId,
+  }).catch(() => {})
+  try {
+    c.executionCtx.waitUntil(visitTask)
+  } catch {
+    void visitTask
+  }
 
   try {
     c.env.METRICS?.writeDataPoint({
@@ -500,6 +695,216 @@ app.post('/usage', async (c) => {
   }
   return c.body(null, 204)
 })
+
+// ==========================================
+// 1c. 访问台账（D1 按天聚合）
+// ==========================================
+// 口径见 migrations/0016_add_visit_ledger.sql 顶部：
+//   * 页面浏览来自客户端 pageview 事件（唯一事实源）——路径路由后 SPA 内切换不发 HTML 请求，
+//     服务端 hook 只能看到首屏，拿它计数会漏掉详情页；
+//   * 只落按天聚合，不存单次访问行、不存 IP/UA/来源 URL；
+//   * vkey = HMAC(hash_salt, 匿名 ID)，累计 UV = visit_identity 行数；
+//   * 访客自身的 /admin 浏览不进受众口径（单独记在 visit_page_day 的 admin 行）。
+
+const VISIT_DAY_VISITOR_RETENTION_DAYS = 90
+
+/** 每日 cron 清理去重索引；日 UV 快照在 visit_day 里，删索引不影响任何历史数字 */
+async function pruneVisitRetention(env: Env['Bindings']): Promise<void> {
+  const { day } = beijingDayHour()
+  const cutoff = shiftDay(day, -VISIT_DAY_VISITOR_RETENTION_DAYS)
+  try {
+    await env.DB.prepare('DELETE FROM visit_day_visitor WHERE day < ?').bind(cutoff).run()
+  } catch (err) {
+    // 迁移没跑/临时写失败：记一笔，别让 cron 失败拖垮别的定时任务
+    console.error('Visit retention prune failed:', err)
+  }
+}
+
+let visitSaltCache = ''
+
+async function readVisitSalt(db: D1Database): Promise<string> {
+  const row = await db
+    .prepare("SELECT value FROM visit_meta WHERE key = 'hash_salt'")
+    .first<{ value: string }>()
+  return String(row?.value ?? '')
+}
+
+/** 盐只在首次读取时查库；读不到（迁移未跑）不缓存，迁移补齐后无需等 isolate 回收 */
+async function loadVisitSalt(db: D1Database): Promise<string> {
+  if (visitSaltCache) return visitSaltCache
+  let salt = await readVisitSalt(db)
+  if (!salt) {
+    // 迁移可能只建了表、没写盐（部分应用/手工建表）：自愈一次，避免 PV 有数、UV 永远是 0 的假状态
+    try {
+      await db
+        .prepare(
+          "INSERT OR IGNORE INTO visit_meta (key, value) VALUES ('hash_salt', lower(hex(randomblob(32))))",
+        )
+        .run()
+      salt = await readVisitSalt(db)
+    } catch {
+      salt = ''
+    }
+  }
+  if (salt) visitSaltCache = salt
+  return salt
+}
+
+async function visitorKey(salt: string, anonymousId: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(salt),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(anonymousId))
+  return [...new Uint8Array(signature).slice(0, 16)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+function readCfCountry(c: any): string {
+  const cf = (c.req.raw as any)?.cf as { country?: string } | undefined
+  return countryOf(cf?.country)
+}
+
+function dimStatement(db: D1Database, day: string, dim: string, value: string): D1PreparedStatement {
+  return db
+    .prepare(`
+      INSERT INTO visit_dim_day (day, dim, value, pv) VALUES (?, ?, ?, 1)
+      ON CONFLICT(day, dim, value) DO UPDATE SET pv = pv + 1
+    `)
+    .bind(day, dim, value)
+}
+
+// 客户端自带的 r 只接受真实存在的标本编号：随机值会按 (day, ref) 把聚合表撑爆。
+// 项目表很小，isolate 内缓存 60 秒；新建项目的统计最多晚一分钟才带得上引用。
+let knownProjectIdsCache: { ids: Set<string>; at: number } | null = null
+
+async function isKnownProjectId(db: D1Database, id: string): Promise<boolean> {
+  if (!id) return false
+  const now = Date.now()
+  if (!knownProjectIdsCache || now - knownProjectIdsCache.at > 60_000) {
+    const { results } = await db.prepare('SELECT id FROM projects LIMIT 1000').all()
+    knownProjectIdsCache = {
+      ids: new Set((results as Array<{ id?: unknown }>).map((row) => String(row.id ?? ''))),
+      at: now,
+    }
+  }
+  return knownProjectIdsCache.ids.has(id)
+}
+
+async function recordVisitEvent(
+  c: any,
+  input: {
+    event: string
+    method: string
+    host: string
+    reference: string
+    sourceHost: string
+    visitorId: string
+  },
+): Promise<void> {
+  const { day, hour } = beijingDayHour()
+  const device = deviceOf(c.req.header('User-Agent') ?? '')
+
+  // 只落真实存在的标本编号；读不到项目表时丢引用但仍记 PV，宁少一个维度也不让请求消失
+  let reference = input.reference
+  if (reference) {
+    try {
+      if (!(await isKnownProjectId(c.env.DB, reference))) reference = ''
+    } catch {
+      reference = ''
+    }
+  }
+
+  // imgfail 的主机名只接受图片代理白名单里的图源，其余不落 host（同样是基数防线）
+  const host =
+    input.event === 'imgfail' && IMG_ALLOWED_HOSTS.has(input.host) ? input.host : ''
+
+  // 非页面浏览：只保留按 (事件, 方式, 主机名, 引用) 聚合的计数
+  if (input.event !== 'pageview') {
+    await c.env.DB.prepare(`
+      INSERT INTO visit_event_day (day, event, method, host, ref, count)
+      VALUES (?, ?, ?, ?, ?, 1)
+      ON CONFLICT(day, event, method, host, ref) DO UPDATE SET count = count + 1
+    `)
+      .bind(day, input.event, input.method, host, reference)
+      .run()
+    return
+  }
+
+  // 会跑 JS 的爬虫/回放工具不该进受众口径；其余事件不拦（它们本来就来自真实交互）
+  if (device === 'bot') return
+
+  const surface = input.method || 'home'
+
+  // 管理端的浏览单独记一行，不抬高 PV/UV/维度分布
+  if (surface === 'admin') {
+    await c.env.DB.prepare(`
+      INSERT INTO visit_page_day (day, surface, ref, pv) VALUES (?, 'admin', '', 1)
+      ON CONFLICT(day, surface, ref) DO UPDATE SET pv = pv + 1
+    `)
+      .bind(day)
+      .run()
+    return
+  }
+
+  let vkey = ''
+  if (input.visitorId) {
+    try {
+      const salt = await loadVisitSalt(c.env.DB)
+      if (salt) vkey = await visitorKey(salt, input.visitorId)
+    } catch {
+      // 盐读不到时仍记 PV：UV 少算一条比整页访问消失好
+      vkey = ''
+    }
+  }
+
+  let isNewVisitorToday = false
+  if (vkey) {
+    const inserted = await c.env.DB.prepare(
+      'INSERT OR IGNORE INTO visit_day_visitor (day, vkey) VALUES (?, ?)',
+    )
+      .bind(day, vkey)
+      .run()
+    isNewVisitorToday = (inserted.meta?.changes ?? 0) > 0
+  }
+
+  const statements: D1PreparedStatement[] = [
+    c.env.DB.prepare(`
+      INSERT INTO visit_day (day, pv, uv) VALUES (?, 1, ?)
+      ON CONFLICT(day) DO UPDATE SET
+        pv = pv + 1,
+        uv = uv + excluded.uv,
+        updated_at = CURRENT_TIMESTAMP
+    `).bind(day, isNewVisitorToday ? 1 : 0),
+    c.env.DB.prepare(`
+      INSERT INTO visit_page_day (day, surface, ref, pv) VALUES (?, ?, ?, 1)
+      ON CONFLICT(day, surface, ref) DO UPDATE SET pv = pv + 1
+    `).bind(day, surface, reference),
+    c.env.DB.prepare(`
+      INSERT INTO visit_hour_day (day, hour, pv) VALUES (?, ?, 1)
+      ON CONFLICT(day, hour) DO UPDATE SET pv = pv + 1
+    `).bind(day, hour),
+    dimStatement(c.env.DB, day, 'country', readCfCountry(c)),
+    dimStatement(c.env.DB, day, 'device', device),
+    dimStatement(c.env.DB, day, 'lang', languageOf(c.req.header('Accept-Language') ?? '')),
+    dimStatement(c.env.DB, day, 'source', sourceOf(input.sourceHost)),
+  ]
+
+  if (vkey) {
+    statements.push(
+      c.env.DB.prepare(
+        'INSERT INTO visit_identity (vkey, first_seen_day) VALUES (?, ?) ON CONFLICT(vkey) DO NOTHING',
+      ).bind(vkey, day),
+    )
+  }
+
+  await c.env.DB.batch(statements)
+}
 
 // ==========================================
 // 2. 管理端安全接口（全量 CRUD，默认 fail-closed）
@@ -631,12 +1036,14 @@ adminApp.use('*', async (c, next) => {
   }
 
   // 防线 2：Cloudflare Access JWT（签名验证通过才放行）
+  let accessAttempt = false
   const teamName = c.env.ACCESS_TEAM_NAME
   const audTag = c.env.ACCESS_AUD_TAG
   if (teamName && audTag) {
     const jwt =
       c.req.header('Cf-Access-Jwt-Assertion') ?? getCookie(c, 'CF_Authorization') ?? ''
     if (jwt) {
+      accessAttempt = true
       let verdict: { valid: boolean; reason?: string }
       try {
         verdict = await verifyAccessJwt(jwt, teamName, audTag)
@@ -647,7 +1054,7 @@ adminApp.use('*', async (c, next) => {
       if (verdict.valid) {
         const identity = readJwtIdentity(jwt)
         if (!isAccessIdentityAllowed(identity, c.env.ACCESS_ALLOWED_EMAILS)) {
-          console.warn('Admin auth rejected: identity not in allowlist:', identity?.email)
+          console.warn('Admin auth rejected: identity not in allowlist')
           noteAuthFailure(key, now)
           return c.json({ error: '403 Forbidden: 该身份不在管理端允许名单内' }, 403)
         }
@@ -659,14 +1066,28 @@ adminApp.use('*', async (c, next) => {
     }
   }
 
+  // 没带任何凭据 → 401（让客户端知道该提供凭据）；带了但不对 → 403（不提示重试）
+  if (!providedSecret && !accessAttempt) {
+    return c.json(
+      { error: '401 Unauthorized: 管理端接口需要凭据' },
+      401,
+      { 'WWW-Authenticate': 'Bearer realm="admin"' },
+    )
+  }
+
   noteAuthFailure(key, now)
   return c.json({ error: '403 Forbidden: 管理端接口未授权访问' }, 403)
 })
 
 /** 读取 JSON 请求体：不可解析时返回 null，由调用方给 400，而不是抛错变成 500 */
 async function readJsonBody(c: any): Promise<Record<string, any> | null> {
+  const ADMIN_BODY_MAX = 2_000_000
+  const declared = Number(c.req.header('Content-Length') ?? '')
+  if (Number.isFinite(declared) && declared > ADMIN_BODY_MAX) return null
+  const text = await readTextWithLimit(c.req.raw, ADMIN_BODY_MAX)
+  if (text === null) return null
   try {
-    const parsed = await c.req.json()
+    const parsed = JSON.parse(text)
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? (parsed as Record<string, any>)
       : null
@@ -688,6 +1109,171 @@ adminApp.get('/projects', async (c) => {
   } catch (err: any) {
     console.error('Admin fetch error:', err)
     return c.json({ error: 'Failed to fetch admin projects' }, 500)
+  }
+})
+
+// 管理端：访问统计（按天聚合，只读）
+//
+// `days` 只影响曲线与分布窗口；累计 PV / 累计 UV 永远是全量。
+// 窗口上限跟着访客去重索引的保留期走（90 天）：再长的窗口算不出"窗口内 UV"，
+// 不返回一个把 90 天说成 365 天的数字。
+// 90 天前的 visit_day_visitor 由每日 cron（scheduled handler）清理，GET 不再产生写操作。
+adminApp.get('/visits', async (c) => {
+  const daysRaw = Number(new URL(c.req.url).searchParams.get('days') ?? '30')
+  const days = Number.isFinite(daysRaw)
+    ? Math.min(VISIT_DAY_VISITOR_RETENTION_DAYS, Math.max(1, Math.floor(daysRaw)))
+    : 30
+  const { day: today } = beijingDayHour()
+  const since = shiftDay(today, -(days - 1))
+
+  try {
+    // 读接口保持只读：盐缺失时明确 503，不把 UV=0 当真实数据展示。
+    // 写入路径会在下一次 pageview 时自愈（loadVisitSalt）。
+    const salt = await readVisitSalt(c.env.DB).catch(() => '')
+    if (!salt) {
+      return c.json(
+        { error: '访问统计尚未完成初始化：visit_meta 缺少 hash_salt（请先执行 0016）' },
+        503,
+      )
+    }
+
+    const results = await c.env.DB.batch([
+      c.env.DB.prepare('SELECT COALESCE(SUM(pv), 0) AS pv FROM visit_day'),
+      c.env.DB.prepare('SELECT COUNT(*) AS uv FROM visit_identity'),
+      c.env.DB.prepare('SELECT pv, uv FROM visit_day WHERE day = ?').bind(today),
+      c.env.DB.prepare('SELECT COALESCE(SUM(pv), 0) AS pv FROM visit_day WHERE day >= ?').bind(since),
+      c.env.DB.prepare(
+        'SELECT COUNT(DISTINCT vkey) AS uv FROM visit_day_visitor WHERE day >= ?',
+      ).bind(since),
+      c.env.DB.prepare(
+        'SELECT day, pv, uv FROM visit_day WHERE day >= ? ORDER BY day ASC',
+      ).bind(since),
+      c.env.DB.prepare(`
+        SELECT surface, ref, SUM(pv) AS pv FROM visit_page_day
+        WHERE day >= ? AND surface <> 'admin'
+        GROUP BY surface, ref ORDER BY pv DESC LIMIT 20
+      `).bind(since),
+      c.env.DB.prepare(`
+        SELECT dim, value, SUM(pv) AS pv FROM visit_dim_day
+        WHERE day >= ? GROUP BY dim, value ORDER BY dim ASC, pv DESC
+      `).bind(since),
+      c.env.DB.prepare(`
+        SELECT hour, SUM(pv) AS pv FROM visit_hour_day
+        WHERE day >= ? GROUP BY hour ORDER BY hour ASC
+      `).bind(since),
+      c.env.DB.prepare(`
+        SELECT event, method, host, ref, SUM(count) AS count FROM visit_event_day
+        WHERE day >= ? GROUP BY event, method, host, ref ORDER BY count DESC LIMIT 300
+      `).bind(since),
+      c.env.DB.prepare(`
+        SELECT COALESCE(SUM(pv), 0) AS pv FROM visit_page_day
+        WHERE day >= ? AND surface = 'admin'
+      `).bind(since),
+    ])
+
+    const rowsOf = (index: number): any[] => (results[index]?.results ?? []) as any[]
+    const num = (value: unknown): number => {
+      const parsed = Number(value)
+      return Number.isFinite(parsed) ? parsed : 0
+    }
+
+    const totalRows = rowsOf(0)
+    const identityRows = rowsOf(1)
+    const todayRow = rowsOf(2)[0] ?? {}
+    const rangeRows = rowsOf(3)
+    const rangeVisitorRows = rowsOf(4)
+    const dailyRows = rowsOf(5)
+    const pageRows = rowsOf(6)
+    const dimRows = rowsOf(7)
+    const hourRows = rowsOf(8)
+    const eventRows = rowsOf(9)
+    const adminRows = rowsOf(10)
+
+    // 曲线补齐窗口内的空白天，管理端不必自己补零
+    const byDay = new Map(dailyRows.map((row) => [String(row.day), row]))
+    const daily = Array.from({ length: days }, (_, index) => {
+      const day = shiftDay(since, index)
+      const row = byDay.get(day)
+      return { day, pv: num(row?.pv), uv: num(row?.uv) }
+    })
+
+    const dims: Record<'country' | 'device' | 'lang' | 'source', { value: string; pv: number }[]> = {
+      country: [],
+      device: [],
+      lang: [],
+      source: [],
+    }
+    for (const row of dimRows) {
+      const key = String(row.dim) as keyof typeof dims
+      if (!(key in dims)) continue
+      dims[key].push({ value: String(row.value ?? ''), pv: num(row.pv) })
+    }
+
+    const hourMap = new Map(hourRows.map((row) => [num(row.hour), num(row.pv)]))
+    const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, pv: hourMap.get(hour) ?? 0 }))
+
+    // 事件按类型收口：每种只留前 8 个 (method, host, ref) 组合
+    const groupedEvents = new Map<
+      string,
+      {
+        event: string
+        total: number
+        items: { method: string; host: string; ref: string; count: number }[]
+      }
+    >()
+    for (const row of eventRows) {
+      const event = String(row.event ?? '')
+      if (!event) continue
+      let group = groupedEvents.get(event)
+      if (!group) {
+        group = { event, total: 0, items: [] }
+        groupedEvents.set(event, group)
+      }
+      const count = num(row.count)
+      group.total += count
+      if (group.items.length < 8) {
+        group.items.push({
+          method: String(row.method ?? ''),
+          host: String(row.host ?? ''),
+          ref: String(row.ref ?? ''),
+          count,
+        })
+      }
+    }
+
+    return c.json({
+      generatedAt: new Date().toISOString(),
+      range: { days, since, today },
+      totals: {
+        pv: num(totalRows[0]?.pv),
+        uv: num(identityRows[0]?.uv),
+        todayPv: num(todayRow.pv),
+        todayUv: num(todayRow.uv),
+        rangePv: num(rangeRows[0]?.pv),
+        rangeUv: num(rangeVisitorRows[0]?.uv),
+        adminPv: num(adminRows[0]?.pv),
+      },
+      daily,
+      pages: pageRows.map((row) => ({
+        surface: String(row.surface ?? ''),
+        ref: String(row.ref ?? ''),
+        pv: num(row.pv),
+      })),
+      dims,
+      hours,
+      events: [...groupedEvents.values()],
+    })
+  } catch (err: any) {
+    const message = String(err?.message ?? err)
+    // 迁移没跑时不能把 0 当"没有访问"展示：明确告诉管理端表还没建
+    if (/no such table/i.test(message)) {
+      return c.json(
+        { error: '访问统计表尚未迁移：先执行 migrations/0016_add_visit_ledger.sql（本地/远程）' },
+        503,
+      )
+    }
+    console.error('Admin visits error:', err)
+    return c.json({ error: 'Failed to load visit stats' }, 500)
   }
 })
 
@@ -1144,6 +1730,21 @@ const DOC_SOURCES = {
 
 // 通用 README 文件名：按内容是否含中文决定归属，避免把英文说明写进中文字段
 const GENERIC_README_FILES = ['README.md', 'readme.md', 'Readme.md'] as const
+
+/**
+ * 单行同步的**最坏**子请求数：仓库 + releases + 写 D1 = 3；
+ * 开文档抓取再按候选路径逐个探测（命中即停，所以这里是上界）。
+ * 批次上限就是用它算出来的（见 SYNC_MAX_ROWS / SYNC_MAX_DOC_ROWS），闸门 case 钉住算术。
+ */
+export const syncRowCost = (fetchDocs: boolean): number =>
+  3 +
+  (fetchDocs
+    ? DOC_SOURCES.readmeEn.length +
+      DOC_SOURCES.readmeZh.length +
+      DOC_SOURCES.composeDev.length +
+      DOC_SOURCES.composeProd.length +
+      GENERIC_README_FILES.length
+    : 0)
 
 /** 采样前 2000 字符统计中文字符数，用于判断 README 主体语言 */
 function looksChinese(text: string): boolean {
@@ -1703,8 +2304,8 @@ export function parseSyncIds(
   if (raw.length === 0) {
     return { error: '没有勾选任何标本：要么至少选一个，要么不要提交 ids 字段' }
   }
-  if (raw.length > QUERY_ROW_LIMIT) {
-    return { error: `一次最多同步 ${QUERY_ROW_LIMIT} 个标本` }
+  if (raw.length > SYNC_ID_LIMIT) {
+    return { error: `一次最多同步 ${SYNC_ID_LIMIT} 个标本` }
   }
   const ids: string[] = []
   for (const item of raw) {
@@ -1745,6 +2346,19 @@ adminApp.post('/github-sync', async (c) => {
     )
       .bind(...(scope.ids ?? []))
       .all()
+
+    // 在**任何写入之前**卡住批次：子请求/查询预算超了会写到一半再 500，那是最糟的形态
+    const maxRows = fetchDocs ? SYNC_MAX_DOC_ROWS : SYNC_MAX_ROWS
+    if ((results as unknown[]).length > maxRows) {
+      return c.json(
+        {
+          error: `一次最多同步 ${maxRows} 个标本${
+            fetchDocs ? '（开启 README / Compose 抓取时）' : ''
+          }，请分批选择后再同步`,
+        },
+        400,
+      )
+    }
 
     const outcomes: Record<string, unknown>[] = []
     // GitHub 一旦返回 403（频率超限）就立即停止后续请求：
@@ -2823,6 +3437,9 @@ function injectSeoOverrides(
 }
 
 async function serveIndexWithSeo(c: any) {
+  if (!allowHtmlRequest(clientIpOf(c), Date.now())) {
+    return c.text('请求过于频繁，请稍后再试', 429, { 'Retry-After': '60' })
+  }
   try {
     // 先读覆写（60s 缓存）；读不到库就当作没有覆写，正文里的构建期标签照旧
     const seo = (await loadSeoOverrides(c.env.DB).catch(() => null)) ?? {
@@ -2889,4 +3506,15 @@ root.get('/index.html', serveIndexWithSeo)
 root.get('/project/*', serveIndexWithSeo)
 root.get('/admin', serveIndexWithSeo)
 
-export default root
+export default {
+  fetch: root.fetch.bind(root),
+  // 每日清一次 90 天前的访客去重索引（cron 在 wrangler.toml 声明）；
+  // 读接口不再承担写操作，GET 的语义保持干净。
+  scheduled: async (
+    _event: ScheduledController,
+    env: Env['Bindings'],
+    ctx: ExecutionContext,
+  ) => {
+    ctx.waitUntil(pruneVisitRetention(env))
+  },
+}

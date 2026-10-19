@@ -13,7 +13,7 @@ const FRONTEND = join(dirname(fileURLToPath(import.meta.url)), '..')
 const siteHost = await import(
   pathToFileURL(join(FRONTEND, 'src', 'utils', 'siteHost.ts')).href
 )
-const { adminSiteOrigin, hasAdminSibling, isAdminHostname, isSiteHostname, publicSiteOrigin } =
+const { adminSiteOrigin, hasAdminSibling, isAdminHostname, isSiteHostname, publicSiteOrigin, sharedCookieDomain } =
   siteHost
 
 const parts = (hostname, protocol = 'https:', port = '') => ({ protocol, hostname, port })
@@ -180,6 +180,15 @@ check('App 的 #admin 分派用同一份判据（别再退回 localhost 白名�
     !/\["localhost", "127\.0\.0\.1"\]\.includes/.test(app),
     '又出现了"只排除 localhost"的老写法：IP 直连与 *.workers.dev 会跳去不存在的域名',
   )
+})
+
+check('退出统计偏好 cookie：admin.X 与 X 共用 X，本地/托管预览退回同源 localStorage', () => {
+  assert.equal(sharedCookieDomain('admin.nestspace.online'), 'nestspace.online')
+  assert.equal(sharedCookieDomain('nestspace.online'), 'nestspace.online')
+  assert.equal(sharedCookieDomain('admin.sub.example.com'), 'sub.example.com', '多层子域剥一层 admin')
+  assert.equal(sharedCookieDomain('127.0.0.1'), '', 'IP 直连没有可共享的 Domain')
+  assert.equal(sharedCookieDomain('localhost'), '', '单标签主机没有 Domain')
+  assert.equal(sharedCookieDomain('demo.workers.dev'), '', '托管预览域不该写 Domain cookie')
 })
 
 let failed = 0

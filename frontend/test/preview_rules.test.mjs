@@ -254,13 +254,20 @@ check('限流器：容量满只清过期桶，不把所有人的计数一起抹�
   assert.equal(allow('d', 2000), true, '过期之后新来源正常记账')
 })
 
-check('三个公开端点都接了限流（源码钉子）', () => {
+check('公开端点与 HTML 路由都接了限流（源码钉子）', () => {
   const workerSrc = readFileSync(join(FRONTEND, 'worker', 'index.ts'), 'utf8')
   // 读接口是"列表 + 详情 + 站点文案"三条：共用同一个桶，少接一条就是给脚本留了个不设防的口子
   const readHits = workerSrc.match(/allowPublicRead\(clientIpOf\(c\), Date\.now\(\)\)/g) ?? []
   assert.ok(readHits.length >= 3, `公开读接口只接了 ${readHits.length} 处（列表/详情/站点文案都要）`)
   assert.match(workerSrc, /allowImageRequest\(clientIpOf\(c\), Date\.now\(\)\)/, '图片端点没接限流')
-  assert.match(workerSrc, /allowUsageEvent\(clientIpOf\(c\), Date\.now\(\)\)/, '埋点端点没接限流')
+  // 埋点端点：通用桶 + pageview 专用桶 + 单 IP 日配额 + Cache API 分钟/日桶，都必须在入口里
+  assert.match(workerSrc, /allowUsageEvent\(ip, now\)/, '埋点端点没接通用限流')
+  assert.match(workerSrc, /allowUsageDaily\(ip, now\)/, '埋点端点没接日配额')
+  assert.match(workerSrc, /allowPageView\(ip, now\)/, 'pageview 没接专用限流')
+  assert.match(workerSrc, /allowCachedRate\(c, 'usage-min'/, '埋点端点没接 Cache API 分钟桶')
+  assert.match(workerSrc, /allowCachedRate\(c, 'usage-day'/, '埋点端点没接 Cache API 日桶')
+  assert.match(workerSrc, /allowCachedRate\(c, 'pageview-min'/, 'pageview 没接 Cache API 分钟桶')
+  assert.match(workerSrc, /allowHtmlRequest\(clientIpOf\(c\), Date\.now\(\)\)/, 'HTML 路由没接限流')
 })
 
 let failed = 0

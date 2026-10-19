@@ -19,7 +19,9 @@ import {
   fetchGithubUserRepos,
   importGithubRepo,
   fetchPreviewImagesFromDir,
+  fetchVisitStats,
   type RemoteGithubRepo,
+  type VisitStats,
 } from "./api/adminClient"
 import type { SiteSettings, NavItemConfig } from "./types/siteSettings"
 import { computeCatalogueStats, computeActivityTimeline } from "./utils/stats"
@@ -56,6 +58,8 @@ import {
 } from "./utils/siteRoute"
 import { readSession, writeSession, clearSession } from "./utils/safeStorage"
 import {
+  isStatsOptOut,
+  setStatsOptOut,
   trackImageFailure,
   trackUsage,
   trackOutbound,
@@ -169,7 +173,7 @@ function SpecimenCard({
         </span>
         <span className="status">
           <b />
-          {project.status}
+          {projectStatusLabel(language, project.status)}
         </span>
       </header>
       <div className="card-body">
@@ -188,19 +192,19 @@ function SpecimenCard({
           <p className="description">{pickBilingual(project.description, language).text}</p>
           <div className="attributes">
             <div>
-              <span>CLASS</span>
+              <span>{uiLabel(language, "CLASS", "分类")}</span>
               <strong>{project.type}</strong>
             </div>
             <div>
-              <span>LANGUAGE</span>
+              <span>{uiLabel(language, "LANGUAGE", "语言")}</span>
               <strong>{project.language}</strong>
             </div>
             <div>
-              <span>RELEASED</span>
+              <span>{uiLabel(language, "RELEASED", "发布")}</span>
               <strong>{project.year}</strong>
             </div>
             <div>
-              <span>CITATIONS</span>
+              <span>{uiLabel(language, "CITATIONS", "星标")}</span>
               <strong>{project.stars}</strong>
             </div>
           </div>
@@ -213,7 +217,7 @@ function SpecimenCard({
                 onOpen(project)
               }}
             >
-              View specimen <span>↗</span>
+              {uiLabel(language, "View specimen", "查看项目")} <span>↗</span>
             </button>
             {demoUrl ? (
               <a
@@ -223,7 +227,7 @@ function SpecimenCard({
                 rel="noreferrer"
                 onClick={() => trackOutbound("demo", project.id)}
               >
-                Live demo <span>↗</span>
+                {uiLabel(language, "Live demo", "在线演示")} <span>↗</span>
               </a>
             ) : null}
             {sourceUrl ? (
@@ -309,6 +313,28 @@ function settingsHref(raw: string | null | undefined): string | null {
   }
 }
 
+/** 公开站的语义标签：中文模式给中文，英文模式给英文；编号式 eyebrow / 微文案不走这里 */
+function uiLabel(language: Language, en: string, zh: string): string {
+  return language === "zh" ? zh : en
+}
+
+const PROJECT_STATUS_ZH: Record<ProjectStatus, string> = {
+  LIVE: "已发布",
+  BETA: "测试中",
+  DRAFT: "草稿",
+  ARCHIVED: "已归档",
+}
+
+function projectStatusLabel(language: Language, status: ProjectStatus): string {
+  return language === "zh" ? (PROJECT_STATUS_ZH[status] ?? status) : status
+}
+
+/** 邮箱只用于拼 mailto:：形态不对就不渲染链接（否则能把 ?body=/参数头塞进 mailto） */
+function mailtoHref(email: string | null | undefined): string | null {
+  const value = (email ?? "").trim()
+  return /^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(value) ? `mailto:${value}` : null
+}
+
 // 图片宽度档位：观察台上同时出现的卡片不超过 4 张，一律按主图清晰度取，
 // 这样翻到邻牌时不必再请求一次更大的尺寸（原图常是几百 KB 的 PNG）。
 // 也别给侧牌/后牌单独设小档：后牌每次翻页换一张，相册里的每张图迟早都会当一次后牌，
@@ -350,6 +376,11 @@ const SECTION_ANCHORS = ["cabinet", "catalogue", "curator", "index", "colophon"]
 
 // 详情页页签顺序：role=tab 的 aria-controls/id 与左右方向键导航都以此为准
 const DETAIL_TABS = ["overview", "readme", "deployment"] as const
+const DETAIL_TAB_ZH: Record<(typeof DETAIL_TABS)[number], string> = {
+  overview: "概览",
+  readme: "README",
+  deployment: "部署",
+}
 
 // 公开数据重读的最小间隔：管理端在独立子域，改动后切回公开页即可自动生效，又不至于每次聚焦都打接口
 const PUBLIC_REFRESH_MIN_INTERVAL_MS = 20 * 1000
@@ -565,6 +596,7 @@ function Header({
     () => navSource.filter((item) => item.visible !== false),
     [navSource],
   )
+  const githubHref = settingsHref(settings.githubUrl)
 
   // 导航选中态：按当前滚动位置高亮对应章节（scroll-spy）
   const [activeSection, setActiveSection] = useState<string>("cabinet")
@@ -627,6 +659,17 @@ function Header({
         })}
       </nav>
       <div className="header-tools">
+        {githubHref ? (
+          <a
+            className="header-github"
+            href={githubHref}
+            target="_blank"
+            rel="noreferrer"
+            aria-label="GitHub"
+          >
+            GitHub <span aria-hidden="true">↗</span>
+          </a>
+        ) : null}
         <span className="volume">VOL. 01 · {new Date().getFullYear()}</span>
         {settings.languageToggleEnabled !== false && (
           <button
@@ -859,24 +902,24 @@ function CatalogueStats({
 
   const stats = [
     [
-      "SPECIMENS",
+      uiLabel(language, "SPECIMENS", "项目"),
       computed.specimensCount,
       language === "zh" ? "件开源标本" : "Open-source works",
     ],
     [
-      "CITATIONS",
+      uiLabel(language, "CITATIONS", "星标"),
       computed.citations,
       language === "zh"
         ? `分布于 ${computed.distinctHabitats} 个栖息地`
         : `Across ${computed.distinctHabitats} habitats`,
     ],
     [
-      "RANGE",
+      uiLabel(language, "RANGE", "语言"),
       computed.distinctLanguages,
       language === "zh" ? "种技术语言" : "Languages observed",
     ],
     [
-      "SINCE",
+      uiLabel(language, "SINCE", "起始"),
       computed.sinceYear,
       language === "zh" ? "悉心收藏至今" : "Collected with care",
     ],
@@ -895,7 +938,7 @@ function CatalogueStats({
           </h2>
           {description ? <p className="section-desc">{description}</p> : null}
         </div>
-        <span className="as-of">AS OF {computed.asOfDate}</span>
+        <span className="as-of">{uiLabel(language, "AS OF", "截至")} {computed.asOfDate}</span>
       </div>
       <div className="stats-grid">
         {stats.map((stat, index) => (
@@ -920,7 +963,7 @@ function CatalogueStats({
         }
       >
         <div className="timeline-copy">
-          <span className="eyebrow">ACTIVITY LOG</span>
+          <span className="eyebrow">{uiLabel(language, "ACTIVITY LOG", "年度活动")}</span>
           <p>
             {language === "zh"
               ? "历年的生长轨迹，记录着标本室沉淀的年轮。"
@@ -931,9 +974,15 @@ function CatalogueStats({
           <div
             className="timeline-year"
             key={item.year}
-            title={`${item.year}: ${item.count} 项动态 / 记录`}
+            title={
+              language === "zh"
+                ? `${item.year}: ${item.count} 项动态 / 记录`
+                : `${item.year}: ${item.count} updates / notes`
+            }
           >
-            <small>{item.count} items</small>
+            <small>
+              {uiLabel(language, `${item.count} items`, `${item.count} 项`)}
+            </small>
             <i
               style={
                 {
@@ -953,6 +1002,7 @@ function CatalogueStats({
 function Curator({ language, settings }: { language: Language; settings: SiteSettings }) {
   const copy = (en: string, zh: string) => (language === "zh" ? zh || en : en || zh)
   const githubHref = settingsHref(settings.githubUrl)
+  const contactMailto = mailtoHref(settings.contactEmail)
   const headlineLines = (settings.curatorHeadlineEn || "")
     .split("\n")
     .map((line) => line.trim())
@@ -1003,11 +1053,11 @@ function Curator({ language, settings }: { language: Language; settings: SiteSet
         <p>{copy(settings.aboutEn, settings.aboutZh)}</p>
         <dl>
           <div>
-            <dt>HABITAT</dt>
+            <dt>{uiLabel(language, "HABITAT", "所在地")}</dt>
             <dd>{settings.curatorHabitat || "—"}</dd>
           </div>
           <div>
-            <dt>FIELD</dt>
+            <dt>{uiLabel(language, "FIELD", "方向")}</dt>
             <dd>{settings.curatorField || "—"}</dd>
           </div>
           <div>
@@ -1023,13 +1073,19 @@ function Curator({ language, settings }: { language: Language; settings: SiteSet
             </dd>
           </div>
           <div>
-            <dt>CONTACT</dt>
-            <dd>{settings.contactEmail}</dd>
+            <dt>{uiLabel(language, "CONTACT", "联系")}</dt>
+            <dd>
+              {contactMailto ? (
+                <a href={contactMailto}>{settings.contactEmail}</a>
+              ) : (
+                settings.contactEmail || "—"
+              )}
+            </dd>
           </div>
           <div>
-            <dt>STATUS</dt>
+            <dt>{uiLabel(language, "STATUS", "状态")}</dt>
             <dd>
-              <b /> Accepting signals
+              <b /> {uiLabel(language, "Accepting signals", "开放合作")}
             </dd>
           </div>
         </dl>
@@ -1174,10 +1230,7 @@ function SiteFooter({
   const githubHref = settingsHref(settings.githubUrl)
   const icpHref = settingsHref(settings.icpUrl) ?? "https://beian.miit.gov.cn/"
   // 邮箱只用于拼 mailto:：形态不对就不渲染链接（否则能把 ?body=/参数头塞进 mailto）
-  const contactEmail = (settings.contactEmail || "").trim()
-  const contactMailto = /^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(contactEmail)
-    ? `mailto:${contactEmail}`
-    : null
+  const contactMailto = mailtoHref(settings.contactEmail)
 
   // COLLECTION 列跟随「全局 · 标头与导航」的顺序、名称与显示状态，末尾固定 Colophon 入口
   const navList =
@@ -1322,6 +1375,7 @@ function DetailPage({
   const related = items.filter((item) => item.id !== project.id).slice(0, 2)
   const demoUrl = demoHref(project)
   const sourceUrl = sourceHref(project)
+  const githubHref = settingsHref(settings.githubUrl)
   // 相册：优先多张；只有封面时退化为单张；都没有则不渲染预览区
   const previewImages =
     project.previewImages && project.previewImages.length > 0
@@ -1363,7 +1417,11 @@ function DetailPage({
     navigator.clipboard.writeText(text).then(() => report(true), () => report(false))
   }
   const copyLabel = (key: string) =>
-    copied && copied.key === key ? (copied.ok ? "COPIED" : "COPY FAILED") : "COPY"
+    copied && copied.key === key
+      ? copied.ok
+        ? uiLabel(language, "COPIED", "已复制")
+        : uiLabel(language, "COPY FAILED", "复制失败")
+      : uiLabel(language, "COPY", "复制")
 
   // README：优先当前语言，缺失时回退另一种语言并给出提示
   const readmeZh = (project.readmeZh ?? "").trim()
@@ -1429,6 +1487,17 @@ function DetailPage({
         </button>
         <span className="detail-location">CABINET / SPEC—{project.id}</span>
         <div className="header-tools">
+          {githubHref ? (
+            <a
+              className="header-github"
+              href={githubHref}
+              target="_blank"
+              rel="noreferrer"
+              aria-label="GitHub"
+            >
+              GitHub <span aria-hidden="true">↗</span>
+            </a>
+          ) : null}
           {settings.languageToggleEnabled !== false && (
             <button type="button" onClick={onLanguage} aria-label="Switch language">
               {language === "en" ? "中" : "EN"}
@@ -1444,7 +1513,7 @@ function DetailPage({
 
       <section className="detail-hero">
         <button type="button" className="back-link" onClick={onBack}>
-          ← RETURN TO CABINET
+          ← {uiLabel(language, "RETURN TO CABINET", "返回项目列表")}
         </button>
         <div className="detail-hero-grid">
           <div className="detail-title">
@@ -1478,7 +1547,7 @@ function DetailPage({
                   rel="noreferrer"
                   onClick={() => trackOutbound("github", project.id)}
                 >
-                  VIEW SOURCE <span>↗</span>
+                  {uiLabel(language, "VIEW SOURCE", "查看仓库")} <span>↗</span>
                 </a>
               ) : null}
               {demoUrl ? (
@@ -1489,7 +1558,7 @@ function DetailPage({
                   rel="noreferrer"
                   onClick={() => trackOutbound("demo", project.id)}
                 >
-                  LIVE DEMO <span>↗</span>
+                  {uiLabel(language, "LIVE DEMO", "在线演示")} <span>↗</span>
                 </a>
               ) : null}
               <button
@@ -1501,7 +1570,7 @@ function DetailPage({
                     ?.scrollIntoView({ behavior: "smooth" })
                 }
               >
-                READ FIELD NOTES <span>↓</span>
+                {uiLabel(language, "READ FIELD NOTES", "阅读项目说明")} <span>↓</span>
               </button>
             </div>
           </div>
@@ -1538,36 +1607,36 @@ function DetailPage({
             )}
             <p className="hand-note">Observed in {project.habitat}</p>
             <span className="plate-status">
-              <b /> {project.status}
+              <b /> {projectStatusLabel(language, project.status)}
               {project.version ? ` · ${project.version}` : ""}
             </span>
           </div>
         </div>
         <dl className="detail-register">
           <div>
-            <dt>CLASS</dt>
+            <dt>{uiLabel(language, "CLASS", "分类")}</dt>
             <dd>{project.type}</dd>
           </div>
           <div>
-            <dt>LANGUAGE</dt>
+            <dt>{uiLabel(language, "LANGUAGE", "语言")}</dt>
             <dd>{project.language}</dd>
           </div>
           <div>
-            <dt>FIRST RELEASE</dt>
+            <dt>{uiLabel(language, "FIRST RELEASE", "首次发布")}</dt>
             <dd>{project.year}</dd>
           </div>
           <div>
-            <dt>LAST OBSERVED</dt>
+            <dt>{uiLabel(language, "LAST OBSERVED", "最近更新")}</dt>
             <dd>{project.updated}</dd>
           </div>
           <div>
-            <dt>CITATIONS</dt>
+            <dt>{uiLabel(language, "CITATIONS", "星标")}</dt>
             <dd>{project.stars}</dd>
           </div>
         </dl>
         <nav
           className="detail-tabs"
-          aria-label="Project documentation"
+          aria-label={uiLabel(language, "Project documentation", "项目文档")}
           role="tablist"
           onKeyDown={(event) => {
             // 符合 WAI-ARIA 的 tab 键盘约定：左右方向键在页签间移动并聚焦
@@ -1592,7 +1661,7 @@ function DetailPage({
               className={detailTab === tab ? "active" : ""}
               onClick={() => setDetailTab(tab)}
             >
-              {tab}
+              {uiLabel(language, tab, DETAIL_TAB_ZH[tab])}
             </button>
           ))}
         </nav>
@@ -1656,7 +1725,9 @@ function DetailPage({
               </h2>
             </div>
             <span className="as-of">
-              {String(features.length).padStart(2, "0")} TRAITS
+              {language === "zh"
+                ? `${String(features.length).padStart(2, "0")} 项特征`
+                : `${String(features.length).padStart(2, "0")} TRAITS`}
             </span>
           </div>
           {features.length > 0 ? (
@@ -1669,7 +1740,9 @@ function DetailPage({
               ))}
             </div>
           ) : (
-            <p className="section-empty">暂无特征标签</p>
+            <p className="section-empty">
+              {uiLabel(language, "No feature tags yet", "暂无特征标签")}
+            </p>
           )}
           {metrics.length > 0 ? (
             <div className="metric-strip">
@@ -1681,7 +1754,9 @@ function DetailPage({
               ))}
             </div>
           ) : (
-            <p className="section-empty">暂无指标</p>
+            <p className="section-empty">
+              {uiLabel(language, "No metrics yet", "暂无指标")}
+            </p>
           )}
         </section>
 
@@ -1702,7 +1777,9 @@ function DetailPage({
               ))}
             </div>
           ) : (
-            <p className="section-empty">暂无时间线记录</p>
+            <p className="section-empty">
+              {uiLabel(language, "No timeline entries yet", "暂无时间线记录")}
+            </p>
           )}
         </section>
       </div>
@@ -1716,7 +1793,7 @@ function DetailPage({
           tabIndex={0}
         >
           <aside>
-            <span className="eyebrow">ON THIS PAGE</span>
+            <span className="eyebrow">{uiLabel(language, "ON THIS PAGE", "本页目录")}</span>
             {readmeDoc.headings.length > 0 ? (
               readmeDoc.headings
                 .filter((heading) => heading.level <= 3)
@@ -1736,7 +1813,9 @@ function DetailPage({
                   </button>
                 ))
             ) : (
-              <span className="doc-toc-empty">暂无目录</span>
+              <span className="doc-toc-empty">
+                {uiLabel(language, "No entries yet", "暂无目录")}
+              </span>
             )}
           </aside>
           <article className="markdown-body">
@@ -1755,18 +1834,26 @@ function DetailPage({
                 </span>
                 {readmeFromFallback ? (
                   <p className="doc-notice">
-                    该标本暂无
-                    {language === "zh" ? "中文" : "英文"} README，以下为另一种语言的原文。
+                    {uiLabel(
+                      language,
+                      "This project has no English README; the original in the other language is shown below.",
+                      "该项目暂无中文 README，以下为另一种语言的原文。",
+                    )}
                   </p>
                 ) : null}
                 {readmeDoc.nodes}
               </div>
             ) : (
               <div className="empty-state">
-                <strong>该标本暂无 README 文档</strong>
+                <strong>
+                  {uiLabel(language, "No README for this project yet", "该项目暂无 README 文档")}
+                </strong>
                 <span>
-                  可在管理端「项目管理 → 编辑」粘贴 Markdown，或在「GitHub 同步」勾选
-                  「同时抓取 README / Compose 文档」后同步。
+                  {uiLabel(
+                    language,
+                    "Paste Markdown in the admin console (Projects → Edit), or enable “Also fetch README / Compose docs” in GitHub Sync.",
+                    "可在管理端「项目管理 → 编辑」粘贴 Markdown，或在「GitHub 同步」勾选「同时抓取 README / Compose 文档」后同步。",
+                  )}
                 </span>
               </div>
             )}
@@ -1783,7 +1870,7 @@ function DetailPage({
           tabIndex={0}
         >
           <aside>
-            <span className="eyebrow">DEPLOYMENT</span>
+            <span className="eyebrow">{uiLabel(language, "DEPLOYMENT", "部署")}</span>
             {composeEntries.length > 0 ? (
               composeEntries.map((entry) => (
                 <button
@@ -1800,7 +1887,9 @@ function DetailPage({
                 </button>
               ))
             ) : (
-              <span className="doc-toc-empty">暂无编排文件</span>
+              <span className="doc-toc-empty">
+                {uiLabel(language, "No compose files yet", "暂无编排文件")}
+              </span>
             )}
           </aside>
           <article className="markdown-body">
@@ -1810,10 +1899,19 @@ function DetailPage({
             </span>
             {composeEntries.length === 0 ? (
               <div className="empty-state">
-                <strong>该标本暂无 Docker Compose 编排</strong>
+                <strong>
+                  {uiLabel(
+                    language,
+                    "No Docker Compose file for this project yet",
+                    "该项目暂无 Docker Compose 编排",
+                  )}
+                </strong>
                 <span>
-                  仓库中未发现 deploy/dev/docker-compose.yml 或 deploy/prod/docker-compose.yml，
-                  可在管理端手工粘贴。
+                  {uiLabel(
+                    language,
+                    "No deploy/dev/docker-compose.yml or deploy/prod/docker-compose.yml found in the repository; you can paste one in the admin console.",
+                    "仓库中未发现 deploy/dev/docker-compose.yml 或 deploy/prod/docker-compose.yml，可在管理端手工粘贴。",
+                  )}
                 </span>
               </div>
             ) : (
@@ -1837,7 +1935,9 @@ function DetailPage({
                 </div>
               ))
             )}
-            <h3 id="env-vars">环境变量</h3>
+            <h3 id="env-vars">
+              {uiLabel(language, "Environment variables", "环境变量")}
+            </h3>
             <div className="code-block">
               <div className="code-block-head">
                 <span>.ENV.PRODUCTION</span>
@@ -2013,6 +2113,7 @@ type AdminView =
   | "projects"
   | "sync"
   | "settings"
+  | "visits"
 
 // 侧栏按访客看到的页面分组：一个页面一条，页面里再按栏目分卡（以前把首页四段各升成一条侧栏项，
 // 四条都只装一两张卡，看着像拆了四个空壳）。序号只在这里维护一份，
@@ -2026,11 +2127,91 @@ const ADMIN_NAV: readonly { key: AdminView; no: string; label: string }[] = [
   { key: "projects", no: "06", label: "项目管理" },
   { key: "sync", no: "07", label: "GitHub 同步" },
   { key: "settings", no: "08", label: "站点设置" },
+  { key: "visits", no: "09", label: "访问统计" },
 ]
 
 /** 页内 eyebrow 的编号与顶栏标题：都取自 ADMIN_NAV，杜绝"侧栏一份、页内一份" */
 const adminNav = (key: AdminView) => ADMIN_NAV.find((entry) => entry.key === key) ?? ADMIN_NAV[0]
 const adminNavNo = (key: AdminView): string => adminNav(key).no
+
+// 访问统计的展示标签：库里只存粗分类/两位国家码，人话在这里翻
+const VISIT_COUNTRY_LABELS: Record<string, string> = {
+  CN: "中国", HK: "中国香港", TW: "中国台湾", MO: "中国澳门", SG: "新加坡",
+  US: "美国", JP: "日本", KR: "韩国", GB: "英国", DE: "德国", FR: "法国",
+  NL: "荷兰", CA: "加拿大", AU: "澳大利亚", IN: "印度", unknown: "未知",
+}
+const VISIT_DEVICE_LABELS: Record<string, string> = {
+  desktop: "桌面", mobile: "手机", tablet: "平板", other: "其他", bot: "爬虫",
+}
+const VISIT_LANG_LABELS: Record<string, string> = {
+  zh: "中文", en: "英文", other: "其他语言", unknown: "未知",
+}
+const VISIT_SOURCE_LABELS: Record<string, string> = {
+  direct: "直接访问", search: "搜索引擎", github: "GitHub", linkedin: "LinkedIn",
+  social: "社交平台", other: "其他站点",
+}
+const VISIT_EVENT_LABELS: Record<string, string> = {
+  outbound: "出站点击", specimen_open: "打开标本", deck: "观察台翻页",
+  imgfail: "取图失败", dirimport: "目录导入",
+}
+const VISIT_METHOD_LABELS: Record<string, string> = {
+  github: "GitHub", demo: "Demo", card: "陈列卡", index: "目录", related: "相邻标本",
+  footer: "页脚", view: "首屏", thumb: "缩略图", plate: "侧牌", arrow: "箭头",
+  drag: "拖拽", key: "键盘", zoom: "放大", ok: "成功", ratelimited: "限流",
+  notfound: "未找到", error: "失败",
+}
+const visitLabel = (labels: Record<string, string>, value: string): string =>
+  labels[value] ?? (value || "—")
+const formatVisitNumber = (value: number): string =>
+  Number.isFinite(value) ? value.toLocaleString("zh-CN") : "0"
+const visitSurfaceLabel = (surface: string, ref: string): string =>
+  surface === "home"
+    ? "站点首页"
+    : surface === "detail"
+      ? `详情 · SPEC—${ref || "?"}`
+      : surface
+
+function VisitBars({ daily }: { daily: VisitStats["daily"] }) {
+  const max = Math.max(...daily.map((entry) => entry.pv), 1)
+  // 30 天不逐日标（会挤成一条），按约 7 个刻度取样
+  const labelStep = daily.length <= 7 ? 1 : Math.max(1, Math.ceil(daily.length / 7))
+  return (
+    <div className="visit-bars">
+      {daily.map((item, index) => (
+        <div
+          className="visit-bar"
+          key={item.day}
+          title={`${item.day} · ${item.pv} PV / ${item.uv} UV`}
+        >
+          <span className="visit-bar-track">
+            <i style={{ height: `${Math.max(2, (item.pv / max) * 100)}%` }} />
+          </span>
+          <small>{index % labelStep === 0 ? item.day.slice(5) : ""}</small>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function VisitHours({ hours }: { hours: VisitStats["hours"] }) {
+  const max = Math.max(...hours.map((entry) => entry.pv), 1)
+  return (
+    <div className="visit-hours">
+      {hours.map((item) => (
+        <div
+          className="visit-hour"
+          key={item.hour}
+          title={`${String(item.hour).padStart(2, "0")}:00 · ${item.pv} PV`}
+        >
+          <span className="visit-hour-track">
+            <i style={{ height: `${Math.max(2, (item.pv / max) * 100)}%` }} />
+          </span>
+          <small>{item.hour % 6 === 0 ? String(item.hour).padStart(2, "0") : ""}</small>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 // 页脚文案的中英字段键（均以 En / Zh 结尾，值类型均为 string）
 type FooterCopyEnKey = Extract<keyof SiteSettings, `${string}En`>
@@ -2371,10 +2552,12 @@ function AdminGateway({
   const [authError, setAuthError] = useState("")
 
   // 挂载时自动尝试校验：优先使用本地 token；
-  // 无 token 时也发起一次探测——若浏览器已通过 Cloudflare Zero Trust
-  // （持有 CF_Authorization Cookie，由后端校验其 JWT 签名），即可免口令进入。
+  // 有 Access 层时无 token 也探测一次（持有 CF_Authorization Cookie 可免口令进入）。
+  // 没有 token、也没有 Access 层时直接停在登录表单：Worker 会把无凭据探测记一次鉴权失败，
+  // 反复挂载 10 次就会把自己送进 429。
   useEffect(() => {
     const existing = getAdminToken()
+    if (!existing && !accessLayerPresent) return
     setLoading(true)
     verifyAndFetchAdminProjects(existing || undefined).then((res) => {
       setLoading(false)
@@ -2638,6 +2821,14 @@ function AdminPage({
   const [scanningRepos, setScanningRepos] = useState(false)
   const [discoveredRepos, setDiscoveredRepos] = useState<RemoteGithubRepo[] | null>(null)
   const [importingRepo, setImportingRepo] = useState<string | null>(null)
+  // 访问统计：窗口只影响曲线与分布；累计值始终全量。
+  // visitReload 让"重试"能真正重跑 effect（只改 days 不会触发）。
+  const [visitDays, setVisitDays] = useState(30)
+  const [visitReload, setVisitReload] = useState(0)
+  const [visitStats, setVisitStats] = useState<VisitStats | null>(null)
+  const [visitError, setVisitError] = useState("")
+  const [visitLoading, setVisitLoading] = useState(false)
+  const [statsOptOut, setStatsOptOutState] = useState(() => isStatsOptOut())
 
   // 从 D1 拉取站点文案设置。未加载成功前一律禁止保存：
   // 否则初值（内置默认文案）会被整份写回，抹掉线上已配置的文案。
@@ -2662,6 +2853,27 @@ function AdminPage({
   useEffect(() => {
     loadSiteSettings()
   }, [])
+
+  useEffect(() => {
+    if (view !== "visits") return
+    let alive = true
+    // 切窗口时先清掉旧数据：否则"90 天"按钮下会短暂显示 30 天的数字
+    setVisitStats(null)
+    setVisitError("")
+    setVisitLoading(true)
+    void fetchVisitStats(visitDays).then((res) => {
+      if (!alive) return
+      setVisitLoading(false)
+      if (res.success && res.data) {
+        setVisitStats(res.data)
+      } else {
+        setVisitError(res.error || "访问统计加载失败")
+      }
+    })
+    return () => {
+      alive = false
+    }
+  }, [view, visitDays, visitReload])
 
   const saveSettings = async () => {
     if (!settingsLoaded) {
@@ -4558,6 +4770,10 @@ function AdminPage({
                   <h2>
                     同步范围 · 已选 {syncSelected.length} / {items.length}
                   </h2>
+                  <small className="sync-scope-limit">
+                    一次最多 10 个；勾选「同时抓取 README / Compose 文档」时最多 2 个
+                    （抓一个仓库的文档最多要 20 次请求，免费版每次调用只有 50 个子请求额度）
+                  </small>
                 </div>
                 <div className="sync-scope-quick">
                   <button type="button" onClick={() => setSyncScopeIds(null)}>
@@ -4727,6 +4943,232 @@ function AdminPage({
                 ))}
               </section>
             </div>
+          </div>
+        )}
+
+        {view === "visits" && (
+          <div className="admin-content">
+            <div className="admin-page-title compact">
+              <div>
+                <span className="eyebrow">VISIT LEDGER / {adminNavNo("visits")}</span>
+                <h1>访问统计</h1>
+                <p>
+                  页面浏览与独立访客。数据来自匿名事件，不记录 IP、UA 或完整来源地址；
+                  你自己这台设备可以在页底排除。
+                </p>
+              </div>
+              <div className="visit-range" role="group" aria-label="统计窗口">
+                {[7, 30, 90].map((days) => (
+                  <button
+                    key={days}
+                    type="button"
+                    className={visitDays === days ? "active" : ""}
+                    aria-pressed={visitDays === days}
+                    onClick={() => setVisitDays(days)}
+                  >
+                    {days} 天
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {visitError ? (
+              <div className="admin-banner" role="alert">
+                <span>{visitError}</span>
+                <button type="button" onClick={() => setVisitReload((value) => value + 1)}>
+                  重试
+                </button>
+              </div>
+            ) : null}
+
+            {visitLoading && !visitStats ? (
+              <div className="empty-state">
+                <strong>正在读取访问台账…</strong>
+                <span>首次加载要读几张聚合表</span>
+              </div>
+            ) : null}
+
+            {visitStats ? (
+              <>
+                <div className="admin-stats visit-stats">
+                  <article>
+                    <span>累计独立访客</span>
+                    <strong>{formatVisitNumber(visitStats.totals.uv)}</strong>
+                    <small>浏览器匿名 ID 去重</small>
+                  </article>
+                  <article>
+                    <span>累计访问次数</span>
+                    <strong>{formatVisitNumber(visitStats.totals.pv)}</strong>
+                    <small>PV · 自开始统计</small>
+                  </article>
+                  <article>
+                    <span>近 {visitStats.range.days} 天访客</span>
+                    <strong>{formatVisitNumber(visitStats.totals.rangeUv)}</strong>
+                    <small>
+                      窗口内去重 · {formatVisitNumber(visitStats.totals.rangePv)} 次浏览
+                    </small>
+                  </article>
+                  <article>
+                    <span>今日</span>
+                    <strong>{formatVisitNumber(visitStats.totals.todayUv)}</strong>
+                    <small>{formatVisitNumber(visitStats.totals.todayPv)} 次浏览</small>
+                  </article>
+                </div>
+
+                <div className="visit-grid">
+                  <section className="admin-panel">
+                    <header>
+                      <div>
+                        <span className="eyebrow">TREND</span>
+                        <h2>每日浏览</h2>
+                      </div>
+                      <span className="visit-note">PV · 悬停看 UV</span>
+                    </header>
+                    <VisitBars daily={visitStats.daily} />
+                  </section>
+                  <section className="admin-panel">
+                    <header>
+                      <div>
+                        <span className="eyebrow">PAGES</span>
+                        <h2>热门页面</h2>
+                      </div>
+                      <span className="visit-note">近 {visitStats.range.days} 天</span>
+                    </header>
+                    <ul className="visit-list">
+                      {visitStats.pages.length === 0 ? (
+                        <li>
+                          <strong>还没有记录</strong>
+                          <small>等第一个访客</small>
+                        </li>
+                      ) : (
+                        visitStats.pages.map((page) => (
+                          <li key={`${page.surface}-${page.ref}`}>
+                            <strong>{visitSurfaceLabel(page.surface, page.ref)}</strong>
+                            <small>
+                              {page.surface === "detail"
+                                ? "标本详情"
+                                : page.surface === "home"
+                                  ? "首页浏览"
+                                  : page.surface}
+                            </small>
+                            <em>{formatVisitNumber(page.pv)}</em>
+                          </li>
+                        ))
+                      )}
+                    </ul>
+                  </section>
+                </div>
+
+                <div className="settings-grid visit-dims">
+                  {(
+                    [
+                      ["country", "地域 · PV", VISIT_COUNTRY_LABELS],
+                      ["device", "设备 · PV", VISIT_DEVICE_LABELS],
+                      ["lang", "语言 · PV", VISIT_LANG_LABELS],
+                      ["source", "来源 · PV", VISIT_SOURCE_LABELS],
+                    ] as const
+                  ).map(([key, title, labels]) => (
+                    <section className="visit-dim-card" key={key}>
+                      <h3>{title}</h3>
+                      {visitStats.dims[key].length === 0 ? (
+                        <p className="visit-note">暂无</p>
+                      ) : (
+                        <dl>
+                          {visitStats.dims[key].slice(0, 8).map((entry) => (
+                            <div key={entry.value}>
+                              <dt>{labels[entry.value] ?? entry.value}</dt>
+                              <dd>{formatVisitNumber(entry.pv)}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      )}
+                    </section>
+                  ))}
+                </div>
+
+                <section className="admin-panel visit-hours-panel">
+                  <header>
+                    <div>
+                      <span className="eyebrow">HOURS</span>
+                      <h2>时段分布</h2>
+                    </div>
+                    <span className="visit-note">
+                      Asia/Shanghai · 近 {visitStats.range.days} 天
+                    </span>
+                  </header>
+                  <VisitHours hours={visitStats.hours} />
+                </section>
+
+                <section className="admin-panel visit-events-panel">
+                  <header>
+                    <div>
+                      <span className="eyebrow">EVENTS</span>
+                      <h2>行为与转化</h2>
+                    </div>
+                    <span className="visit-note">近 {visitStats.range.days} 天</span>
+                  </header>
+                  {visitStats.events.length === 0 ? (
+                    <div className="empty-state">
+                      <strong>还没有事件</strong>
+                      <span>打开标本、翻观察台或点击出站后会出现在这里</span>
+                    </div>
+                  ) : (
+                    <div className="visit-events">
+                      {visitStats.events.map((group) => (
+                        <article key={group.event}>
+                          <header>
+                            <strong>{VISIT_EVENT_LABELS[group.event] ?? group.event}</strong>
+                            <span>{formatVisitNumber(group.total)}</span>
+                          </header>
+                          <ul>
+                            {group.items.map((item) => (
+                              <li key={`${item.method}-${item.host}-${item.ref}`}>
+                                <span>
+                                  {visitLabel(VISIT_METHOD_LABELS, item.method || item.host)}
+                                  {item.ref ? ` · SPEC—${item.ref}` : ""}
+                                </span>
+                                <em>{formatVisitNumber(item.count)}</em>
+                              </li>
+                            ))}
+                          </ul>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </>
+            ) : null}
+
+            <section className="settings-card visit-optout">
+              <span className="eyebrow">PRIVACY</span>
+              <h2>本设备不计入访问</h2>
+              <p>
+                你自己的浏览会把小站的数据抬得没有参考价值。勾选后，这台浏览器不再发送浏览与点击事件
+                （已记录的数据不会回滚）。
+              </p>
+              <label className="toggle-row">
+                <span>
+                  <strong>{statsOptOut ? "已排除本设备" : "正在计入本设备"}</strong>
+                  <small>
+                    只作用于这台浏览器；使用 admin 子域时会用一枚偏好 cookie 同步到公开站
+                  </small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={statsOptOut}
+                  onChange={() => {
+                    const next = !statsOptOut
+                    if (!setStatsOptOut(next)) {
+                      setNoticeError(
+                        "排除开关没有保存成功：浏览器可能禁用了本地存储，或阻止了跨子域的偏好 cookie。",
+                      )
+                      return
+                    }
+                    setStatsOptOutState(next)
+                  }}
+                />
+              </label>
+            </section>
           </div>
         )}
 
@@ -6138,9 +6580,11 @@ function PreviewGallery({
 
 function DetailLoading({
   settings,
+  language,
   onBack,
 }: {
   settings: SiteSettings
+  language: Language
   onBack: () => void
 }) {
   return (
@@ -6157,23 +6601,45 @@ function DetailLoading({
           <span className="eyebrow">RETRIEVING SPECIMEN</span>
           <div className="skeleton-line" />
           <div className="skeleton-line short" />
-          <p>正在从边缘数据库调取该标本的完整记录…</p>
+          <p>
+            {uiLabel(
+              language,
+              "Loading the full specimen record from the edge database…",
+              "正在从边缘数据库调取该标本的完整记录…",
+            )}
+          </p>
         </div>
       </section>
     </main>
   )
 }
 
-function ProjectNotFound({ id, onBack }: { id: string; onBack: () => void }) {
+function ProjectNotFound({
+  id,
+  language,
+  onBack,
+}: {
+  id: string
+  language: Language
+  onBack: () => void
+}) {
   return (
     <main className="detail-page">
       <section className="detail-hero">
         <div className="detail-placeholder">
           <span className="eyebrow">SPECIMEN NOT FOUND</span>
-          <h1>未找到标本 SPEC—{id}</h1>
-          <p>该标本可能尚未公开、已归档，或编号有误。</p>
+          <h1>
+            {uiLabel(language, `Specimen SPEC—${id} not found`, `未找到标本 SPEC—${id}`)}
+          </h1>
+          <p>
+            {uiLabel(
+              language,
+              "It may be unpublished, archived, or the id may be wrong.",
+              "该标本可能尚未公开、已归档，或编号有误。",
+            )}
+          </p>
           <button type="button" className="button primary" onClick={onBack}>
-            ← 返回馆藏
+            ← {uiLabel(language, "Back to collection", "返回馆藏")}
           </button>
         </div>
       </section>
@@ -6188,10 +6654,12 @@ function ProjectNotFound({ id, onBack }: { id: string; onBack: () => void }) {
  */
 function DetailUnavailable({
   id,
+  language,
   onBack,
   onRetry,
 }: {
   id: string
+  language: Language
   onBack: () => void
   onRetry: () => void
 }) {
@@ -6200,14 +6668,26 @@ function DetailUnavailable({
       <section className="detail-hero">
         <div className="detail-placeholder" role="alert">
           <span className="eyebrow">SPECIMEN UNAVAILABLE</span>
-          <h1>暂时取不到标本 SPEC—{id}</h1>
-          <p>请求没有成功——多半是网络或服务端的问题，不代表这件标本不存在。</p>
+          <h1>
+            {uiLabel(
+              language,
+              `Specimen SPEC—${id} is temporarily unavailable`,
+              `暂时取不到标本 SPEC—${id}`,
+            )}
+          </h1>
+          <p>
+            {uiLabel(
+              language,
+              "The request failed — likely a network or server problem; the specimen itself probably still exists.",
+              "请求没有成功——多半是网络或服务端的问题，不代表这件标本不存在。",
+            )}
+          </p>
           <div className="detail-placeholder-actions">
             <button type="button" className="button primary" onClick={onRetry}>
-              重试
+              {uiLabel(language, "Retry", "重试")}
             </button>
             <button type="button" className="button secondary" onClick={onBack}>
-              ← 返回馆藏
+              ← {uiLabel(language, "Back to collection", "返回馆藏")}
             </button>
           </div>
         </div>
@@ -6286,19 +6766,22 @@ function ProjectRoute({
   useEffect(() => {
     if (state !== "ready" || detailCountedRef.current === id) return
     detailCountedRef.current = id
-    trackPageView("detail")
+    trackPageView("detail", id)
   }, [state, id])
 
-  if (state === "loading") return <DetailLoading settings={settings} onBack={onBack} />
+  if (state === "loading")
+    return <DetailLoading settings={settings} language={language} onBack={onBack} />
   if (state === "error")
     return (
       <DetailUnavailable
         id={id}
+        language={language}
         onBack={onBack}
         onRetry={() => setAttempt((value) => value + 1)}
       />
     )
-  if (state === "missing" || !detail) return <ProjectNotFound id={id} onBack={onBack} />
+  if (state === "missing" || !detail)
+    return <ProjectNotFound id={id} language={language} onBack={onBack} />
   return (
     <DetailPage
       project={detail}
@@ -6473,8 +6956,14 @@ export default function App() {
     // 没有子域可用的环境**不跳**（跳过去是不存在的域名），由 initialRoute 就地开后台。
     const checkRedirect = () => {
       const target = canSwitchToAdminHost() ? adminSiteOrigin() : ""
-      if (target && (legacy === "admin" || window.location.pathname === "/admin")) {
-        window.location.href = target
+      // 每次都读当前 hash：同文档里再敲 #admin 也要走同一条子域跳转，
+      // 不能沿用挂载时那一次解析结果。`/admin/` 由 routeFromPath 归一；replace 避免留下会反复回跳的历史。
+      const currentLegacy = legacyRouteFromHash(window.location.hash)
+      if (
+        target &&
+        (currentLegacy === "admin" || routeFromPath(window.location.pathname) === "admin")
+      ) {
+        window.location.replace(target)
         return true
       }
       return false
@@ -6596,8 +7085,14 @@ export default function App() {
       <ProjectRoute
         key={projectId}
         id={projectId}
-        listed={items.find((item) => item.id === projectId)}
-        items={items}
+        // 只有线上列表才可当详情投影；内置演示数据只是首屏占位，
+        // 拿它渲染详情会在离线/404 时把示例项目当成真实标本（假状态）。
+        listed={
+          collectionSource === "live"
+            ? items.find((item) => item.id === projectId)
+            : undefined
+        }
+        items={collectionSource === "live" ? items : []}
         language={language}
         dark={dark}
         settings={effectiveSettings}

@@ -64,3 +64,15 @@ export function adminSiteOrigin(parts: HostParts): string {
   if (isAdminHostname(host)) return join(parts, host)
   return hasAdminSibling(host) ? join(parts, `${ADMIN_PREFIX}${host}`) : ''
 }
+
+/**
+ * 前后台共享的退出统计偏好 cookie 的 Domain：
+ * `admin.X` → `X`（公开站也读得到）；公开站点 → 自身；本地/IP/托管预览域 → 空串（退回 localStorage）。
+ */
+export function sharedCookieDomain(hostname: string): string {
+  const host = normalize(hostname)
+  if (!host) return ''
+  if (isAdminHostname(host)) return host.slice(ADMIN_PREFIX.length)
+  if (isSiteHostname(host)) return host
+  return ''
+}
