@@ -2973,6 +2973,7 @@ export const SITE_SETTINGS_COLUMNS: Record<string, string> = {
   curatorHeadlineZh: 'curator_headline_zh',
   curatorQuoteEn: 'curator_quote_en',
   curatorQuoteZh: 'curator_quote_zh',
+  curatorName: 'curator_name',
   curatorHabitat: 'curator_habitat',
   curatorField: 'curator_field',
   challengeHeadlineEn: 'challenge_headline_en',

@@ -3,13 +3,13 @@
 产出（frontend/public/brand/，随 dist 部署）：
   logo-mark.png          徽章 → 标头用（40px CSS × 最多 ~4 DPR = 160px 高）
   logo-banner.png        横版整标（design/Logo horizontal scroll.png 裁白边）→ 只给 README / 文档当头图
-  favicon.ico            16/32/48，带回底圆盘
-  apple-touch-icon.png   180，不透明满铺（iOS 把透明区域按黑色渲染）
+  favicon.ico            16/32/48，**透明底**、等比 contain（不裁方、不铺底）
+  apple-touch-icon.png   180，铺深墨底（iOS 把透明区域按黑色渲染，不铺底等于让深色衣着融进黑底）
 
 **2026-10-19 起只有一版**：不再按深浅主题各出一张（旧的 logo-mark-on-{dark,light}.png 与
 logo-lockup-on-{dark,light}.png 已删）。判据仍然是"抠图后的主体与背景的明暗关系"——新素材是
-浅发 + 深色衣着，两种主题底上都立得住，所以一张够用；但**浏览器图标自带底板**（圆盘底），
-因为标签栏的深浅不由我们控制。含字标的整标（design/Logo horizontal scroll.png）只留作原件：
+浅发 + 深色衣着，两种主题底上都立得住，所以一张够用；favicon 同理走**透明底**，
+只有 apple-touch 铺底（iOS 把透明渲染成黑色，见 build_icon 的说明）。含字标的整标（design/Logo horizontal scroll.png）只留作原件：
 它的字标是深墨色，放进深色主题的标头会直接看不见，而标头本来就有站点自己的排印文字。
 
 抠图必须**从四边泛洪**而不是全局阈值：头发的浅色本身就接近底色，全局阈值会在人脸上打出洞。
@@ -33,8 +33,8 @@ SOURCE = SRC / "Logo.png"
 TOL = 70            # 与底色的三通道色差之和：棋盘两档之差约 18，头发主体约 150
 MARK_HEIGHT = 160   # 标头 40px CSS × 最多 ~4 DPR
 ICON_SIZE = 180
-ICON_ART_INSET = 0.94  # 圆盘底上主体占画布的比例（留一圈底边）
-# 图标底板用深墨：新主体是浅色头发，浅底会把头发与背景糊成一片（按 preview.png 目测定的）
+ICON_PAD = 0.06         # 图标四周留白：等比 contain，既不裁也不压
+# 只给 apple-touch 铺底（iOS 把透明渲染成黑色，会让深色衣着融进黑底）；favicon 用透明
 ICON_GROUND = (26, 24, 20)
 
 
@@ -129,23 +129,21 @@ def crop_to(img: Image.Image, mask: np.ndarray) -> Image.Image:
     return Image.fromarray(sub)
 
 
-def square_crop(art: Image.Image) -> Image.Image:
-    """居中取正方形：图标画布是方的，主体尽量铺满才有辨识度。"""
-    side = min(art.size)
-    left = (art.width - side) // 2
-    top = (art.height - side) // 2
-    return art.crop((left, top, left + side, top + side))
+def build_icon(size: int, art: Image.Image, ground: tuple[int, int, int] | None = None) -> Image.Image:
+    """浏览器图标：**等比 contain**，不裁方、不铺满、不加圆盘。
 
-
-def build_icon(size: int, art: Image.Image) -> Image.Image:
-    """带底 favicon：**圆盘**底而不是方块——方形底在标签栏里会显出一个突兀的方块（被明确否过），
-    圆盘与主体同形，浅色/深色标签栏上都能看清。"""
-    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    ImageDraw.Draw(canvas).ellipse((0, 0, size - 1, size - 1), fill=ICON_GROUND + (255,))
-    inner = max(1, round(size * ICON_ART_INSET))
-    scaled = art.resize((inner, inner), Image.LANCZOS)
-    off = (size - inner) // 2
-    canvas.paste(scaled, (off, off), scaled)
+    旧版给 favicon 垫了一枚深墨圆盘，在浅色标签栏里就是一团黑（2026-10-19 被指出）；
+    而"居中裁成正方形"会把人物上下各切掉一截、看着像被挤压。现在按原比例缩进画布、
+    四周留白、背景透明——新素材本身是浅发 + 深色衣着，两种标签栏底色都读得清。
+    `ground` 只给 apple-touch 用：iOS 会把透明区域按黑色渲染，不铺底就等于让深色衣着
+    融进黑底，所以那一枚仍带底（由系统加圆角遮罩）。
+    """
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0) if ground is None else ground + (255,))
+    inner = max(1, round(size * (1 - 2 * ICON_PAD)))
+    ratio = min(inner / art.width, inner / art.height)
+    w, h = max(1, round(art.width * ratio)), max(1, round(art.height * ratio))
+    scaled = art.resize((w, h), Image.LANCZOS)
+    canvas.paste(scaled, ((size - w) // 2, (size - h) // 2), scaled)
     return canvas
 
 
@@ -163,12 +161,12 @@ mark = mark.resize(
 )
 mark.save(OUT / "logo-mark.png", "PNG", optimize=True)
 
-icon_art = square_crop(mark)
-build_icon(48, icon_art).save(OUT / "favicon.ico", sizes=[(16, 16), (32, 32), (48, 48)])
-touch = Image.new("RGB", (ICON_SIZE, ICON_SIZE), ICON_GROUND)
-touch_art = icon_art.resize((ICON_SIZE, ICON_SIZE), Image.LANCZOS)
-touch.paste(touch_art, (0, 0), touch_art)
-touch.save(OUT / "apple-touch-icon.png", "PNG", optimize=True)
+# favicon：透明底 + 等比 contain（不铺底、不裁方）
+build_icon(48, mark).save(OUT / "favicon.ico", sizes=[(16, 16), (32, 32), (48, 48)])
+# apple-touch：iOS 会把透明渲染成黑色 ⇒ 铺一层深墨底，同样等比 contain（圆角由系统遮罩）
+build_icon(ICON_SIZE, mark, ICON_GROUND).convert("RGB").save(
+    OUT / "apple-touch-icon.png", "PNG", optimize=True
+)
 
 # ---- README / 文档用的横版头图 ----------------------------------------------
 # 横版整标（徽章 + NestSpace 字标）**不进标头**：字标是深墨色，深色主题下会看不见，而标头本来
@@ -207,19 +205,23 @@ if BANNER_SOURCE.exists():
 # 视觉核对图：同一张标头图分别贴到深浅两种底色上，再排一行真实尺寸的图标
 # （浏览器面板 0×0 时唯一能"看见"的办法；尺寸给足，早先的 30px 缩略图会被预览器再缩一次，
 #  肉眼根本分不出好坏——踩过）。
-canvas = Image.new("RGB", (760, 250), (255, 255, 255))
+canvas = Image.new("RGB", (760, 262), (255, 255, 255))
 for col, (label, bg) in enumerate((("dark", (24, 25, 23)), ("light", (244, 243, 238)))):
     x0 = col * 380
     ImageDraw.Draw(canvas).rectangle((x0, 0, x0 + 380, 190), fill=bg)
     canvas.paste(mark, (x0 + 24, 35), mark)
     ImageDraw.Draw(canvas).text((x0 + 196, 90), f"header on {label} background", fill=(190, 60, 60))
-for i, size in enumerate((16, 32, 48)):
-    icon = build_icon(size, icon_art)
-    canvas.paste(icon, (24 + i * 56, 200), icon)
-ImageDraw.Draw(canvas).text((200, 212), "favicon 16 / 32 / 48 (disc ground)", fill=(120, 120, 120))
+# 透明 favicon 必须在两种标签栏底色上各看一次：只看一边会漏掉"头发/衣着融进背景"这类问题
+for row, (label, bg) in enumerate((("tab dark", (24, 25, 23)), ("tab light", (244, 243, 238)))):
+    y = 196 + row * 33
+    ImageDraw.Draw(canvas).rectangle((0, y, 760, y + 33), fill=bg)
+    for i, size in enumerate((16, 32, 48)):
+        icon = build_icon(size, mark)
+        canvas.paste(icon, (24 + i * 56, y + (33 - size) // 2), icon)
+    ImageDraw.Draw(canvas).text((200, y + 10), f"{label} favicon 16 / 32 / 48 (transparent)", fill=(190, 60, 60))
 canvas.save(SRC / "preview.png")
 
 print(f"抠图：背景 {bg_mask.mean() * 100:.1f}%，主体占画布 {subject.mean() * 100:.1f}%")
 print(f"标头徽章 {mark.size} · {(OUT / 'logo-mark.png').stat().st_size // 1024}KB")
-print(f"图标     favicon.ico (16/32/48) + apple-touch-icon.png ({ICON_SIZE})，底板 RGB{ICON_GROUND}")
+print(f"图标     favicon.ico (16/32/48) 透明底；apple-touch-icon.png ({ICON_SIZE}) 铺 RGB{ICON_GROUND} 底")
 print("核对图   frontend/design/preview.png（左右=深浅主题下的标头，下方=真实尺寸图标）")

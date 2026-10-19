@@ -50,7 +50,7 @@ CPU 10 ms/调用、子请求 50 个/调用、D1 写入 10 万行/天。本站所
 ```bash
 git clone https://github.com/AtaraxyEcho/NestSpace.git && cd NestSpace
 cp frontend/.dev.vars.example frontend/.dev.vars   # ADMIN_SECRET_KEY 填 `openssl rand -base64 32` 的输出
-bash scripts/d1-migrate.sh local                   # 首次自建本地库，按序跑 0001–0016
+bash scripts/d1-migrate.sh local                   # 首次自建本地库，按序跑 0001–0017
 cd frontend && pnpm install --frozen-lockfile
 pnpm run build && npx wrangler dev                 # http://localhost:8787，管理端 /admin
 ```
@@ -99,6 +99,17 @@ bash ../scripts/usage-probe.sh   # 接口级实测：自己起 8898 的 dev，�
 CI 跑前三条。最值得留意三条闸门：代码引用的列必须存在于 `migrations/`、站点设置的三份清单（内置默认 /
 Worker 白名单 / 迁移列）必须双向对齐、`pnpm test` 的注册链与 `test/` 目录一一对应（漏登记的闸门会在 CI 里静默不跑）。
 
+页面级核对（版式、图标、某一行文案是不是真的渲染出来了）：`bash ../scripts/visual-check.sh`
+（起 8899、无头 Chrome 取 DOM 与截图并断言；需要本机装 Chrome，所以不进 CI）。
+
+**上线之后**：
+
+```bash
+bash scripts/verify-production.sh                   # 只读烟测：首页 title / 公开接口 / 管理端 401 / 品牌资产
+ADMIN_TOKEN=... bash scripts/verify-production.sh   # 额外确认 0016 已迁移、台账可读
+bash scripts/d1-backup.sh                           # 导远程库 + 自动恢复演练；文件落在 backups/（已 gitignore）
+```
+
 ---
 
 ## 改文案 / 改结构
@@ -127,8 +138,8 @@ Worker 白名单 / 迁移列）必须双向对齐、`pnpm test` 的注册链与 
 
 ```text
 frontend/    src/ 前端 · worker/ 后端 · test/ 闸门 · public/ 静态资产（含 _headers）
-migrations/  D1 建表与种子（0001–0016）
-scripts/     d1-migrate.sh · usage-probe.sh · probe-visit-ledger.mjs · probe-bilingual-payload.mjs
+migrations/  D1 建表与种子（0001–0017）
+scripts/     d1-migrate.sh · d1-backup.sh · usage-probe.sh · visual-check.sh · verify-production.sh · probe-*.mjs · make-brand-logos.py
 docs/        DEPLOYMENT_GUIDE.md（部署、安全与配额手册）· ARCHITECTURE_PLAN.md · plans/
 ```
 

@@ -71,3 +71,6 @@ desktop.ini
 PASSWORD.*
 # 设计链路产物（product-design skill 的上下文与面板，非站点源码）
 spark-output/
+
+# 本地数据库备份（scripts/d1-backup.sh 的产物；含生产数据，绝不入库）
+/backups/

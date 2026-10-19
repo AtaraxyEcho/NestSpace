@@ -188,7 +188,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .header-tools { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
 .header-tools .volume { font-size: 10px; letter-spacing: 0.16em; color: var(--ink-tertiary); }
 .header-tools .header-github {
-  display: inline-flex; align-items: center; gap: 4px;
+  display: inline-flex; align-items: center; gap: 5px;
   min-height: 44px; padding: 0 6px;
   color: var(--ink-secondary); text-decoration: none;
   font-size: 10.5px; letter-spacing: 0.14em;
@@ -196,6 +196,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .header-tools .header-github:hover { color: var(--accent-text); }
 .header-tools .header-github span { font-size: 9px; }
+/* Octocat 标：跟着 currentColor 走（主题切换不用换色），且不允许被文字挤扁 */
+.header-tools .header-github svg { flex: none; }
 .header-tools button {
   min-width: 44px; height: 44px; border: 0; border-left: 1px solid var(--line-default);
   background: transparent; font: inherit; font-size: 10.5px; letter-spacing: 0.14em; cursor: pointer;

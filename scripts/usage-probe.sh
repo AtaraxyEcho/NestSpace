@@ -157,6 +157,23 @@ curl -s -o /dev/null -w '      wsrv.nl -> %{http_code} %{time_total}s\n' --max-t
 probe "名单外主机（要 404）" "http://127.0.0.1:$PORT/api/img?w=200&src=https%3A%2F%2Fevil.example.com%2Fa.png"
 
 echo
+echo "== 2b. 内置品牌资产必须直出（改名后最容易静默坏图的一条） =="
+# not_found_handling=single-page-application 会把缺失路径变成"200 + index.html"，
+# 配上 CSP img-src 'self'，浏览器什么都不报，只是图不见了——所以这里断言的是
+# **内容类型不是 html**，而不只是 200。
+for ASSET in /brand/logo-mark.png /brand/logo-banner.png /brand/favicon.ico /brand/apple-touch-icon.png; do
+  LINE=$(curl -s -o "$WORK/asset.bin" -w '%{http_code} %{content_type} %{size_download}B' \
+    "http://127.0.0.1:$PORT$ASSET")
+  echo "      $ASSET -> $LINE"
+  case "$LINE" in
+    200\ *text/html*|200\ *application/json*|4*\ *|5*\ *)
+      PROBE_FAIL=1
+      echo "        !! 没有作为图片直出（多半是被 SPA 兜底或文件缺失）"
+      ;;
+  esac
+done
+
+echo
 echo "== 3. 管理端写侧：相册判据仍是同一份（本地库，绝不碰生产） =="
 TOKEN=$(sed -n 's/^ADMIN_SECRET_KEY=//p' .dev.vars | head -1 | tr -d '\r"')
 if [ -z "$TOKEN" ]; then

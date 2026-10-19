@@ -88,14 +88,19 @@ NestSpace/
 │   │                             # 栏目与页面文案槽位（section_copy_json：首页描述行 + 详情页三处标题）
 │   ├── 0015_fill_seed_narrative.sql
 │   │                             # 纯数据：给种子的「挑战 / 方案」补上双语 JSON（只在列为空、且是种子行时）
-│   └── 0016_add_visit_ledger.sql
-│                                 # 访问台账（按天聚合 + 永久身份 + 90 天去重索引 + 哈希盐）
+│   ├── 0016_add_visit_ledger.sql
+│   │                             # 访问台账（按天聚合 + 永久身份 + 90 天去重索引 + 哈希盐）
+│   └── 0017_add_curator_name.sql
+│                                 # 首页「馆长手记」的姓名槽位（curator_name，留空回退内置默认）
 │
 ├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十七个闸门 + 构建（见第四节末）
 │
 ├── scripts/                      # 运维脚本
 │   ├── d1-migrate.sh             # 一键按序执行全部 D1 迁移（local / remote，可反复执行）
-│   ├── usage-probe.sh            # 接口探针：起 8898 的本地 Worker，自收进程（埋点 / 图片 / 双语写读 / 访问台账）
+│   ├── d1-backup.sh              # 导出 D1 到 backups/，并做一次真恢复演练（行数比对；--no-verify 跳过）
+│   ├── usage-probe.sh            # 接口探针：起 8898 的本地 Worker，自收进程（埋点 / 图片 / 品牌资产 / 双语写读 / 访问台账）
+│   ├── visual-check.sh           # 页面级核对：起 8899 + 无头 Chrome，断言顶栏图标 / 姓名行 / 标题，截图到 .tmp-visual/
+│   ├── verify-production.sh      # 生产只读烟测：首页标题 / 公开接口 / 管理端 401 / 品牌资产（可带 ADMIN_TOKEN）
 │   ├── probe-visit-ledger.mjs    # 访问台账实测：PV/UV 去重、爬虫与管理端排除、跨站拒绝、事件计数（探针第 6 节）
 │   ├── probe-bilingual-payload.mjs # 生成双语写读往返的请求载荷（供探针第 4 节 --data-binary 用）
 │   └── make-brand-logos.py       # 由 frontend/design/ 原件派生 frontend/public/brand/ 的 logo 与浏览器图标
@@ -166,7 +171,7 @@ database_id = "xxxx-xxxx-xxxx-xxxx"
 bash scripts/d1-migrate.sh remote
 ```
 
-脚本会按 `0001 → 0016` 的文件名顺序逐条执行、打印每条的 `✓ 已执行 / · 已记录，跳过 / ✗ 失败`，
+脚本会按 `0001 → 0017` 的文件名顺序逐条执行、打印每条的 `✓ 已执行 / · 已记录，跳过 / ✗ 失败`，
 并在结尾给出汇总；**已经应用过的迁移（重复的 ADD COLUMN、已存在的表）会被识别为跳过而不是报错，
 因此可以反复执行**。只有真正的错误（SQL 语法、约束冲突等）才会以非 0 退出并点名失败文件。
 需要指定库名时：`bash scripts/d1-migrate.sh remote nestspace-prod`。
@@ -181,7 +186,7 @@ bash scripts/d1-migrate.sh remote
   登记一次基线即可：`bash scripts/d1-migrate.sh remote --baseline`（只登记、不执行；遇到结构未落地的文件会
   明确拒绝登记并 exit 1）。
 
-**不要压扁迁移历史**：`_migrations` 按**文件名**记账，把 `0001–0016` 合并成一个新文件后，生产库里这个名字
+**不要压扁迁移历史**：`_migrations` 按**文件名**记账，把 `0001–0017` 合并成一个新文件后，生产库里这个名字
 从没被登记过 ⇒ 脚本会当成未执行真的跑一遍；而建表全是 `CREATE TABLE IF NOT EXISTS`，不会在 DDL 上报错挡下来，
 会一路跑到 `0002` 的种子写入。只有在**全新数据库**上才应该用单份 schema 快照替代历史。
 
@@ -200,6 +205,7 @@ bash scripts/d1-migrate.sh remote
 | `0013` 详情页小标题 | `site_settings` 写白名单（`challenge_headline_*` / `solution_headline_*`） | 「04 详情页文案」保存报 **400 并点名缺的那一列**（读侧 `SELECT *`，只会静默回退内置文案） |
 | `0014` 栏目与页面文案 | `site_settings` 写白名单（`section_copy_json`） | 栏目文案卡保存报 **400 并点名 `section_copy_json`**；读侧同样静默回退内置标题，所以只有保存才暴露 |
 | `0016` 访问台账 | `/api/usage` 的 D1 写入、`GET /api/admin/visits` | 公开站与 204 行为不受影响；统计写入被静默丢弃，管理端「访问统计」明确 **503** 并点名 0016 |
+| `0017` 馆长姓名 | `site_settings` 写白名单（`curator_name`） | 「03 首页栏目」保存站点文案报 **400 并点名 `curator_name`**；读侧是 `SELECT *`，缺列只是姓名回退内置默认，公开站不受影响 |
 
 > ⚠️ **顺序是硬约束，而且 Git 自动构建不会替你把关**：第 4 节的 Workers Builds 是"push 即部署"，
 > 一旦你为了跑迁移而先 push 了代码，部署就已经发生了。正确顺序是
@@ -367,6 +373,10 @@ Zero Trust 应用只对**配置的自定义域名**生效。以下入口默认�
 想要前端热更：另开一个终端跑 `pnpm run dev`（Vite 默认 8443，可用环境变量 `PORT` 覆盖；`/api` 代理到并行起的 8787，
 可用 `WRANGLER_DEV_URL` 覆盖代理目标）。注意 `wrangler dev` 服务的是 `dist/` 快照，所以走 8787 之前必须先 `pnpm run build`。
 
+页面级核对（版式、图标、某一行文案是不是真的渲染出来了）：`bash scripts/visual-check.sh` —— 自起 8899 的 dev、
+无头 Chrome 取 DOM 与截图、断言顶栏 GitHub 图标 / 馆长姓名行 / `<title>` 非空，产物落在 `.tmp-visual/`，
+结束后按端口收进程。它依赖本机装 Chrome，所以**不进 CI**。
+
 ```bash
 # 进入 frontend 目录
 cd frontend
@@ -485,7 +495,7 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
 |---|---|
 | 01 馆藏总览 | 最近更新、馆藏状态计数 |
 | 02 标头与导航 | 导航项的顺序 / 名称 / 显示、Logo 图文与显示模式 |
-| 03 首页栏目 | 首屏叙事、统计（指标 / 年鉴 / 描述行与开关）、馆长手记、目录描述、GitHub 地址与联系方式 |
+| 03 首页栏目 | 首屏叙事、统计（指标 / 年鉴 / 描述行与开关）、馆长手记（**姓名** / 所在地 / 方向 / 引言 / 标题）、目录描述、GitHub 地址与联系方式 |
 | 04 详情页文案 | 详情页的预览区 / 特征区 / 相邻标本三处标题，以及挑战·方案两段正文小标题 |
 | 05 底部栏文案 | 页脚各栏与版权行，支持 `{name}` `{since}` `{year}` 模板变量 |
 | 06 项目管理 | 每件标本的增删改与排序 |
@@ -928,6 +938,11 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
 
 ### 回滚与发布后核验
 
+- **先备份，再动库**：`bash scripts/d1-backup.sh` 默认导出**远程**库到 `backups/`（已 gitignore），
+  并自动做一次恢复演练——把 dump 灌进临时 sqlite 文件库、比对 `projects` / `site_settings` / `_migrations`
+  的行数。没被恢复过的备份只是"以为有备份"。`--no-verify` 只导出；`local` 备份本地库。
+  恢复前**再备份一次现状**（别让恢复把证据也覆盖了）；dump 里是 `CREATE TABLE`，直接灌回非空库会撞
+  `already exists`，所以恢复只对空库执行，或先确认要删哪些表（这一步不替你决定）。
 - **Worker 回滚**：`npx wrangler rollback`（或控制台 Deployments → 选上一版 → Rollback）。
 - **迁移不回滚**：0016 是纯新增表，回滚 Worker 到上一版不影响数据；**不要为了"回滚干净"删表**，
   否则累计台账与 90 天去重索引一起丢失（聚合表一删不可恢复）。
@@ -935,11 +950,12 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   Worker → Settings → Triggers 确认 `17 3 * * *` 仍在；若不在，恢复新版后重新部署，
   或在 D1 手工执行 `DELETE FROM visit_day_visitor WHERE day < date('now','+8 hours','-90 day')`
   （**必须带 `+8 hours`**：写入口径是按北京时间切日，用裸 `date('now')` 会在 UTC 与 +8 的 8 小时差里多删/少留一天）。
-- **发布后核验**：
-  1. `GET /api/projects` 返回 200；
-  2. 管理端能登录，`GET /api/admin/visits?days=7` 返回 200；
-  3. 打开一次公开页，`/api/usage` 返回 204，管理端「访问统计」的今日 PV 增长；
-  4. 若 `/api/admin/visits` 返回 503，按提示先跑 0016，不要先找前端问题。
+- **发布后核验**：先跑 `bash scripts/verify-production.sh`（只读，不打印凭据）。它检查首页 `<title>`、
+  `/api/projects` 非空、`/api/site-settings` 是 JSON、`/api/admin/visits` 未带凭据为 **401**、四个
+  `/brand/*` 资产以图片直出。想同时确认 0016 是否已迁移，给一个生产口令再跑：
+  `ADMIN_TOKEN=... bash scripts/verify-production.sh`（200 = 台账可读；非 200 会带出响应体前 160 字节）。
+  然后人工补一步：打开一次公开页，确认 `/api/usage` 返回 204、管理端「访问统计」的今日 PV 增长。
+  若 `/api/admin/visits` 返回 503，按提示先跑 0016，不要先找前端问题。
 - **本地/远程顺序**：本地迁移 → 远程迁移 → 部署；反序不会让公开站挂掉，但统计写入会被静默丢弃。
 
 ## 八、 品牌标 / 栏目顺序 / 双语叙述 / 同步范围
@@ -961,8 +977,11 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   抠图**从四边泛洪**而不是全局阈值（头发接近底色，全局阈值会在人脸上打出洞）；底色取**边框像素的中位数**
   而不是均值（这张图下边压着深色衣服，均值会把底色拖成中灰 ⇒ 几乎什么都抠不掉）；新素材的透明被压平成了
   棋盘格（PNG 无 alpha 通道），所以只保留**最大连通块**——被主体包住的棋盘残屑都是独立小块，这样一并清掉。
-  浏览器图标：`favicon.ico` 带**圆盘底**（贴着主体的圆形，不是方块——方块底在标签栏里很突兀），底板用深墨色
-  （浅发主体在浅底上会糊），并**居中裁成正方形**尽量铺满；`apple-touch-icon.png` 不透明满铺（iOS 把透明按黑色渲染）。
+  浏览器图标：`favicon.ico`（16/32/48）**透明底 + 等比 contain**——不铺底、也不"居中裁成正方形"。
+  两版旧做法都被否过：先是一枚深墨**圆盘底**在浅色标签栏里成了一团黑，而方形裁切把人物上下各切掉一截、
+  看着像被挤压。新素材浅发 + 深色衣着，两种标签栏底色上都读得清，所以透明就够了（`design/preview.png`
+  下方两行就是它在深、浅两种底上的真实尺寸样子）。`apple-touch-icon.png` 例外，仍铺深墨底：
+  iOS 会把透明区域按黑色渲染，不铺底等于让深色衣着融进黑底，圆角由系统遮罩。
   - 渲染收在一个组件里：`LogoContent`（内容）+ `LogoWordmark`（首页的 `<a>` 外壳）；
     详情页返回入口是 `<button>`，所以那里用 `LogoContent` 而不是把 `<a>` 套进 `<button>`（非法 HTML）。
     `LogoContent` 已不再接 `dark` 参数（单版素材没有主题分支）。

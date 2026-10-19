@@ -106,6 +106,8 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   curatorQuoteEn:
     'A good tool does not ask for attention. It takes root quietly, then makes room for other things to grow.',
   curatorQuoteZh: '好的工具不应索取注意力。它应当安静地扎根，然后让别的事物生长。',
+  // 姓名默认用 GitHub handle（站上已经公开的那个），真名请在管理端「03 首页栏目 → 馆长手记」填一次
+  curatorName: 'AtaraxyEcho',
   curatorHabitat: 'Shanghai / Remote',
   curatorField: 'Design & Engineering',
 

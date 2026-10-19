@@ -99,6 +99,7 @@ export interface SiteSettings extends FooterCopy {
   curatorHeadlineZh: string
   curatorQuoteEn: string
   curatorQuoteZh: string
+  curatorName: string
   curatorHabitat: string
   curatorField: string
 
