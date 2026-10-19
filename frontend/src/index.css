@@ -1351,8 +1351,10 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .card-body { grid-template-columns: 1fr; grid-template-rows: 36% 64%; }
   .specimen-panel { border-right: 0; border-bottom: 1px solid var(--line-default); padding: 6px; }
   .specimen-panel svg { width: 34%; height: 80%; }
-  .specimen-panel .hand-note, .specimen-panel .microcopy { position: absolute; left: 18px; bottom: 13px; }
-  .specimen-panel .microcopy { left: auto; right: 14px; bottom: 15px; }
+  /* 两条底注都贴底：窄屏放不下一行时「Habitat: …」会与「COLLECTED…」重叠（390px 截图实锤）。
+     改成上下两行、统一从左边起排，文案再长也不会撞。 */
+  .specimen-panel .hand-note { position: absolute; left: 18px; right: 18px; bottom: 26px; }
+  .specimen-panel .microcopy { position: absolute; left: 18px; right: 18px; bottom: 12px; text-align: left; }
   .tape-top { top: 15px; left: 28%; } .tape-bottom { right: 29%; bottom: 18px; }
   .project-copy { padding: 13px 18px; }
   .latin { font-size: 13px; }

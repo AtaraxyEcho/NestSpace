@@ -26,6 +26,16 @@
 
 ---
 
+## 预览
+
+| 陈列（首页） | 详情页 |
+|---|---|
+| ![陈列](docs/screenshots/home.png) | ![详情页](docs/screenshots/detail.png) |
+
+线上实拍（1440×900 视口）；站点支持深浅主题与中英切换。
+
+---
+
 ## 快速开始（以 Cloudflare 为例）
 
 需要：**Node ≥ 22.18**、**pnpm 10.34.3**（版本钉在 `frontend/.mise.toml`）、**全局 wrangler**
