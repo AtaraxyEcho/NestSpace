@@ -82,8 +82,13 @@ esac
 
 # 4b) 可选：带凭据确认台账可读（能区分"表在"与"表没迁"）
 if [ -n "$ADMIN_TOKEN" ]; then
+  # 令牌走临时头文件（`-H @file`）而不是 `-H "Authorization: ..."`：后者会把口令放进 curl 的
+  # 进程参数，同机其他进程能读到。环境变量本身避不开（调用方式决定），但至少不进 argv。
+  HEADER_FILE="$WORK/auth-header"
+  printf 'Authorization: Bearer %s\n' "$ADMIN_TOKEN" > "$HEADER_FILE"
   AUTH_CODE=$(curl -s -o "$WORK/visits.json" -w '%{http_code}' --max-time 20 \
-    -H "Authorization: Bearer $ADMIN_TOKEN" "$BASE/api/admin/visits?days=7")
+    -H @"$HEADER_FILE" "$BASE/api/admin/visits?days=7")
+  rm -f "$HEADER_FILE"
   if [ "$AUTH_CODE" = "200" ]; then
     ok "带凭据 /api/admin/visits 200（0016 已迁移，台账可读）"
   else

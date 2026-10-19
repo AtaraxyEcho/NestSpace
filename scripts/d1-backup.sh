@@ -52,10 +52,17 @@ OUT_REL="../backups/$NAME"
 echo "数据库: $DB（$SCOPE）"
 echo "输出:   backups/$NAME"
 
-if ! (cd "$FRONTEND" && npx wrangler d1 export "$DB" --"$SCOPE" --skip-confirmation --output="$OUT_REL") 2>&1 | tail -3; then
-  echo "✗ 导出失败" >&2
+# 导出日志走文件而不是 `| tail`：管道会把 wrangler 的退出码换成 tail 的，
+# 导出失败也会"看起来成功"（只剩后面那两个内容检查兜底）。这里保留真实退出码。
+EXPORT_LOG="$ROOT/.tmp-backup.log"
+if ! (cd "$FRONTEND" && npx wrangler d1 export "$DB" --"$SCOPE" --skip-confirmation --output="$OUT_REL") > "$EXPORT_LOG" 2>&1; then
+  echo "✗ 导出失败：" >&2
+  grep -vE '^[[:space:]]*$' "$EXPORT_LOG" | tail -6 | sed 's/^/    /' >&2
+  rm -f "$EXPORT_LOG"
   exit 1
 fi
+grep -vE '^[[:space:]]*$' "$EXPORT_LOG" | tail -3 | sed 's/^/  /'
+rm -f "$EXPORT_LOG"
 [ -s "$OUT" ] || { echo "✗ 导出文件为空" >&2; exit 1; }
 if ! grep -q "CREATE TABLE" "$OUT"; then
   echo "✗ dump 里没有 CREATE TABLE，导出不完整" >&2

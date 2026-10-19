@@ -17,7 +17,6 @@
 ![D1 · SQLite](https://img.shields.io/badge/D1%20%C2%B7%20SQLite-003b57?logo=sqlite&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178c6?logo=typescript&logoColor=white)
 
-
 | 层 | 选型 |
 |---|---|
 | 前端 | React 19 + Vite 8 + Tailwind v4，构建为静态资产 `frontend/dist` |
@@ -26,9 +25,9 @@
 | 管理端 | 与前台同源代码的 `/admin`；生产部署在 `admin.<主域>`，由 Zero Trust Access 拦截 |
 
 **为什么不是"前端 + 一台常驻后端"**：代码里前后端确实分开，省掉的是那台机器——没有容器、Nginx、进程守护、
-系统补丁和备份作业，`git push` 就是部署。代价不是账单而是免费额度，真正会咬到的是三个数：
-CPU 10 ms/调用、子请求 50 个/调用、D1 写入 10 万行/天。本站所有批量上限都从这些数字算出来，并由闸门钉住
-（完整额度表与设计边界见 [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) 第二节开头）。
+系统补丁和备份作业，`git push` 就是部署。代价不是账单而是免费额度：CPU 10 ms/调用、子请求 50 个/调用、
+D1 写入 10 万行/天，本站的批量上限都从这三个数算出来并钉进闸门（完整额度表见
+[docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) 第二节开头）。
 
 ---
 
@@ -51,6 +50,7 @@ CPU 10 ms/调用、子请求 50 个/调用、D1 写入 10 万行/天。本站所
 git clone https://github.com/AtaraxyEcho/NestSpace.git && cd NestSpace
 cp frontend/.dev.vars.example frontend/.dev.vars   # ADMIN_SECRET_KEY 填 `openssl rand -base64 32` 的输出
 bash scripts/d1-migrate.sh local                   # 首次自建本地库，按序跑 0001–0017
+# 下面两步在 frontend/ 下执行
 cd frontend && pnpm install --frozen-lockfile
 pnpm run build && npx wrangler dev                 # http://localhost:8787，管理端 /admin
 ```
@@ -69,7 +69,7 @@ npx wrangler secret put ADMIN_SECRET_KEY
 而首页静默退回内置数据，看起来"只是没读到配置"）
 
 ```bash
-cd ..
+cd ..                                              # 回到仓库根
 bash scripts/d1-migrate.sh remote                  # 可反复执行，只跑没跑过的
 cd frontend && npx wrangler deploy
 ```
@@ -134,7 +134,7 @@ bash scripts/d1-backup.sh                           # 导远程库 + 自动恢�
 
 ---
 
-## 目录
+## 仓库结构
 
 ```text
 frontend/    src/ 前端 · worker/ 后端 · test/ 闸门 · public/ 静态资产（含 _headers）
@@ -144,6 +144,10 @@ docs/        DEPLOYMENT_GUIDE.md（部署、安全与配额手册）· ARCHITECT
 ```
 
 ---
+
+## 反馈
+
+问题与建议走 [Issues](https://github.com/AtaraxyEcho/NestSpace/issues)。
 
 ## 许可
 
