@@ -65,7 +65,7 @@ desktop.ini
 # 7. 第三方平台与设计工具临时状态 (Platform Managed State)
 /.plugins/
 /.opencode-skills/
-**/.figma/design-context/
+/frontend/.figma/
 
 
 PASSWORD.*

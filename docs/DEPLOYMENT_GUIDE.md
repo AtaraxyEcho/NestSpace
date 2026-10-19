@@ -121,6 +121,26 @@ NestSpace/
 `index.html`（SPA 兜底）。`[assets]` 里的 `binding = "ASSETS"` **不可删除**——Worker 依赖它取回首页
 HTML 做 SEO 注入（见第六节）；删掉会导致首页 503。
 
+**为什么选这个形态，以及它的边界**：前后端在代码里是分开的，省掉的只是"一台一直开着的机器"
+（容器 / Nginx / 进程守护 / 系统补丁 / 备份作业），`git push` 即部署，整套跑在免费额度内。
+免费版的硬额度是这些，本站所有批量上限都从它们算出来：
+
+| 额度（Workers 免费版） | 数值 | 本站对应 |
+|---|---|---|
+| Worker 请求 | 10 万次/天（**静态资产不计入**） | 每次 API 调用与深链 HTML 注入各算一次 |
+| CPU | 10 ms/次调用 | 重活必须切小批次；解析大 README 也算 CPU |
+| 子请求 | 50 个/次调用 | GitHub 同步上限：不开文档 10 件、抓文档 2 件（见第八节） |
+| D1 查询 | 50 次/次调用 | 一次 pageview 落 7–9 条聚合语句 |
+| D1 读写 | 500 万行读 / 10 万行写 每天 | ≈1.1 万 PV/天 触及写入顶 |
+| D1 存储 | 单库 500 MB（账号合计 5 GB） | 台账只存按天聚合，远未接近 |
+| Cron Triggers | 5 条/Worker | 用掉 1 条：每日清理 90 天前的访客去重索引 |
+
+超出额度的表现是**请求失败**（`1027` 超日请求数、`1102` 超 CPU、子请求超限则调用被平台掐断），不是扣费。
+因此取向一直是"压低放大倍数"：公开端点代码限流（写入侧 `/api/usage` 是 isolate + Cache API 两层，读侧只有
+isolate 一层；不依赖付费 WAF）、
+台账不存单次访问行、文档抓取一次只处理两个仓库、图片转码借免费第三方服务且失败 302 回原图。
+什么时候这套不合适：长跑任务、大文件读写（该用 R2）、多页服务端渲染、需要自己控制的关系型数据库。
+
 ### 1. 创建 Cloudflare D1 数据库（免费）
 在终端运行：
 ```bash
@@ -151,6 +171,20 @@ bash scripts/d1-migrate.sh remote
 因此可以反复执行**。只有真正的错误（SQL 语法、约束冲突等）才会以非 0 退出并点名失败文件。
 需要指定库名时：`bash scripts/d1-migrate.sh remote nestspace-prod`。
 
+两条使用前提：
+
+- **脚本内部调的是裸 `wrangler`，需要它在 PATH 上**（`npm i -g wrangler` 或 `pnpm add -g wrangler`）。
+  手册里手动命令写成 `npx wrangler …` 只是为了不依赖全局安装，两者不矛盾——但**写在脚本外面的 `npx` 前缀
+  帮不到脚本内部**。
+- **老库（此前手工逐条迁移过、`_migrations` 表是空的）首跑会被拒绝**：脚本检测到 `projects` 表已存在却没有任何
+  登记记录就会退出，避免重跑 `0002` 的 `INSERT OR REPLACE` 把 001–004 重置回种子值。核对结构确实已是最新后，
+  登记一次基线即可：`bash scripts/d1-migrate.sh remote --baseline`（只登记、不执行；遇到结构未落地的文件会
+  明确拒绝登记并 exit 1）。
+
+**不要压扁迁移历史**：`_migrations` 按**文件名**记账，把 `0001–0016` 合并成一个新文件后，生产库里这个名字
+从没被登记过 ⇒ 脚本会当成未执行真的跑一遍；而建表全是 `CREATE TABLE IF NOT EXISTS`，不会在 DDL 上报错挡下来，
+会一路跑到 `0002` 的种子写入。只有在**全新数据库**上才应该用单份 schema 快照替代历史。
+
 **顺序要求**：迁移必须先于 Worker 代码生效。新版 Worker 引用了这几批新列，任何一批没先落到生产库就部署代码都会失败——**写路径由 `writeColumnErrorResponse` 翻成 400 并点名缺的那一列**（项目新建/更新、站点文案、逐仓库导入、同步的逐行失败都接了），**读路径用的是显式列清单，缺列仍是 500**。（`0015` 是纯数据迁移：不引入新列、代码不依赖它，单独跑或补跑都不会让任何请求失败。`0016` 是新建表：公开站不受影响，但 `/api/usage` 的统计写入会被静默丢弃、`/api/admin/visits` 会明确返回 503 并点名 0016。）
 
 | 缺哪批 | 引用的代码位置 | 表现 |
@@ -162,7 +196,7 @@ bash scripts/d1-migrate.sh remote
 | `0009` 馆长手记 | `site_settings` 写白名单（`curator_*`，`worker/index.ts` 映射表） | 「站点设置」保存报 **400 并点名缺的那一列**（读侧同样静默回退，所以只有保存才暴露） |
 | `0010` 预览图 | 项目列表/详情的 SELECT 与同步写路径 | `GET /api/projects` 每条都 500（列表 SELECT 引用了不存在的列），首页与陈列整体空白 |
 | `0011` 双语叙述 | 项目列表/详情的 SELECT 与管理端写路径 | 列表/详情仍是 500（读路径用的是显式列清单）；「挑战 / 解决方案」保存报 **400 并点名 `challenge_json` / `solution_json`** |
-| `0012` 标本协议 | 公开列表/详情的显式 SELECT（`license`）、管理端写路径与同步写路径 | `GET /api/projects` 每条都 500（首页与陈列空白），管理端保存项目同样 500 |
+| `0012` 标本协议 | 公开列表/详情的显式 SELECT（`license`）、管理端写路径与同步写路径 | `GET /api/projects` 每条都 500（首页与陈列空白）；**写路径不会 500**——缺列被 `writeColumnErrorResponse` 翻成 `400` 并点名是哪一列、提示去跑 `d1-migrate.sh remote` |
 | `0013` 详情页小标题 | `site_settings` 写白名单（`challenge_headline_*` / `solution_headline_*`） | 「04 详情页文案」保存报 **400 并点名缺的那一列**（读侧 `SELECT *`，只会静默回退内置文案） |
 | `0014` 栏目与页面文案 | `site_settings` 写白名单（`section_copy_json`） | 栏目文案卡保存报 **400 并点名 `section_copy_json`**；读侧同样静默回退内置标题，所以只有保存才暴露 |
 | `0016` 访问台账 | `/api/usage` 的 D1 写入、`GET /api/admin/visits` | 公开站与 204 行为不受影响；统计写入被静默丢弃，管理端「访问统计」明确 **503** 并点名 0016 |
@@ -202,7 +236,7 @@ npx wrangler secret put GITHUB_TOKEN
 2. 关键配置：
    - **Project name**：`nestspace`
    - **Root directory（根目录）**：`frontend`（Advanced settings 中设置，关键）
-   - **Build command**：`npm run build`
+   - **Build command**：`pnpm run build`（仓库只有 `frontend/pnpm-lock.yaml`，构建环境的包管理器按锁文件识别为 pnpm；写 `npm run build` 与 CI 口径不一致）
    - **Deploy command**：保持默认 `npx wrangler deploy`（Workers 形态开箱即用）
    - **Enable Preview builds**：保持关闭（`frontend/wrangler.toml` 的 `preview_urls = false` 刻意不留预览入口；确需预览见下方安全说明，必须同时加 Access 且注意默认连同一个 D1）
    - **Protect with Cloudflare Access**：开启（保护 preview 部署，不影响公开生产站）
@@ -219,7 +253,7 @@ npx wrangler secret put GITHUB_TOKEN
 | Bearer `ADMIN_SECRET_KEY`（常量时间比较） | 代码层 | 一切未持密钥的调用，含 workers.dev / preview 等任意入口 |
 | Access JWT 签名校验（`Cf-Access-Jwt-Assertion` 头或 `CF_Authorization` Cookie） | 代码层 | 伪造身份头——明文头一律不信任，只认通过 RS256 签名验证的 JWT |
 | Zero Trust Access 边缘拦截 | 边缘层 | 让未认证请求根本到不了 Functions |
-| 鉴权失败限流 | 代码层 | 同一来源（按 `CF-Connecting-IP`）连续 10 次鉴权失败后返回 `429` 并带 `Retry-After: 600`，抑制在线口令爆破。计数器活在 Worker isolate 内存里（每个机房各一份），属尽力而为的抑制手段，**不能替代强口令**；付费的 WAF / Rate limiting 规则不在本方案内（见下段的边界说明） |
+| 鉴权失败限流 | 代码层 | 同一来源（按 `CF-Connecting-IP`）在 **10 分钟窗口**内累计 10 次**凭据错误**后返回 `429` 并带 `Retry-After: 600`，抑制在线口令爆破。计数只记"带了凭据但不对"（403）与身份不在名单内；**什么都没带的请求走 401 分支，不计数**（否则任何访客刷新一次后台就被记一笔）。计数器活在 Worker isolate 内存里（每个机房各一份），属尽力而为的抑制手段，**不能替代强口令**；付费的 WAF / Rate limiting 规则不在本方案内（见下段的边界说明） |
 
 另有一条**防跨站写入的纵深**：控制台在"已被 Access 放行、没输过口令"时是**纯 Cookie 认证**
 （凭 `CF_Authorization`），此时一个跨站页面发出的简单请求也可能带上它。所以管理端**写操作要求
@@ -227,14 +261,22 @@ npx wrangler secret put GITHUB_TOKEN
 头的调用天然免疫 CSRF，因为跨站 JS 设不了这个头）。这条只有在 `CF_Authorization` 被设为
 `SameSite=None` 时才是必需的——但由于该属性由边缘下发、代码里看不到，索性一直开着。
 
-**代码层的按 IP 限流**（`worker/index.ts`）分两层：`createRateLimiter` 的 isolate 内存桶，加上
-`allowCachedRate` 用 Cloudflare Cache API 落的分钟/日桶（同 colo 内共享、免费、不占 D1/KV 配额）。
-`/api/usage` 120/分钟 + 1000/天（超出静默 204，不打扰访客）、`pageview` 另有一道 30/分钟（一次 pageview 要写 7–9 行 D1）、
-公开读接口 `/api/projects`（列表与详情）与 `/api/site-settings` 共用 240/分钟（超出 `429` + `Retry-After: 60`；一次浏览是这三条），
-`/api/img` 300/分钟（图片一页要十来张，给得更宽；被限的表现就是那张图裂掉，客户端有 `imgfail` 埋点兜着），
-HTML 240/分钟。
-共同前提要说清楚：**isolate 桶只活在当前实例，Cache API 桶只在同一个 colo 内共享且是"读改写"（会少计）**，
-所以这两层挡的是"同一来源的脚本化连打"，不是分布式压力。跨机房、IP 轮换的那一类要靠边缘速率规则，
+**代码层的按 IP 限流**（`worker/index.ts`）有两种桶，**覆盖面不同，别当成"所有公开端点都两层"**：
+
+- **isolate 内存桶**（`createRateLimiter`，每个实例各一份）：所有公开端点都有——`/api/usage` 120/分钟 +
+  1000/天（超出静默 204，不打扰访客）、`pageview` 另有一道 30/分钟（一次 pageview 要写 7–9 行 D1）、
+  公开读接口 `/api/projects`（列表与详情）与 `/api/site-settings` 共用 240/分钟（超出 `429` + `Retry-After: 60`；
+  一次浏览正好是这三条）、`/api/img` 300/分钟（图片一页要十来张，给得更宽；被限的表现就是那张图裂掉，
+  客户端有 `imgfail` 埋点兜着）、HTML 240/分钟。
+- **Cache API 桶**（`allowCachedRate`，同 colo 内共享、免费、不占 D1/KV 配额）：**只接在写入侧**——
+  `/api/usage` 的分钟与日桶、`pageview` 的分钟桶。理由是它是唯一能往 D1 灌行的公开写端点；
+  读侧那几个每次只是查询，放大倍数有限，没有第二层。
+
+请求体也各有一道闸：`/api/usage` 1024 字节（先按声明的 `Content-Length` 拒 `413`，再按真实字节数边读边停），
+管理端 2 MB（超出与不可解析同样返回 `400`，由调用方话术兜着）。
+
+共同前提要说清楚：isolate 桶只活在当前实例，Cache API 桶只在同一个 colo 内共享且是"读改写"（会少计），
+所以它们挡的是"同一来源的脚本化连打"，不是分布式压力。跨机房、IP 轮换的那一类要靠边缘速率规则，
 而那是付费项、不在本方案内 ⇒ 这条边界保持敞开，靠强口令 + Access + 只读公开接口 + 聚合表基数防线兜着。
 阈值都留了十倍以上余量，正常访客碰不到。此外，登录页在**没有 `admin.` 兄弟域**的环境
 （本地、IP 直连、`*.workers.dev` 预览域）会多出一条警示：那里没有 Access 那一层，后台只剩口令。
@@ -287,7 +329,7 @@ HTML 240/分钟。
 | `ACCESS_TEAM_NAME` | 你的 Zero Trust 团队名 | 即 `<team>.cloudflareaccess.com` 中的 `<team>`，在 Zero Trust 控制台 Settings ➔ Custom Pages 可见 |
 | `ACCESS_AUD_TAG` | 上一步记录的 AUD Tag | |
 | `ACCESS_ALLOWED_EMAILS` | 可选：允许进入管理端的邮箱或 sub（逗号分隔） | **未配置 = 放行**——它是可选的"收紧"，不是主闸门（主闸门是 Access 应用策略，且 JWT 的 RS256 签名 + `aud` 已保证身份来自本应用，伪造不了）。**只有两种情况才需要填**：① 该 Access 应用比管理端更宽（一份政策盖多个应用 ⇒ 同一 `aud` 下还有非管理员）；② 担心日后有人无意放宽策略 |
-| `ALLOWED_ORIGINS` | 可选，公开 API 跨域白名单 | 逗号分隔的完整 origin；不配置则不下发跨域头（同源请求不受影响） |
+| `ALLOWED_ORIGINS` | 可选，公开**读**接口的跨域白名单：只注册在 `/projects` 与 `/projects/*` 两条路由上 | 逗号分隔的完整 origin；不配置则不下发跨域头（同源请求不受影响）。`/api/site-settings`、`/api/usage`、`/api/img` 不带这层中间件 |
 
 配置后，后端会验证 Access 签发 JWT 的 RS256 签名及 `iss` / `aud` / `exp` 声明，
 并在配置了 `ACCESS_ALLOWED_EMAILS` 时把 JWT 载荷里的 `email` / `sub` 与该名单比对（未配置则不比对，
@@ -314,13 +356,16 @@ Zero Trust 应用只对**配置的自定义域名**生效。以下入口默认�
 3. **速率限制（建议，先确认套餐）**：在 **Security ➔ WAF ➔ Rate limiting rules** 里配规则
    （例：1 分钟内每 IP 超过 60 次就质询或拦截；`/api/admin/*` 可以更严，如 1 分钟 10 次）。
    免费版**是否包含**这条规则各账号/时期并不一致——控制台里看得到就配上；看不到也不必为此升级套餐：
-   代码层已按 IP 做了尽力而为的限流（见 §三末尾那段，它挡的是脚本连打，不是分布式压力）。
+   代码层已按 IP 做了尽力而为的限流（见第三节「代码层的按 IP 限流」那段，它挡的是脚本连打，不是分布式压力）。
 
 ---
 
 ## 四、 本地全真模拟测试命令
 
 在本地使用 wrangler 进行全仿真运行（Worker + 静态资产 + 本地 D1 数据库）：
+
+想要前端热更：另开一个终端跑 `pnpm run dev`（Vite 默认 8443，可用环境变量 `PORT` 覆盖；`/api` 代理到并行起的 8787，
+可用 `WRANGLER_DEV_URL` 覆盖代理目标）。注意 `wrangler dev` 服务的是 `dist/` 快照，所以走 8787 之前必须先 `pnpm run build`。
 
 ```bash
 # 进入 frontend 目录
@@ -345,9 +390,9 @@ npx wrangler dev
 改动鉴权或证书校验逻辑后，运行安全回归：
 
 ```bash
-# JWT 校验逻辑单元测试（含证书轮换、算法降级等 13 个用例）
+# 全部 17 条闸门（纯函数、不联网；其中 test/jwt_verify.test.mjs 是 13 条 JWT 校验 + 6 条身份名单）
 pnpm test
-# 前置：Node ≥ 22.18（`.mise.toml` 已钉 22）。单测直接 `import` .ts 源文件，
+# 前置：Node ≥ 22.18（`frontend/.mise.toml` 已钉 22）。单测直接 `import` .ts 源文件，
 # 靠的是 Node 原生的 TS 类型剥离——22.6–22.17 不带 flag 会在 import 阶段就报错。
 
 # Functions TypeScript 类型检查
@@ -392,11 +437,23 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
 
 ```json
 {
-  "title": "NestSpace — AtaraxyEcho 的开源项目标本馆",
+  "title": "NestSpace · AtaraxyEcho 的开源项目",
   "description": "AtaraxyEcho's personal open-source showcase: curated tools, experiments and long-lived systems with docs, tech stack and evolution notes. · github.com/AtaraxyEcho",
   "robots": { "index": true }
 }
 ```
+
+**站点身份文案有三份，改一处要想到另外两处**（2026-10-19 统一过一次，别再让它漂）：
+
+| 落点 | 什么时候生效 | 字段 |
+|---|---|---|
+| `frontend/.figma/make/site.json` | **构建期**注入 HTML 的 `<title>` / description / og（后台没配 SEO 时就是它） | `title`、`description` |
+| `frontend/src/data/defaultSiteSettings.ts` | 后台**留空**时的内置默认（首屏大标题、SEO 标题、页脚简介） | `heroZh` / `heroEn`、`seoTitle`、`footerBlurbZh` |
+| 生产库 `site_settings` | 实际显示值，优先级最高 | `seo_title`、`seo_description`、`hero_zh`、`footer_blurb_zh` |
+
+对外定位统一成「**AtaraxyEcho 的开源项目**」，不再用"标本馆/标本柜"这类站内隐喻出现在**站点名称位**
+（栏目名与卡片标签里的「标本」保留，那是界面语汇）。后台改文案属于生产写入，由站长自己在
+「03 首页栏目 / 08 站点设置 / 05 底部栏文案」里保存。
 
 - `robots.index: true`：构建产物不再注入 noindex meta，也不再自动生成全站 Disallow 的 robots.txt；
 - `frontend/public/robots.txt`：显式声明允许收录全站、屏蔽 `/api/`（JSON 接口无需进索引）；
@@ -420,7 +477,22 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
 `site_settings` 表中（迁移 `0003`，页脚文案字段见迁移 `0005`），通过 `#admin` 管理端编辑保存后即时生效，无需重新部署：
 
 **管理端按「页面」分栏，页面内按栏目分卡**（2026-10-10）：侧栏依次是
-`01 馆藏总览 · 02 标头与导航 · 03 首页栏目 · 04 详情页文案 · 05 底部栏文案 · 06 项目管理 · 07 GitHub 同步 · 08 站点设置`。
+`01 馆藏总览 · 02 标头与导航 · 03 首页栏目 · 04 详情页文案 · 05 底部栏文案 · 06 项目管理 · 07 GitHub 同步 · 08 站点设置 · 09 访问统计`。
+
+各栏管的东西（README 只留一句指针到这里，别再抄第二份）：
+
+| 栏 | 管的东西 |
+|---|---|
+| 01 馆藏总览 | 最近更新、馆藏状态计数 |
+| 02 标头与导航 | 导航项的顺序 / 名称 / 显示、Logo 图文与显示模式 |
+| 03 首页栏目 | 首屏叙事、统计（指标 / 年鉴 / 描述行与开关）、馆长手记、目录描述、GitHub 地址与联系方式 |
+| 04 详情页文案 | 详情页的预览区 / 特征区 / 相邻标本三处标题，以及挑战·方案两段正文小标题 |
+| 05 底部栏文案 | 页脚各栏与版权行，支持 `{name}` `{since}` `{year}` 模板变量 |
+| 06 项目管理 | 每件标本的增删改与排序 |
+| 07 GitHub 同步 | 按编号选择范围拉取仓库指标与文档（勾选后连同 README 里的图一起提取预览图） |
+| 08 站点设置 | 站点信息、展示偏好（语言 / 主题 / 开关）、SEO 标题与描述、ICP 备案号、域名只读信息 |
+| 09 访问统计 | 累计 / 近 7·30·90 天 PV·UV、热门页面、来源 / 设备 / 语言 / 地域、时段分布、行为事件与本设备排除开关（面板本身只读，不写库） |
+
 以前首页四段的配置散在三个视图里（名称在「导航与标头」、指标在「馆藏统计」、显隐在「站点设置 → 展示偏好」），
 现在收进「03 首页栏目」一页，卡片的顺序就是访客在页面上看到的顺序：陈列 → 统计（指标 / 年鉴 / 该段描述）→ 手记（关于与联系 / 手记正文）→ 目录（该段描述）。
 **中途走过头一次**：先把四个栏目各升成一条侧栏项（`03 首页·陈列 … 06 首页·目录`），结果四条各只装一两张卡、
@@ -548,7 +620,7 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
 - **同步的健壮性**：所有 GitHub 出网请求带 10 秒超时（含 Access 证书端点），单个卡住的响应不会拖住整个同步；
   响应里回传 `rateLimitRemaining`，管理端在同步/扫描提示里显示"GitHub 剩余额度"；
   403 会结合配额头与响应体区分"频率超限"与"该仓库被拒绝"，只有确认限流才短路后续请求；
-  四个文档都已齐备的项目**跳过文档抓取**（原来每个项目都会空跑约 11 个候选路径请求）。
+  四个文档都已齐备的项目**跳过文档抓取**（原来每个项目都会空跑一遍候选路径，最多 17 个请求，见 `syncRowCost`）。
 - **标本文档抓取**（迁移 `0007`）：同步界面勾选「同时抓取 README / Compose 文档」后，按仓库
   `README.md`（辅以 `README.en.md` / `README.zh*.md` / `README_en-US.md` 等具名文件）与
   `deploy/dev|prod/docker-compose.yml`（辅以根目录 `docker-compose.yml`）抓取正文：
@@ -644,7 +716,8 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
     **首页卡片仍用占位标本图、`og:image` 仍是构建期静态文件**（这两点在字段说明里明写，不让管理员猜）。
     独立输入框 +「用相册第一张填入」按钮（带过之后两者互不影响，调整相册顺序不会改大图）。
     写侧 `validatePreviewInput` **不再做任何推导**：不给该键就不动这一列（部分更新），显式空串就是清空；
-    只有 README 同步在**库里该项为空**时才用相册首张补齐（`buildProjectSyncUpdate` 的「只填空白」）。
+    只有 README 同步在**库里该项为空**时才补，补的是**从 README 提取到的那一组图的第一张**
+    （不是"库里已有的相册的第一张"——见上面「同步时给项目图片补的是 README 里提取到的首张图」那句）。
     读侧 `publicGallery` 仍保留退化：项目图片为空时对外报告相册第一张，所以老数据不会因为解耦而没图。
     管理端抽屉里的缩略图条，会给等于项目图片的那一张打上「详情页大图」标记。
     > 用户可见文案统一到「项目图片」：服务端 400 话术（`项目图片地址无效…`）与同步备注（`预览图已从 README 提取（项目图片 / 相册 5 张）`）
@@ -798,7 +871,9 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   累计与日快照都不受影响。读接口不再承担清理写操作。
 - **访客标识**：浏览器在 localStorage 生成一个随机匿名 ID，随请求的 `v` 字段上报；
   Worker 用 `visit_meta.hash_salt` 做 HMAC-SHA256 后才落库。清缓存、隐私模式、多设备会各算一个新访客。
-- **排除规则**：管理端自己的 `/admin` 浏览单独计数，不进 PV/UV/维度分布；会跑 JS 的爬虫按 UA 剔除。
+- **排除规则**：管理端自己的 `/admin` 浏览单独计数，不进 PV/UV/维度分布；会跑 JS 的爬虫按 UA 剔除，
+  **但只作用于 `pageview`**（`recordVisitEvent` 先落非 pageview 的事件计数，再判 bot）——所以爬虫触发的
+  `deck` / `outbound` / `imgfail` 仍会进「行为事件」表，看事件分布时要知道这一点。
   管理端面板底部有 **「本设备不计入访问」** 开关：管理端在 `admin.<主域>`、公开站在 `<主域>`，
   两边 localStorage 不互通，因此生产环境用一枚 `Domain=<主域>` 的**功能性偏好 cookie**
   （值只有 `1`/删除，不含任何标识）让公开站也读到；本地/IP/无兄弟域时退回 localStorage。
@@ -858,7 +933,8 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   否则累计台账与 90 天去重索引一起丢失（聚合表一删不可恢复）。
 - **回滚后检查 cron**：上一版本没有 `[triggers]`，回滚可能把每日清理任务一起带走。到
   Worker → Settings → Triggers 确认 `17 3 * * *` 仍在；若不在，恢复新版后重新部署，
-  或在 D1 手工执行 `DELETE FROM visit_day_visitor WHERE day < date('now','-90 day')`。
+  或在 D1 手工执行 `DELETE FROM visit_day_visitor WHERE day < date('now','+8 hours','-90 day')`
+  （**必须带 `+8 hours`**：写入口径是按北京时间切日，用裸 `date('now')` 会在 UTC 与 +8 的 8 小时差里多删/少留一天）。
 - **发布后核验**：
   1. `GET /api/projects` 返回 200；
   2. 管理端能登录，`GET /api/admin/visits?days=7` 返回 200；
@@ -868,26 +944,30 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
 
 ## 八、 品牌标 / 栏目顺序 / 双语叙述 / 同步范围
 
-- **品牌标按"用在哪种背景上"各一张，且可被管理端替换**：原件是 `frontend/design/logo_dark.png` 与 `logo_light.png`
-  （882×882 的**完整组合标**：徽章 + `OmniNest` + `ATARRAYECHO`，各带不透明底色）。
-  站点用的是 `python scripts/make-brand-logos.py` 生成的派生图（原件不动）：
-  - `public/brand/logo-mark-on-{dark,light}.png`（160px，只有徽章）→ 标头默认图；
-  - `public/brand/logo-lockup-on-{dark,light}.png`（320px，整标）→ 想要整标时在管理端填这个路径；
-  - `public/brand/favicon.ico`（16/32/48）+ `apple-touch-icon.png`（180）→ 浏览器图标，同一脚本产出、跟着一起更新。
-  ⚠️ **后缀指的是"用在哪种背景上"，不是原件的底色**：原件的底色会被抠掉，决定可读性的是抠图后**主体**与背景的明暗——
-  `design/logo_light.png` 是浅底 + 浅发主体，抠完只剩浅色主体，**只能**用在深色主题；`logo_dark.png` 反之。
-  早期按原件底色命名（`logo-mark-dark` = 深底那版）并直接喂给深色主题，结果深色标头拿到深发主体 ⇒
-  头发与背景糊成一片、头像看着是破的。**换标或改名时不要退回按底色命名的老习惯。**
-  派生图**从四边泛洪抠背景**而不是全局阈值——浅色版的头发/皮肤本身就接近底色，全局阈值会在人脸上打出洞。
-  整标不进标头的原因：图框只有 40px 高，里面的字会被压到读不出，还会和站点自己的 `NESTSPACE` 文字重复。
-  浏览器图标：`favicon.ico` 带**圆盘底**（贴着徽章的圆形，不是方块——方块底在标签栏里很突兀），
-  素材取深墨那版并**居中裁成正方形**再尽量铺满（素材是竖构图，只按高度贴合进方形图框会显得小）。
-  圆盘以外的四角仍是透明，所以它在标签栏里是一枚圆形印章；若做成纯透明，浅色/深色标签栏总有一边看不见。
-  `apple-touch-icon.png` 是满铺方形、不留透明——iOS 把透明区域按黑色渲染，圆角由系统遮罩。
+- **品牌标只有一版（2026-10-19 起），且可被管理端替换**：原件是 `frontend/design/Logo.png`（1254×1254 半身像）
+  与 `frontend/design/Logo horizontal scroll.png`（含 `NestSpace` 字标的横版整标）。站点用的是
+  `python scripts/make-brand-logos.py` 生成的派生图（原件不动）：
+  - `public/brand/logo-mark.png`（160px 高）→ 标头图，**深浅两种主题共用这一张**；
+  - `public/brand/favicon.ico`（16/32/48）+ `apple-touch-icon.png`（180）→ 浏览器图标，同一脚本产出、跟着一起更新；
+  - `public/brand/logo-banner.png`（200px 高的横版整标）→ **只给 README / 文档当头图**，标头仍不用它：
+    字标是深墨色，放进深色主题的标头会直接看不见，而标头本来就有站点自己的排印文字（`logo_text`）。
+    它**保留原件的近白底、不抠成透明**——同一张图在 GitHub 深色主题里是一块浅色卡片，抠透明就只剩看不见的一行字。
+  - 旧的 `logo-mark-on-{dark,light}.png` / `logo-lockup-on-{dark,light}.png`（里面还是旧名 `OmniNest`）与
+    `design/logo_{dark,light}.png`、两张旧核对图已删除。
+  为什么以前要两版、现在不用：旧素材是"浅发主体"或"深发主体"，一张只能压住一种底色，所以按**目标背景**
+  命名（不是按原件底色——这个坑记在脚本头注释里）。新素材是浅发 + 深色衣着，两头都立得住 ⇒ 一张够用。
+  **判据始终是"抠图后主体与背景的明暗关系"**：换标时先跑脚本，看 `frontend/design/preview.png`
+  （同一张标分别贴在深、浅两种底上 + 一行真实尺寸的图标）再决定要不要恢复两版。
+  抠图**从四边泛洪**而不是全局阈值（头发接近底色，全局阈值会在人脸上打出洞）；底色取**边框像素的中位数**
+  而不是均值（这张图下边压着深色衣服，均值会把底色拖成中灰 ⇒ 几乎什么都抠不掉）；新素材的透明被压平成了
+  棋盘格（PNG 无 alpha 通道），所以只保留**最大连通块**——被主体包住的棋盘残屑都是独立小块，这样一并清掉。
+  浏览器图标：`favicon.ico` 带**圆盘底**（贴着主体的圆形，不是方块——方块底在标签栏里很突兀），底板用深墨色
+  （浅发主体在浅底上会糊），并**居中裁成正方形**尽量铺满；`apple-touch-icon.png` 不透明满铺（iOS 把透明按黑色渲染）。
   - 渲染收在一个组件里：`LogoContent`（内容）+ `LogoWordmark`（首页的 `<a>` 外壳）；
     详情页返回入口是 `<button>`，所以那里用 `LogoContent` 而不是把 `<a>` 套进 `<button>`（非法 HTML）。
-  - 管理端「02 标头与导航」的 Logo 地址**留空 = 用内置深浅两版**，填了 = 两个主题共用它（这就是替换入口）。
-    预览区是深浅两版并排——后台只有一套配色，跟着控制台主题走就永远看不到另一版的实际效果。
+    `LogoContent` 已不再接 `dark` 参数（单版素材没有主题分支）。
+  - 管理端「02 标头与导航」的 Logo 地址**留空 = 用内置徽章**，填了 = 换成它（这就是替换入口）。
+    预览区仍是深浅两格——现在是**同一张标在两种底色上各看一次**，正是单版素材的可读性检查位。
   - ⚠️ **这些 PNG / ICO 必须留在 Git 里、不能走 LFS**：`frontend/.gitattributes` 原本对 `*.png`、`*.ico` 全量启用 LFS，
     而 Workers Builds 的 git clone 不解 LFS 指针 —— 那样 `dist/brand/*.png` 会变成 ~130 字节的指针文本，
     配上 `not_found_handling=single-page-application`（缺失路径返回 200 + index.html）与 CSP

@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-# 这是 Figma Make 脚手架自带的部署脚本（走 figma CLI）。本仓库的真实部署路径见 README /
-# docs/DEPLOYMENT_GUIDE.md：push 后由 Cloudflare Workers Builds 构建并部署；本地预检是
-# npx wrangler deploy --dry-run。
-pnpm run build
-figma make deploy --build-dir dist

@@ -38,7 +38,7 @@ export function defaultNavItem(id: string): NavItemConfig {
 // 修改默认文案后需重新构建部署（管理端改动则即时生效、无需重新部署）。
 export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   heroEn: 'The open-source collection of AtaraxyEcho',
-  heroZh: 'AtaraxyEcho 的开源项目标本馆',
+  heroZh: 'AtaraxyEcho 的开源项目',
   subtitleEn: 'OPEN-SOURCE COLLECTION · BY ATARAXYECHO',
   subtitleZh: '个人开源项目 · 收藏与展示',
   aboutEn:
@@ -47,7 +47,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
     '这里收藏的不是完美成品，而是持续生长的开源实践。每一件作品都有自己的栖息地、形态和演化路径。',
   githubUrl: 'https://github.com/AtaraxyEcho',
   contactEmail: 'field@nestspace.dev',
-  seoTitle: 'NestSpace — AtaraxyEcho 的开源项目标本馆',
+  seoTitle: 'NestSpace · AtaraxyEcho 的开源项目',
   seoDescription:
     "AtaraxyEcho's personal open-source showcase: curated tools, experiments and long-lived systems with docs, tech stack and evolution notes. · github.com/AtaraxyEcho",
   icpEnabled: false,
@@ -70,7 +70,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   footerKickerEn: 'AN OPEN CABINET',
   footerKickerZh: '开放标本柜',
   footerBlurbEn: 'The open-source collection of {name}.',
-  footerBlurbZh: '{name} 的开源项目标本馆。',
+  footerBlurbZh: '{name} 的开源项目。',
   footerColSpecimensEn: 'SPECIMENS',
   footerColSpecimensZh: '馆藏标本',
   footerColCollectionEn: 'COLLECTION',

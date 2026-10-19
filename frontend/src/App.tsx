@@ -430,38 +430,30 @@ function initialRoute(): SiteRoute {
 }
 
 /**
- * 内置品牌标（深浅模式各一张），由 `python scripts/make-brand-logos.py` 从
- * `frontend/design/logo_*.png` 的完整组合标生成：mark = 只有徽章（标头用），
- * lockup = 徽章 + OmniNest + ATARRAYECHO 整标（想整标换上去时用，见管理端那条说明）。
- * 整标不直接进标头是因为图框只有 28px 高，里面的字会被压到读不出，还会和站点自己的
- * NESTSPACE 文字重复。public/ 下的文件按根路径引用，不能被 JS import（Vite 会报错）。
+ * 内置品牌标（**只有一版**），由 `python scripts/make-brand-logos.py` 从 `frontend/design/Logo.png`
+ * 抠底生成。2026-10-19 起不再按深浅主题各出一张：新素材是浅发 + 深色衣着，两种底色都压得住
+ * （判据仍是"主体与背景的明暗关系"，见脚本头）。含字标的整标只留在 design/ 里当原件——它的字标
+ * 是深墨色，放进深色主题的标头会直接看不见，而标头本来就有站点自己的排印文字（`logo_text`）。
+ * public/ 下的文件按根路径引用，不能被 JS import（Vite 会报错）。
  */
 const BRAND_LOGO = {
-  // 文件名按**目标背景**命名（on-dark / on-light），不是按原件的底色——
-  // 原件的底色会被脚本抠掉，留下的是"主体"，决定可读性的是主体与背景的明暗：
-  // design/logo_light.png 是浅底 + 浅发主体 → 只能用在深色主题；logo_dark.png 反之。
-  mark: { onDark: "/brand/logo-mark-on-dark.png", onLight: "/brand/logo-mark-on-light.png" },
-  lockup: { onDark: "/brand/logo-lockup-on-dark.png", onLight: "/brand/logo-lockup-on-light.png" },
+  mark: "/brand/logo-mark.png",
 } as const
 
 /**
  * 标头品牌内容（图 + 文字）。宿主自己决定外层是 <a> 还是 <button>：
  * 详情页的返回入口是 button，把 <a> 套进 <button> 是非法 HTML，所以这里只出内容。
  */
-function LogoContent({ settings, dark }: { settings: SiteSettings; dark: boolean }) {
+function LogoContent({ settings }: { settings: SiteSettings }) {
   const logoText = settings.logoText || "NESTSPACE"
   const logoSubtext = settings.logoSubtext || settings.logoText
   const logoType = settings.logoType || "both"
   const logoImageUrl = (settings.logoImageUrl || "").trim()
-  // 管理端填了地址 = 两个主题都用它（替换）；留空**或填了非法协议**才回到内置的两版。
+  // 管理端填了地址 = 用它替换；留空**或填了非法协议**才回到内置徽章。
   // 走 settingsHref 而不是直接用：库里的值可能不是 http(s)，那是把未校验的值塞进 <img src>。
   const customLogo = settingsHref(logoImageUrl)
   const builtIn = !customLogo
-  const logoSrc = builtIn
-    ? dark
-      ? BRAND_LOGO.mark.onDark
-      : BRAND_LOGO.mark.onLight
-    : customLogo
+  const logoSrc = customLogo ?? BRAND_LOGO.mark
 
   return (
     <>
@@ -471,9 +463,9 @@ function LogoContent({ settings, dark }: { settings: SiteSettings; dark: boolean
           // 只有"仅图片"模式才靠它读站名；图文模式下面还有同一段文字，此时它是装饰图
           alt={logoType === "image" ? logoText : ""}
           className="wordmark-logo-img"
-          // 内置 mark 是 128×128 的方形图：给出固有尺寸，浏览器能在解码前就留好盒子
-          // （标头在首屏，缺宽高会抖一下）。自定义地址不知道比例，就不硬填。
-          {...(builtIn ? { width: 128, height: 128 } : {})}
+          // 内置 mark 是 145×160（脚本按 MARK_HEIGHT=160 缩放后裁出的比例）：给出固有尺寸，
+          // 浏览器能在解码前就留好盒子（标头在首屏，缺宽高会抖一下）。自定义地址不知道比例，就不硬填。
+          {...(builtIn ? { width: 145, height: 160 } : {})}
           fetchPriority="high"
           decoding="async"
         />
@@ -568,7 +560,7 @@ function LogoWordmark({ settings, dark }: { settings: SiteSettings; dark: boolea
         }
       }}
     >
-      <LogoContent settings={settings} dark={dark} />
+      <LogoContent settings={settings} />
     </a>
   )
 }
@@ -1483,7 +1475,7 @@ function DetailPage({
     <main className="detail-page">
       <header className="detail-header">
         <button type="button" className="wordmark" onClick={onBack}>
-          <LogoContent settings={settings} dark={dark} />
+          <LogoContent settings={settings} />
         </button>
         <span className="detail-location">CABINET / SPEC—{project.id}</span>
         <div className="header-tools">
@@ -3887,16 +3879,14 @@ function AdminPage({
                     onChange={(e) =>
                       setSiteContent({ ...siteContent, logoImageUrl: e.target.value })
                     }
-                    placeholder="留空 = 用内置的深浅两版徽章；填了 = 两个主题都用它"
+                    placeholder="留空 = 用内置徽章；填了 = 用它替换"
                   />
                   <small>
-                    留空时按主题各用内置的一张（深色主题 <code>/brand/logo-mark-on-dark.png</code> ·{" "}
-                    浅色主题 <code>/brand/logo-mark-on-light.png</code>，由{" "}
-                    <code>scripts/make-brand-logos.py</code> 从{" "}
-                    <code>frontend/design/</code> 的原件生成，后缀指"用在哪种背景上"）。
-                    填了地址就两个主题共用它。
-                    想用含文字的完整组合标，填 <code>/brand/logo-lockup-on-dark.png</code>（或 on-light）并把显示模式改成「仅图片」
-                    （整标在标头图框里读不出字，所以默认用不带字的徽章）。
+                    留空时用内置徽章 <code>/brand/logo-mark.png</code>（由 <code>scripts/make-brand-logos.py</code>{" "}
+                    从 <code>frontend/design/Logo.png</code> 抠底生成，深浅两种主题共用这一张）。
+                    填了地址就换成它。旁边两格预览是**同一张标**分别贴在深色与浅色底上——单版素材要自己保证两头都读得清。
+                    含字标的整标只在 <code>frontend/design/</code> 里留作原件、不随站点发布：它的字标是深墨色，
+                    在深色主题下会看不见，而标头本来就有站点自己的排印文字。
                     <br />
                     浏览器图标 <code>/brand/favicon.ico</code> 与 <code>/brand/apple-touch-icon.png</code> 由同一个脚本生成，
                     改标时一起更新。
@@ -3905,18 +3895,18 @@ function AdminPage({
 
                 <div className="logo-preview-box">
                   <span>HEADER LOGO PREVIEW / 标头实时预览</span>
-                  {/* 两版并排：管理端本身只有一套配色，跟着控制台主题走就永远看不到另一版的实际效果 */}
+                  {/* 同一张标在深、浅两种底上各看一次：只有一版素材时，这就是它两头可读性的检查位 */}
                   <div className="logo-preview-pair">
                     <div className="logo-preview-cell is-dark">
                       <span className="logo-preview-tag">DARK / 深色</span>
                       <a className="wordmark" href="#cabinet" onClick={(e) => e.preventDefault()}>
-                        <LogoContent settings={siteContent} dark />
+                        <LogoContent settings={siteContent} />
                       </a>
                     </div>
                     <div className="logo-preview-cell is-light">
                       <span className="logo-preview-tag">LIGHT / 浅色</span>
                       <a className="wordmark" href="#cabinet" onClick={(e) => e.preventDefault()}>
-                        <LogoContent settings={siteContent} dark={false} />
+                        <LogoContent settings={siteContent} />
                       </a>
                     </div>
                   </div>

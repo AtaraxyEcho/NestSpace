@@ -8,7 +8,7 @@ import siteConfiguration from './.figma/make/site.json'
 
 // Vite config — https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
-  // .figma/make/deploy-preview passes `--mode development` for cached-preview builds.
+  // 只有 development 模式产 sourcemap（`pnpm run dev` 或显式 `--mode development`）；生产构建不带。
   const emitSourcemaps = mode === 'development'
 
   return {

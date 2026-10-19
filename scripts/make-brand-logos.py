@@ -1,21 +1,21 @@
-"""从 frontend/design/ 的完整组合标生成站点用的派生图（原件不动）。
+"""从 frontend/design/Logo.png 生成站点用的派生图（原件不动）。
 
 产出（frontend/public/brand/，随 dist 部署）：
-  logo-mark-on-dark.png     纯徽章 → 标头用（深色主题），旁边仍是站点自己的排印文字
-  logo-mark-on-light.png    纯徽章 → 标头用（浅色主题）
-  logo-lockup-on-dark.png   完整组合标（徽章 + OmniNest + ATARRAYECHO）→ 深色主题
-  logo-lockup-on-light.png  同上 → 浅色主题
-  favicon.ico / apple-touch-icon.png   浏览器图标（同日生成；favicon 透明，iOS 图标带底）
+  logo-mark.png          徽章 → 标头用（40px CSS × 最多 ~4 DPR = 160px 高）
+  logo-banner.png        横版整标（design/Logo horizontal scroll.png 裁白边）→ 只给 README / 文档当头图
+  favicon.ico            16/32/48，带回底圆盘
+  apple-touch-icon.png   180，不透明满铺（iOS 把透明区域按黑色渲染）
 
-**文件名按"用在哪种背景上"命名，不按原件的底色**——这是踩过一次的坑：
-  design/logo_light.png 是浅底 + 浅发人物，抠掉底色后主体是**浅色**，只适合深色背景；
-  design/logo_dark.png  是深底 + 深发人物，抠掉底色后主体是**深色**，只适合浅色背景。
-早期按原件底色命名（logo-mark-dark = 深底那版）并直接把"dark"喂给深色主题，结果深色标头拿到
-深发主体 → 头发与背景糊成一片、头像看着是破的。判定依据是"抠图后主体与背景的明暗关系"。
+**2026-10-19 起只有一版**：不再按深浅主题各出一张（旧的 logo-mark-on-{dark,light}.png 与
+logo-lockup-on-{dark,light}.png 已删）。判据仍然是"抠图后的主体与背景的明暗关系"——新素材是
+浅发 + 深色衣着，两种主题底上都立得住，所以一张够用；但**浏览器图标自带底板**（圆盘底），
+因为标签栏的深浅不由我们控制。含字标的整标（design/Logo horizontal scroll.png）只留作原件：
+它的字标是深墨色，放进深色主题的标头会直接看不见，而标头本来就有站点自己的排印文字。
 
-为什么不直接把整标塞进标头：它是 882×882 的方形整标，标头图框只有几十 px 高，
-里面的 "OmniNest" 会被压到几 px——既读不出字，又和站点自己的 NESTSPACE 文字重复。
-抠图必须**从四边泛洪**而不是全局阈值：浅色版的头发/皮肤本身就接近底色，全局阈值会在人脸上打出洞。
+抠图必须**从四边泛洪**而不是全局阈值：头发的浅色本身就接近底色，全局阈值会在人脸上打出洞。
+另外新素材的透明被压平成了棋盘格（PNG 没有 alpha 通道），所以底色按"与四边均色的色差"判定，
+棋盘的两档（约 246 / 约 252）都落在容差里、会被一起泛洪掉；被主体包住的棋盘残屑是独立小块，
+由"只取最大连通块"（subject_mask）一并丢掉。
 
 用法：python scripts/make-brand-logos.py
 """
@@ -29,15 +29,31 @@ ROOT = Path(__file__).resolve().parents[1] / "frontend"
 SRC = ROOT / "design"
 OUT = ROOT / "public" / "brand"
 
-TOL = 32            # 与底色的绝对色差和阈值：底色有轻微噪点（30,31,23 ↔ 31,32,23）
-MIN_AREA = 80       # 小于此面积的连通块视为泛洪碎屑
+SOURCE = SRC / "Logo.png"
+TOL = 70            # 与底色的三通道色差之和：棋盘两档之差约 18，头发主体约 150
 MARK_HEIGHT = 160   # 标头 40px CSS × 最多 ~4 DPR
-LOCKUP_HEIGHT = 320
+ICON_SIZE = 180
+ICON_ART_INSET = 0.94  # 圆盘底上主体占画布的比例（留一圈底边）
+# 图标底板用深墨：新主体是浅色头发，浅底会把头发与背景糊成一片（按 preview.png 目测定的）
+ICON_GROUND = (26, 24, 20)
 
 
 def border_background_mask(arr: np.ndarray) -> np.ndarray:
+    """从四条边泛洪"接近底色"的像素；返回 True = 背景。
+
+    底色用**边框像素的中位数**，不是均值：这张图的下边压着深色的衣服，均值会被拖成中灰，
+    于是泛洪几乎什么都抠不掉（实测只剩 0.6% 背景）。三条边以底色为主时中位数仍落在底色上。
+    """
     h, w, _ = arr.shape
-    bg = arr[:4, :4].reshape(-1, 3).mean(axis=0)
+    border = np.concatenate(
+        [
+            arr[:4, :].reshape(-1, 3),
+            arr[-4:, :].reshape(-1, 3),
+            arr[:, :4].reshape(-1, 3),
+            arr[:, -4:].reshape(-1, 3),
+        ]
+    )
+    bg = np.median(border, axis=0)
     near = np.abs(arr.astype(int) - bg.astype(int)).sum(axis=2) < TOL
     seen = np.zeros_like(near)
     queue: deque[tuple[int, int]] = deque()
@@ -64,7 +80,7 @@ def border_background_mask(arr: np.ndarray) -> np.ndarray:
 
 
 def components(alpha: np.ndarray) -> list[np.ndarray]:
-    """8 邻域连通块。整标里的字母彼此分离，所以"最大块"只有徽章。"""
+    """8 邻域连通块。贴边的晕影与棋盘残屑都是独立小块，靠这个筛掉。"""
     h, w = alpha.shape
     seen = np.zeros_like(alpha, dtype=bool)
     out: list[np.ndarray] = []
@@ -91,13 +107,17 @@ def components(alpha: np.ndarray) -> list[np.ndarray]:
     return out
 
 
-def keep(comp: np.ndarray, shape: tuple[int, ...]) -> bool:
-    """够大、且不贴画布边缘（贴边的细长条是晕影/噪点，不是图案）。"""
-    ys, xs = np.nonzero(comp)
-    if len(ys) < MIN_AREA:
-        return False
-    h, w = shape[:2]
-    return ys.min() > 0 and xs.min() > 0 and ys.max() < h - 1 and xs.max() < w - 1
+def subject_mask(alpha: np.ndarray) -> np.ndarray:
+    """只保留**最大连通块** = 人物主体。
+
+    新素材是通体相连、且贴着画布底边的半身像，旧脚本那条"贴边的块视为晕影"的规则会把主体
+    整个丢掉（实测：过滤后一块不剩）。而压平的棋盘残屑恰好都是被主体包住的独立小块，
+    取最大块同时解决了两件事：既留住主体，又清掉残屑。
+    """
+    comps = components(alpha)
+    if not comps:
+        raise SystemExit("没识别到任何内容块，需要调 TOL")
+    return max(comps, key=lambda c: int(c.sum()))
 
 
 def crop_to(img: Image.Image, mask: np.ndarray) -> Image.Image:
@@ -106,101 +126,100 @@ def crop_to(img: Image.Image, mask: np.ndarray) -> Image.Image:
     arr = np.array(img)
     sub = arr[y0:y1, x0:x1].copy()
     sub[~mask[y0:y1, x0:x1], 3] = 0
-    return Image.fromarray(sub, "RGBA")
+    return Image.fromarray(sub)
 
 
-def save(img: Image.Image, path: Path, height: int) -> int:
-    ratio = height / img.height
-    img = img.resize((max(1, round(img.width * ratio)), height), Image.LANCZOS)
-    img.save(path, "PNG", optimize=True)
-    return path.stat().st_size
-
-
-OUT.mkdir(parents=True, exist_ok=True)
-report = []
-
-# 源件 → 目标背景：判定依据是"抠图后的主体明暗"，不是源件底色的名字（见文件头说明）
-VARIANTS = (
-    ("light", "on-dark", (26, 24, 20)),      # 浅底 + 浅发主体 → 深色背景
-    ("dark", "on-light", (232, 224, 203)),   # 深底 + 深发主体 → 浅色背景
-)
-
-for src_theme, dest, _bg in VARIANTS:
-    src = SRC / f"logo_{src_theme}.png"
-    rgb = np.array(Image.open(src).convert("RGB"))
-    alpha = np.where(border_background_mask(rgb), 0, 255).astype("uint8")
-    full = Image.fromarray(np.dstack([rgb, alpha]).astype("uint8"), "RGBA")
-
-    comps = [c for c in components(alpha > 0) if keep(c, alpha.shape)]
-    if not comps:
-        raise SystemExit(f"{src.name}: 没识别到内容块，需要调 TOL/MIN_AREA")
-    union = np.zeros_like(alpha, dtype=bool)
-    for c in comps:
-        union |= c
-    biggest = max(comps, key=lambda c: int(c.sum()))
-
-    lockup = crop_to(full, union)   # 徽章 + 两行文字（整标）
-    mark = crop_to(full, biggest)   # 只有徽章（标头用）
-    lockup_kb = save(lockup, OUT / f"logo-lockup-{dest}.png", LOCKUP_HEIGHT) / 1024
-    mark_kb = save(mark, OUT / f"logo-mark-{dest}.png", MARK_HEIGHT) / 1024
-    report.append(
-        f"{src_theme} → {dest}: 内容块 {len(comps)} 个 | mark {mark.size} {mark_kb:.1f}KB"
-        f" | lockup {lockup.size} {lockup_kb:.1f}KB"
-    )
-
-# ---- 浏览器图标 -------------------------------------------------------------
-# favicon **带回底**，但底色做成**圆盘**而不是方块：素材本身就是圆形徽章，方形底在标签栏里
-# 会显出一个突兀的方块（被明确否过），圆盘贴合同形状，浅色/深色标签栏上都能看清。
-# 用深墨那版素材（logo-mark-on-light.png）——浅墨那版在浅色标签栏上几乎看不见。
-# 素材是竖构图（圆盘上下还有装饰尖），只按高度贴合进正方形会显得小，
-# 所以**居中取正方形**（保留圆盘、裁掉上下尖）再尽量铺满，主体才真正占满图标。
-# apple-touch-icon 同样**不透明**（iOS 把透明区域按黑色渲染），满铺方形交给系统加圆角遮罩。
-ICON_ART = "logo-mark-on-light.png"
-ICON_GROUND = (232, 224, 203)   # 与站点浅底一致
-ICON_ART_INSET = 0.94           # 圆盘底上主体占画布的比例（留一圈底边）
-
-
-def _icon_art() -> Image.Image:
-    art = Image.open(OUT / ICON_ART).convert("RGBA")
+def square_crop(art: Image.Image) -> Image.Image:
+    """居中取正方形：图标画布是方的，主体尽量铺满才有辨识度。"""
     side = min(art.size)
     left = (art.width - side) // 2
     top = (art.height - side) // 2
     return art.crop((left, top, left + side, top + side))
 
 
-def build_icon(size: int) -> Image.Image:
-    """带底 favicon：圆盘底 + 居中放大的徽章"""
+def build_icon(size: int, art: Image.Image) -> Image.Image:
+    """带底 favicon：**圆盘**底而不是方块——方形底在标签栏里会显出一个突兀的方块（被明确否过），
+    圆盘与主体同形，浅色/深色标签栏上都能看清。"""
     canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     ImageDraw.Draw(canvas).ellipse((0, 0, size - 1, size - 1), fill=ICON_GROUND + (255,))
     inner = max(1, round(size * ICON_ART_INSET))
-    art = _icon_art().resize((inner, inner), Image.LANCZOS)
+    scaled = art.resize((inner, inner), Image.LANCZOS)
     off = (size - inner) // 2
-    canvas.paste(art, (off, off), art)
+    canvas.paste(scaled, (off, off), scaled)
     return canvas
 
 
-build_icon(48).save(OUT / "favicon.ico", sizes=[(16, 16), (32, 32), (48, 48)])
-_touch_art = _icon_art().resize((180, 180), Image.LANCZOS)
-_touch = Image.new("RGB", (180, 180), ICON_GROUND)
-_touch.paste(_touch_art, (0, 0), _touch_art)
-_touch.save(OUT / "apple-touch-icon.png", "PNG", optimize=True)
+OUT.mkdir(parents=True, exist_ok=True)
 
-# 视觉核对图：贴到各自的目标底色上（浏览器面板 0×0 时唯一能"看见"的办法）。
-# 尺寸给足：早先的 30px 缩略图在宽画布上会被预览器再缩一次，肉眼根本分不出好坏（踩过）。
-for _src_theme, dest, bg in VARIANTS:
-    canvas = Image.new("RGB", (720, 200), bg)
-    mark = Image.open(OUT / f"logo-mark-{dest}.png")
-    mark = mark.resize((120, round(120 * mark.height / mark.width)), Image.LANCZOS)
-    canvas.paste(mark, (24, 40), mark)
-    lockup = Image.open(OUT / f"logo-lockup-{dest}.png")
-    lockup = lockup.resize((150, round(150 * lockup.height / lockup.width)), Image.LANCZOS)
-    canvas.paste(lockup, (420, 25), lockup)
-    ImageDraw.Draw(canvas).text(
-        (200, 90), f"mark on {dest[3:]}\n(120px 徽章 / 150px 整标)", fill=(190, 60, 60)
+rgb = np.array(Image.open(SOURCE).convert("RGB"))
+bg_mask = border_background_mask(rgb)
+alpha = np.where(bg_mask, 0, 255).astype("uint8")
+full = Image.fromarray(np.dstack([rgb, alpha]).astype("uint8"))
+
+subject = subject_mask(alpha)
+mark = crop_to(full, subject)
+mark = mark.resize(
+    (max(1, round(mark.width * MARK_HEIGHT / mark.height)), MARK_HEIGHT), Image.LANCZOS
+)
+mark.save(OUT / "logo-mark.png", "PNG", optimize=True)
+
+icon_art = square_crop(mark)
+build_icon(48, icon_art).save(OUT / "favicon.ico", sizes=[(16, 16), (32, 32), (48, 48)])
+touch = Image.new("RGB", (ICON_SIZE, ICON_SIZE), ICON_GROUND)
+touch_art = icon_art.resize((ICON_SIZE, ICON_SIZE), Image.LANCZOS)
+touch.paste(touch_art, (0, 0), touch_art)
+touch.save(OUT / "apple-touch-icon.png", "PNG", optimize=True)
+
+# ---- README / 文档用的横版头图 ----------------------------------------------
+# 横版整标（徽章 + NestSpace 字标）**不进标头**：字标是深墨色，深色主题下会看不见，而标头本来
+# 就有站点自己的排印文字。但 README 头图是另一回事——GitHub 的深色主题下它是一块浅色卡片，
+# 自带底色反而稳。所以这里只**裁掉四周留白**（保留原件的近白底），不做抠底：
+# 抠成透明的话，同一张图在 GitHub 深色主题里就只剩看不见的一行字。
+BANNER_SOURCE = SRC / "Logo horizontal scroll.png"
+BANNER_HEIGHT = 200
+BANNER_PAD = 24
+
+if BANNER_SOURCE.exists():
+    banner_rgb = np.array(Image.open(BANNER_SOURCE).convert("RGB"))
+    banner_bg = np.median(
+        np.concatenate([
+            banner_rgb[:4, :].reshape(-1, 3), banner_rgb[-4:, :].reshape(-1, 3),
+            banner_rgb[:, :4].reshape(-1, 3), banner_rgb[:, -4:].reshape(-1, 3),
+        ]),
+        axis=0,
     )
-    canvas.save(SRC / f"preview-{dest}.png")
+    # 内容包围盒：与底色差得够多的像素才算内容（近白底 + 深墨字，判据很稳）
+    ink = np.abs(banner_rgb.astype(int) - banner_bg.astype(int)).sum(axis=2) > 60
+    ys, xs = np.nonzero(ink)
+    if len(ys) == 0:
+        raise SystemExit(f"{BANNER_SOURCE.name}: 没找到内容包围盒")
+    y0 = max(0, ys.min() - BANNER_PAD)
+    y1 = min(banner_rgb.shape[0], ys.max() + 1 + BANNER_PAD)
+    x0 = max(0, xs.min() - BANNER_PAD)
+    x1 = min(banner_rgb.shape[1], xs.max() + 1 + BANNER_PAD)
+    banner = Image.fromarray(banner_rgb[y0:y1, x0:x1])
+    banner = banner.resize(
+        (max(1, round(banner.width * BANNER_HEIGHT / banner.height)), BANNER_HEIGHT),
+        Image.LANCZOS,
+    )
+    banner.save(OUT / "logo-banner.png", "PNG", optimize=True)
 
-print("\n".join(report))
-print("核对图: frontend/design/preview-on-<dark|light>.png（左=120px 徽章，右=150px 整标）")
-print("图标: frontend/public/brand/favicon.ico (16/32/48) + apple-touch-icon.png (180)")
+# 视觉核对图：同一张标头图分别贴到深浅两种底色上，再排一行真实尺寸的图标
+# （浏览器面板 0×0 时唯一能"看见"的办法；尺寸给足，早先的 30px 缩略图会被预览器再缩一次，
+#  肉眼根本分不出好坏——踩过）。
+canvas = Image.new("RGB", (760, 250), (255, 255, 255))
+for col, (label, bg) in enumerate((("dark", (24, 25, 23)), ("light", (244, 243, 238)))):
+    x0 = col * 380
+    ImageDraw.Draw(canvas).rectangle((x0, 0, x0 + 380, 190), fill=bg)
+    canvas.paste(mark, (x0 + 24, 35), mark)
+    ImageDraw.Draw(canvas).text((x0 + 196, 90), f"header on {label} background", fill=(190, 60, 60))
+for i, size in enumerate((16, 32, 48)):
+    icon = build_icon(size, icon_art)
+    canvas.paste(icon, (24 + i * 56, 200), icon)
+ImageDraw.Draw(canvas).text((200, 212), "favicon 16 / 32 / 48 (disc ground)", fill=(120, 120, 120))
+canvas.save(SRC / "preview.png")
 
+print(f"抠图：背景 {bg_mask.mean() * 100:.1f}%，主体占画布 {subject.mean() * 100:.1f}%")
+print(f"标头徽章 {mark.size} · {(OUT / 'logo-mark.png').stat().st_size // 1024}KB")
+print(f"图标     favicon.ico (16/32/48) + apple-touch-icon.png ({ICON_SIZE})，底板 RGB{ICON_GROUND}")
+print("核对图   frontend/design/preview.png（左右=深浅主题下的标头，下方=真实尺寸图标）")

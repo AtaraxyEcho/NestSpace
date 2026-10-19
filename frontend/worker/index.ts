@@ -2417,7 +2417,7 @@ adminApp.post('/github-sync', async (c) => {
           // Release 信息获取失败不阻断整体同步
         }
 
-        // 四个文档都已齐备时跳过抓取：原来是无条件跑一遍候选路径（最多约 11 个请求/项目）
+        // 四个文档都已齐备时跳过抓取：原来是无条件跑一遍候选路径（最多 17 个请求/项目，见 syncRowCost）
         const needsDocs =
           row.has_readme_zh !== 1 ||
           row.has_readme_en !== 1 ||
