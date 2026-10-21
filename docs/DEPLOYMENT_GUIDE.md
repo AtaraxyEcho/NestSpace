@@ -51,7 +51,7 @@ NestSpace/
 │   ├── tsconfig.json             # 前端 TS 配置（浏览器环境；不含 Node 全局）
 │   ├── tsconfig.node.json        # 只给 vite.config.ts 用（process.env 需要 Node 类型）
 │   ├── .figma/make/site.json     # 站点标题 / 描述 / 收录开关（构建期注入 HTML 头部）
-│   ├── test/                     # 18 个纯函数闸门（pnpm test 依次跑；test_chain.test.mjs 核对
+│   ├── test/                     # 19 个纯函数闸门（pnpm test 依次跑；test_chain.test.mjs 核对
 │   │                             #   「注册链 = test/ 目录」，漏登记的闸门会在 CI 里静默不跑）
 │   │                             # 鉴权与地址：jwt_verify · site_host（admin.X ↔ X、canonical 按 origin）
 │   │                             # 列与清单对齐：sync_update（17f 代码列 ⊆ 迁移列 / 18 三份站点设置清单）
@@ -480,7 +480,7 @@ npx wrangler dev
 改动鉴权或证书校验逻辑后，运行安全回归：
 
 ```bash
-# 全部 18 条闸门（纯函数、不联网；test_chain.test.mjs 核对"注册链 = test/ 目录"，漏登记会红）
+# 全部 19 条闸门（纯函数、不联网；test_chain.test.mjs 核对"注册链 = test/ 目录"，漏登记会红）
 pnpm test
 # 前置：Node ≥ 22.18（`frontend/.mise.toml` 已钉 22）。单测直接 `import` .ts 源文件，
 # 靠的是 Node 原生的 TS 类型剥离——22.6–22.17 不带 flag 会在 import 阶段就报错。
