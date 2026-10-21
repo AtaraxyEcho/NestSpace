@@ -50,6 +50,13 @@ npm-debug.log*
 .claude-replay.*
 .tmp-*
 
+# Python 工具链产物（scripts/make-brand-logos.py 被导入时生成）
+__pycache__/
+*.pyc
+# 三方合并残留（手工解冲突时产生，最容易误提交）
+*.orig
+*.rej
+
 # 6. 编辑器与操作系统特定文件 (IDE & Operating System)
 .DS_Store
 Thumbs.db
@@ -65,8 +72,9 @@ desktop.ini
 # 7. 第三方平台与设计工具临时状态 (Platform Managed State)
 /.plugins/
 /.opencode-skills/
-/frontend/.figma/
-
+# 这里**不能**整目录忽略 `frontend/.figma/`：`.figma/make/site.json` 是构建输入
+# （`vite.config.ts` 直接 import 它），一旦目录被忽略，新增/重建该文件会静默 add 不上。
+# Figma Make 的本机临时状态由 frontend/.gitignore 的 `/.figma/design-context/` 负责。
 
 PASSWORD.*
 # 设计链路产物（product-design skill 的上下文与面板，非站点源码）

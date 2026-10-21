@@ -9,6 +9,16 @@ PROBE_FAIL=0
 export LANG=C.UTF-8
 # 路径全部相对脚本自身解析，不再写死本机绝对路径（换机器/换用户名都能跑）
 ROOT="$(cd "$(dirname "$0")/.." && pwd -W 2>/dev/null || pwd)"
+
+# 优先用仓库钉住的 wrangler（frontend/node_modules），与 CI/同事同一版本；还没 install 时回落到 npx
+if [ -x "$ROOT/frontend/node_modules/.bin/wrangler" ]; then
+  WRANGLER_BIN="$ROOT/frontend/node_modules/.bin/wrangler"
+else
+  WRANGLER_BIN=""
+fi
+run_wrangler() {
+  if [ -n "$WRANGLER_BIN" ]; then "$WRANGLER_BIN" "$@"; else npx wrangler "$@"; fi
+}
 cd "$ROOT/frontend" || exit 1
 # 中间文件统一放仓库根的 .tmp-probe/（已被 .gitignore 的 .tmp-* 覆盖）。
 # 注意别用 /tmp：原生 node 读不懂 MSYS 的 /tmp 路径
@@ -20,7 +30,7 @@ pnpm run build >/dev/null 2>&1 || { echo "BUILD FAILED"; exit 1; }
 
 PORT="${PROBE_PORT:-8898}"
 LOG="$WORK/wrangler-usage.log"
-npx wrangler dev --port "$PORT" --log-level warn > "$LOG" 2>&1 &
+# 服务不在这里起：要先有 port_busy / trap，见下面「== 起 dev ==' 一段
 kill_probe_tree() {
   # Windows 下 wrangler dev 的进程树是 bash→cmd→node→node→workerd 多层，
   # 而且 $! 抓到的外层 PID 常常不是这棵树的根。所以主收路径交给 PowerShell：按**端口**精确匹配这一支
@@ -70,6 +80,17 @@ cleanup() {
   rm -rf "$WORK"
 }
 trap cleanup EXIT
+
+echo "== 起 dev（$PORT） =="
+# 端口不是自己的就别起跑：同一工作树可能有另一个会话的 wrangler dev 占着 8898。
+# 那种情况下"等就绪"会拿到**别人**的应答，实测写进的是那一支的库，
+# 而收尾按端口收进程——等于把另一个会话的服务杀掉，还自称"端口已释放"。
+if port_busy; then
+  echo "!! 端口 $PORT 已被占用（多半是另一个会话的 wrangler dev）。" >&2
+  echo "   先停掉它，或换端口：PROBE_PORT=8897 bash scripts/usage-probe.sh" >&2
+  exit 1
+fi
+run_wrangler dev --port "$PORT" --log-level warn > "$LOG" 2>&1 &
 
 echo "== 等就绪 =="
 READY=0
@@ -127,7 +148,7 @@ probe "合法 dirimport ok   " -X POST "http://127.0.0.1:$PORT/api/usage" \
   -H 'Content-Type: text/plain' --data-raw '{"e":"dirimport","m":"ok"}'
 probe "未知事件（要 400）  " -X POST "http://127.0.0.1:$PORT/api/usage" \
   -H 'Content-Type: text/plain' --data-raw '{"e":"ssrf","m":"ok"}'
-probe "白名单外方式(要400) " -X POST "http://127.0.0.1:$PORT/api/usage" \
+probe "白名单外方式（要 400）" -X POST "http://127.0.0.1:$PORT/api/usage" \
   -H 'Content-Type: text/plain' --data-raw '{"e":"deck","m":"delete-me"}'
 probe "非 JSON（要 400）   " -X POST "http://127.0.0.1:$PORT/api/usage" \
   -H 'Content-Type: text/plain' --data-raw 'hello'
@@ -174,8 +195,27 @@ for ASSET in /brand/logo-mark.png /brand/logo-banner.png /brand/favicon.ico /bra
 done
 
 echo
+echo "== 2c. 深链与尾斜杠都要拿到**注入过**的 HTML（漏一条就是「页面照常、头部没有 canonical」） =="
+# 判据用 `<!-- seo:origin-tags -->` 这个占位标记：它在构建产物里存在，只有 Worker 处理过才会被换掉。
+# 资产层的 SPA 兜底返回的是没换过的那一份，状态码同样是 200 + text/html，所以只看状态码抓不到。
+for PATHQ in /admin /admin/ /admin/anycase /project /project/001 /; do
+  CODE=$(curl -s -o "$WORK/html.bin" -w '%{http_code}' "http://127.0.0.1:$PORT$PATHQ")
+  # grep -c 无匹配时本来就打印 0（只是退出码是 1），别再 `|| echo 0`——那会变成两行"0"，把正常路径误判成失败
+  MARKER=$(grep -c 'seo:origin-tags' "$WORK/html.bin" 2>/dev/null)
+  TITLED=$(grep -c '<title>[^<]' "$WORK/html.bin" 2>/dev/null)
+  printf '      %-16s -> HTTP %s，占位标记 %s 处，非空 <title> %s\n' "$PATHQ" "$CODE" "${MARKER:-0}" "${TITLED:-0}"
+  if [ "$CODE" != "200" ] || [ "${MARKER:-0}" != "0" ] || [ "${TITLED:-0}" = "0" ]; then
+    PROBE_FAIL=1
+    echo "        !! 这条没经过 Worker 注入（run_worker_first 或 Hono 路由少了一种形态）"
+  fi
+done
+
+echo
 echo "== 3. 管理端写侧：相册判据仍是同一份（本地库，绝不碰生产） =="
 TOKEN=$(sed -n 's/^ADMIN_SECRET_KEY=//p' .dev.vars | head -1 | tr -d '\r"')
+# 口令只走临时头文件（-H @file）与子进程环境，不进 argv：本机其他账号在进程列表里读不到
+AUTH_HEADER="$WORK/auth-header"
+( umask 077; printf 'Authorization: Bearer %s\n' "$TOKEN" > "$AUTH_HEADER" )
 if [ -z "$TOKEN" ]; then
   echo "ADMIN_SECRET_KEY 不在 .dev.vars 里，跳过写侧实测（只确认路由活着）"
   probe "PUT 无鉴权（要 401）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
@@ -184,7 +224,7 @@ else
   BODY="$WORK/admin-body.json"
   # 管理端列表返回的是裸数组（没有 {success,data} 包装），也没有 GET /projects/:id
   admin_list() {
-    curl -s "http://127.0.0.1:$PORT/api/admin/projects" -H "Authorization: Bearer $TOKEN"
+    curl -s "http://127.0.0.1:$PORT/api/admin/projects" -H @"$AUTH_HEADER"
   }
   admin_row() {
     admin_list > "$BODY"
@@ -211,22 +251,22 @@ else
 
   BAD=$(node -e 'process.stdout.write(JSON.stringify(Array.from({length:13},(_,i)=>`https://a.example/${i}.png`)))')
   probe "PUT 13 张（要 400：服务端点名张数，逐行点名在前端）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
     --data-raw "{\"preview_images_json\":$BAD}"
   probe "PUT 含坏行（要 400 点名第 2 行）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
     --data-raw '{"preview_images_json":"[\"https://a.example/1.png\",\"notaurl\"]"}'
   probe "PUT 项目图片非法（要 400 且说「项目图片」）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
     --data-raw '{"preview_image_url":"ftp://a.example/x.png"}'
   probe "PUT 两种拼写冲突（要 400）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
     --data-raw '{"previewImages":["https://a.example/1.png"],"preview_images_json":"[\"https://a.example/9.png\"]"}'
 
   # 用 node 生成合法 JSON（直接在 bash 里拼引号会把双引号原样带进去，那是探针的 bug 不是接口的问题）
   GOOD=$(node -e 'process.stdout.write(JSON.stringify({ preview_images_json: ["https://a.example/1.png","https://a.example/2.png"] }))')
   probe "PUT 合法两行（要 200）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
     --data-raw "$GOOD"
   GALLERY_COUNT=$(admin_row | node -e '
     let s = ""
@@ -241,7 +281,7 @@ else
   fi
 
   probe "PUT 恢复原值（要 200）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/001" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
     --data-raw "$ORIG"
   if ! admin_row | node -e '
     let s = ""
@@ -262,6 +302,66 @@ else
 fi
 
 echo
+echo "== 3c. 新建路径：POST 与 PUT 必须落同一批列（协议 / 四份文档曾被 INSERT 静默丢弃） =="
+if [ -n "$TOKEN" ]; then
+  TMP_ID="probe-tmp-$$"
+  CREATE_BODY=$(node -e '
+    const id = process.argv[1]
+    process.stdout.write(
+      JSON.stringify({
+        id,
+        name: "Probe Temp",
+        status: "DRAFT",
+        license: "MIT",
+        readme_zh: "# probe readme",
+        readme_en: "# probe en",
+        compose_dev: "services: {}",
+        compose_prod: "services: {}",
+      }),
+    )
+  ' "$TMP_ID")
+  probe "POST 新建（要 201）" -X POST "http://127.0.0.1:$PORT/api/admin/projects" \
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' --data-raw "$CREATE_BODY"
+  # 列表不带四份长文档（响应体积），正文只能从单件详情接口回读
+  CREATE_CHECK=$(curl -s "http://127.0.0.1:$PORT/api/admin/projects/$TMP_ID" -H @"$AUTH_HEADER" | node -e '
+    let s = ""
+    process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      try {
+        const row = JSON.parse(s)
+        const ok =
+          row.license === "MIT" &&
+          ["readme_zh", "readme_en", "compose_dev", "compose_prod"].every(
+            (key) => String(row[key] || "").length > 0,
+          )
+        process.stdout.write(ok ? "ok" : "fields-dropped")
+      } catch {
+        process.stdout.write("bad-json")
+      }
+    })
+  ')
+  echo "  新建后从详情接口回读：$CREATE_CHECK（应为 ok）"
+  if [ "$CREATE_CHECK" != "ok" ]; then
+    PROBE_FAIL=1
+    echo "  !! 新建时手填的协议/文档没有落库"
+  fi
+  LIST_LEAN=$(admin_list | node -e '
+    let s = ""
+    const id = process.argv[1]
+    process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      const rows = JSON.parse(s)
+      const row = rows.find((x) => String(x.id) === id) || {}
+      process.stdout.write("readme_zh" in row ? "list-carries-docs" : "ok")
+    })
+  ' "$TMP_ID")
+  echo "  列表不带长文档：$LIST_LEAN（应为 ok）"
+  if [ "$LIST_LEAN" != "ok" ]; then
+    PROBE_FAIL=1
+    echo "  !! 列表仍然带上了文档正文（响应体积会随馆藏放大）"
+  fi
+  probe "DELETE 收尾（要 200）" -X DELETE "http://127.0.0.1:$PORT/api/admin/projects/$TMP_ID" \
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json'
+fi
+
 echo "== 4. 双语字段（挑战/方案）写读往返：先快照、测完按快照复原 =="
 if [ -n "$TOKEN" ]; then
   # 复原按"解析后的双语对"写回（写侧从此只碰 challenge_json / solution_json，
@@ -309,7 +409,7 @@ if [ -n "$TOKEN" ]; then
   PAIRFILE="$WORK/probe-pair.json"
   node "$ROOT/scripts/probe-bilingual-payload.mjs" "$PAIRFILE" >/dev/null
   probe "PUT 双语对（要 200）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/$TARGET" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
     --data-binary "@$PAIRFILE"
   curl -s -o "$BODY" "http://127.0.0.1:$PORT/api/projects/$TARGET"
   if ! node -e '
@@ -343,7 +443,7 @@ if [ -n "$TOKEN" ]; then
     }), "utf8")
   ' "$SNAPSHOT" "$RESTORE_FILE"
   probe "PUT 按快照复原（要 200）" -X PUT "http://127.0.0.1:$PORT/api/admin/projects/$TARGET" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
     --data-binary "@$RESTORE_FILE"
   curl -s -o "$BODY" "http://127.0.0.1:$PORT/api/projects/$TARGET"
   if ! node -e '
@@ -364,7 +464,7 @@ if [ -n "$TOKEN" ]; then
   echo "== 5. 同步范围 ids 过滤（只跑选中的那一个，不真跑全表——GitHub 配额要留给需要时） =="
   ONE=$TARGET
   probe "同步单个 $ONE（要 200，结果应只有它）" -X POST "http://127.0.0.1:$PORT/api/admin/github-sync" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
     --data-raw "{\"ids\":[\"$ONE\"]}"
   if ! node -e '
     const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
@@ -391,17 +491,17 @@ if [ -n "$TOKEN" ]; then
   if [ "${THREE_COUNT:-0}" -ge 3 ]; then
     probe "抓文档选 3 个（要 400：上限 2，且在任何 GitHub 请求之前）" -X POST \
       "http://127.0.0.1:$PORT/api/admin/github-sync" \
-      -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+      -H @"$AUTH_HEADER" -H 'Content-Type: application/json' \
       --data-binary "@$THREEFILE"
   else
     echo "  本地馆藏不足 3 个标本，跳过抓文档批次上限实测（当前 $THREE_COUNT 个）"
   fi
   probe "ids 为空数组（要 400，不能退化成全表）" -X POST "http://127.0.0.1:$PORT/api/admin/github-sync" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' --data-raw '{"ids":[]}'
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' --data-raw '{"ids":[]}'
   probe "ids 形态不对（要 400）" -X POST "http://127.0.0.1:$PORT/api/admin/github-sync" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' --data-raw '{"ids":"001"}'
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' --data-raw '{"ids":"001"}'
   probe "未知 id（要 200 且返回 0 条）" -X POST "http://127.0.0.1:$PORT/api/admin/github-sync" \
-    -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' --data-raw '{"ids":["999999"]}'
+    -H @"$AUTH_HEADER" -H 'Content-Type: application/json' --data-raw '{"ids":["999999"]}'
   UNKNOWN_COUNT=$(node -e '
     const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
     process.stdout.write(String((j.results || []).length))
@@ -416,7 +516,7 @@ fi
 echo
 echo "== 6. 访问台账（D1 聚合 / UV 去重 / 爬虫与管理端排除） =="
 if [ -n "$TOKEN" ]; then
-  if ! node "$ROOT/scripts/probe-visit-ledger.mjs" "$PORT" "$TOKEN"; then
+  if ! PROBE_ADMIN_TOKEN="$TOKEN" node "$ROOT/scripts/probe-visit-ledger.mjs" "$PORT"; then
     VISIT_FAIL=1
   fi
 else

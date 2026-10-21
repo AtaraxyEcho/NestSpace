@@ -22,24 +22,29 @@
 | 前端 | React 19 · Vite 8 · Tailwind v4 → 静态资产 `frontend/dist` |
 | 后端 | Cloudflare Workers + Hono（`frontend/worker/index.ts`）：公开只读 API、管理端 API、SEO 注入 |
 | 数据 | D1（边缘 SQLite）：项目、站点文案、访问台账 |
-| 后台 | 同源的 `/admin`；生产挂在 `admin.<主域>` 上，由 Zero Trust Access 拦截 |
+| 后台 | 同源的 `/admin`；真实域名下跳到 `admin.<主域>`（地址按 hostname 推导，不写死域名），本地与 workers.dev 就地 |
 
 ---
 
 ## 预览
 
-| 陈列（首页） | 详情页 |
+| 陈列（浅色） | 详情页 |
 |---|---|
 | ![陈列](docs/screenshots/home.png) | ![详情页](docs/screenshots/detail.png) |
+| 陈列（深色） | 关于 / 手记 |
+| ![深色陈列](docs/screenshots/home-dark.png) | ![关于](docs/screenshots/curator.png) |
 
-线上实拍（1440×900 视口）；站点支持深浅主题与中英切换。
+<p align="center"><img src="docs/screenshots/detail-mobile.png" width="260" alt="移动端详情"></p>
+
+线上实拍；支持深浅主题、中英切换与移动端。
 
 ---
 
 ## 快速开始（以 Cloudflare 为例）
 
-需要：**Node ≥ 22.18**、**pnpm 10.34.3**（版本钉在 `frontend/.mise.toml`）、**全局 wrangler**
-（`npm i -g wrangler`；`scripts/d1-migrate.sh` 内部调的是裸命令）、一个免费 Cloudflare 账号。
+需要：**Node ≥ 22.18**、**pnpm 10.34.3**（`frontend/package.json` 的 `packageManager` 与 `.mise.toml` 双重钉住）、
+一个免费 Cloudflare 账号。**wrangler 已钉在 `frontend` 的 `devDependencies`（4.148.0）**：`pnpm install` 之后
+`npx wrangler` 与仓库里的脚本都会用到这份本地二进制，迁移与部署不再依赖机器上的全局版本。
 
 ```bash
 # 本地跑起来（不需要 Cloudflare 账号）
@@ -50,8 +55,16 @@ cd frontend && pnpm install --frozen-lockfile
 pnpm run build && npx wrangler dev                  # localhost:8787，管理端 /admin
 ```
 
+**上线：两种形态，都只用免费额度，代码不用改。**
+
+| | 无域名 · `workers.dev` | 自定义域名（推荐） |
+|---|---|---|
+| 开启 | `workers_dev = true` | 绑主域 + `admin.<主域>` |
+| 后台 | `/admin`（就地渲染） | `admin.<主域>` |
+| 代价 | 后台与公开站同源，只剩口令一层 | 多一层 DNS + Access 配置 |
+
 ```bash
-# 上线（先迁移，再部署；顺序反了公开接口会整片 500）
+# 先迁移，再部署；顺序反了公开接口会整片 500
 npx wrangler login
 npx wrangler d1 create nestspace-prod               # 把 database_id 填进 frontend/wrangler.toml
 npx wrangler secret put ADMIN_SECRET_KEY
@@ -59,20 +72,25 @@ bash ../scripts/d1-migrate.sh remote                # 可反复执行，只跑�
 npx wrangler deploy
 ```
 
-生产建议：管理端放 `admin.<主域>` 并由 Access 拦截；自动部署用 Workers Builds（Root directory 填 `frontend`）。
-配额边界与运维细节见 [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md)。`0002` 会带进 4 个占位项目
+无域名模式只需把 `frontend/wrangler.toml` 的 `workers_dev` 改成 `true`（默认 `false`，所以部署完没有 URL），
+地址是 `https://nestspace.<账号子域>.workers.dev`；以后绑了自定义域名记得改回去，别留备用入口。
+
+**本地与线上不互通**：数据（本地 `.wrangler/state` vs 远程 D1）与密钥（`.dev.vars` vs `wrangler secret`）
+是两套，跑过 `d1-migrate.sh local` 不等于线上也迁移过。
+
+自动部署用 Workers Builds（Root directory 填 `frontend`）。配额边界与运维细节见
+[docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md)。`0002` 会带进 4 个占位项目
 （仓库地址是虚构的 `github.com/nestspace/*`），按需删除或替换。
 
 > [!WARNING]
-> **本项目带管理端（可改全站内容），生产务必加一层 Zero Trust。** Cloudflare Access 的免费档覆盖最多
-> 50 个用户，把 `/admin` 与 `/api/admin/*` 放到 Access 应用后面即可，不需要付费。
+> **本项目带管理端（可改全站内容），生产务必加一层零信任。** Cloudflare Access 的免费档覆盖最多 50 个用户：
+> 自定义域名下把 `/admin` 与 `/api/admin/*` 放进 Access 应用；无域名模式可考虑 Worker 级 Access
+> （能覆盖 workers.dev，但它的令牌形态与本项目按经典应用级 JWT 写的校验是否一致需实测）。
 >
-> 裸部署（只有 Worker）时，**`ADMIN_SECRET_KEY` 就是唯一闸门**：它本身不会泄漏——存为 Worker secret、
-> 不进仓库与响应、比较是常量时间——但它是**长期有效的静态口令**，没有过期与自动轮换。客户端会把它放在
-> 当前标签页的 sessionStorage 里，任何 XSS 都能读走；代码里的失败锁定只活在单个 isolate，挡不住多 IP
-> 轮换的爆破，安全性因此完全取决于熵。所以：用 `openssl rand -base64 32` 生成、只通过
-> `wrangler secret put` 下发、怀疑泄露立即轮换；`workers_dev` 与 `preview_urls` 保持关闭。
-> 具体接法与字段见部署手册第三节。
+> 只剩口令时（无域名模式），**`ADMIN_SECRET_KEY` 就是唯一闸门**：它长期有效、不自动轮换，客户端把它放在当前
+> 标签页的 sessionStorage 里（任何 XSS 都能读走），代码里的失败锁定只活在单个 isolate、挡不住多 IP 轮换的爆破
+> ——安全性完全取决于熵。所以：`openssl rand -base64 32` 生成、只经 `wrangler secret put` 下发、怀疑泄露立即轮换；
+> `preview_urls` 保持关闭。密钥本身的实现（不进仓库与响应、常量时间比较）与三层防线的边界见部署手册第三节。
 
 ---
 
@@ -81,8 +99,8 @@ npx wrangler deploy
 ```bash
 cd frontend
 pnpm run typecheck   # 前端 + Worker 两套 tsconfig
-pnpm test            # 17 条闸门（纯函数，不联网）
-pnpm run build
+pnpm test            # 18 条闸门（纯函数，不联网）
+pnpm run build      # 含 typecheck（Workers Builds 只跑这一条）
 bash ../scripts/usage-probe.sh      # 接口探针：自起 8898、自收尾
 bash ../scripts/visual-check.sh     # 页面级：无头 Chrome 截图 + DOM 断言（需本机 Chrome）
 ```

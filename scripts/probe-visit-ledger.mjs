@@ -6,9 +6,11 @@
 // 断言全部是"相对基线"的：本地库可能已经有前几次探针的数据，不能写死绝对值。
 import { randomUUID } from 'node:crypto'
 
-const [port, token] = process.argv.slice(2)
+const [port] = process.argv.slice(2)
+// 口令走环境变量而不是 argv：后者在本机进程列表里对任何账号可见
+const token = process.env.PROBE_ADMIN_TOKEN ?? ''
 if (!port || !token) {
-  console.error('用法：node scripts/probe-visit-ledger.mjs <port> <admin-token>')
+  console.error('用法：PROBE_ADMIN_TOKEN=… node scripts/probe-visit-ledger.mjs <port>')
   process.exit(2)
 }
 

@@ -13,6 +13,7 @@ import {
   saveAdminProject,
   deleteAdminProject,
   getAdminToken,
+  fetchAdminProject,
   fetchAdminSiteSettings,
   saveAdminSiteSettings,
   syncGithubRepos,
@@ -48,7 +49,8 @@ import type { SectionSlotKey } from "./types/siteSettings"
 // 双语字段（挑战/方案）的读侧规则，与 Worker 投影同一份
 import { asBilingual, pickBilingual, pickSiteHeading, type BilingualText } from "./utils/bilingual"
 // 相册判据与 Worker 写侧共用这一份（坏行即时点名与 400 点名必然是同一批）
-import { PREVIEW_IMAGE_LIMIT, galleryRowIssues } from "./utils/previewRules"
+import { PREVIEW_IMAGE_LIMIT, galleryRowIssues, sanitizeImageUrl, IMAGE_PROXY_HOSTS } from "./utils/previewRules"
+import { SYNC_MAX_ROWS, SYNC_MAX_DOC_ROWS, syncRowCap } from "./utils/syncLimits"
 import { changedColumns } from "./utils/projectDiff"
 import {
   routeFromPath,
@@ -289,14 +291,14 @@ export function formatRepositoryUrl(repo: string | null | undefined): string {
  */
 function demoHref(project: Project): string | null {
   if (!project.demoEnabled) return null
-  const url = (project.demoUrl || "").trim()
-  return /^https?:\/\//i.test(url) ? url : null
+  // 走 settingsHref 而不是只看协议前缀：`https://`（空主机）或带空格的值都解析不出主机名，
+  // 以前那种值会渲染成一个点了没反应的按钮。
+  return settingsHref(project.demoUrl)
 }
 
-/** 源码地址：与 demoHref 同一口径——规范化后必须是绝对 http(s) 才渲染按钮（空值不配拥有按钮） */
+/** 源码地址：与 demoHref 同一口径——解析出主机名才渲染按钮（空值 / 畸形 owner/repo 不配拥有按钮） */
 function sourceHref(project: Project): string | null {
-  const url = formatRepositoryUrl(project.repository)
-  return /^https?:\/\//i.test(url) ? url : null
+  return settingsHref(formatRepositoryUrl(project.repository))
 }
 
 /**
@@ -344,17 +346,8 @@ function mailtoHref(email: string | null | undefined): string | null {
 // zoom = 放大层，2000 就是 /api/img 的宽度上限（IMG_WIDTH_MAX），再大也会被服务端夹回来。
 const IMAGE_WIDTH = { plate: 1600, thumb: 200, zoom: 2000 } as const
 
-// 可经代理压缩的图源主机。**必须与 worker 的 IMG_ALLOWED_HOSTS 保持一致（只允许是其子集）**：
-// Worker 对名单外的主机返回 404（不做开放重定向），所以这里名单外的地址直接原样使用，
-// 不绕代理。若两边漂移，方向必须是"前端更窄"，否则图片会挂。
-const IMAGE_PROXY_HOSTS = new Set([
-  "raw.githubusercontent.com",
-  "user-images.githubusercontent.com",
-  "camo.githubusercontent.com",
-  "objects.githubusercontent.com",
-  "github.com",
-  "cdn.jsdelivr.net",
-])
+// 可经代理压缩的图源主机就是 `utils/previewRules.ts` 的 IMAGE_PROXY_HOSTS——**与 Worker 同一份**，
+// 不再各写一遍。名单外的地址直接原样使用、不绕代理（Worker 对名单外回 404，不做重定向）。
 
 /**
  * 白名单图源走同源代理（Worker 压成 webp + 边缘缓存）；其余直接用原地址。
@@ -2579,6 +2572,12 @@ function AdminGateway({
         // 本地存过口令却失败（口令改了 / Cloudflare 授权变更）：说清楚为什么停在登录页，
         // 别让人对着空表单猜。没存过口令时停在登录页是正常路径，不显示错误。
         setAuthError(`${res.error || "本地保存的口令已失效"}，请重新输入口令`)
+      } else if (accessLayerPresent) {
+        // 有 Access 层但没有本地口令，探测失败说明 Access 会话已过期或被策略拦下：
+        // 这时停在登录页也要说明原因，否则看起来像登录表单自己弹出来的。
+        setAuthError(
+          `${res.error || "未能通过 Cloudflare Access 校验"}，请重新登录 Access，或输入馆长口令`,
+        )
       }
     })
   }, [])
@@ -2768,6 +2767,9 @@ function AdminPage({
   const [replaceGallery, setReplaceGallery] = useState(false)
   // 新建项目的空白模板快照：作为"未保存改动"的比对基线（列表里还没有这一行）
   const [newDraftBase, setNewDraftBase] = useState<Project | null>(null)
+  // 打开抽屉时取回的那一份完整记录（含四份文档）：它才是「未保存改动」与「只发改动列」的基线。
+  // 列表行不带文档，拿它当基线会把四份文档永远算成改动过（每次关闭都弹确认、每次保存都回写）。
+  const [openedSnapshot, setOpenedSnapshot] = useState<Project | null>(null)
   // 保存/删除等在途操作的互斥锁：按钮禁用 + 处理函数入口重入判断，避免双击发两次写请求
   const [savingProject, setSavingProject] = useState(false)
   // 关闭抽屉时如果有未保存改动，这里存改动列数（>0 表示确认条展开）
@@ -2775,6 +2777,8 @@ function AdminPage({
   // 抽屉的焦点管理：打开时环在抽屉里、关闭后还给唤起它的那个按钮（键盘用户不该被丢在 body 上）
   const drawerRef = useRef<HTMLFormElement | null>(null)
   const drawerOpenerRef = useRef<HTMLElement | null>(null)
+  // 抽屉是异步打开的（要先取全文）：只让最后一次点击的结果落地，避免连点两行时后到的响应把抽屉换成上一行
+  const openSeqRef = useRef(0)
   // 后台只有一条通知位（.admin-notice）。三种状态各有归宿：
   //   info —— 结果性提示，6 秒后自动让位（否则一条旧消息会常驻到下次操作，失败提示会被冲掉）；
   //   error —— 常驻，带关闭按钮，直到用户确认它被看过；
@@ -2998,7 +3002,16 @@ function AdminPage({
       setNoticeError(`导入失败: ${res.error}`)
       return
     }
-    setNotice(`✓ ${res.message || "导入成功"}`)
+    // 导入成功不等于"抓到东西"：把文档抓取结果如实带出来，否则 0 份文档也只剩一句成功
+    const docCounts = res.docs ? Object.values(res.docs).filter((n) => n > 0).length : null
+    setNotice(
+      `✓ ${res.message || "导入成功"}` +
+        (docCounts === null
+          ? ""
+          : docCounts > 0
+            ? `（已抓取 ${docCounts} 份文档）`
+            : "（仓库里没抓到 README / Compose 文档，可在项目抽屉里手填）"),
+    )
     verifyAndFetchAdminProjects().then((refresh) => {
       if (refresh.success && refresh.data) onChange(refresh.data)
     })
@@ -3033,7 +3046,16 @@ function AdminPage({
 
   const runGithubSync = async () => {
     if (syncSelected.length === 0) {
-      setNoticeError("没有勾选要同步的标本：至少选一个，或点「全选」。")
+      setNoticeError("没有勾选要同步的标本：至少选一个，或点「全选本批」。")
+      return
+    }
+    // 服务端本来也会在任何写入之前 400，但那一趟已经花掉了一次 Worker 调用；
+    // 上限就写在界面上，所以发起前先自己拦住，话术与「全选本批」一致。
+    const cap = syncRowCap(syncDocs)
+    if (syncSelected.length > cap) {
+      setNoticeError(
+        `一次最多同步 ${cap} 个标本（${syncDocs ? "抓取文档时" : "不抓文档时"}），请减到 ${cap} 个以内再发起`,
+      )
       return
     }
     setSyncing(true)
@@ -3055,7 +3077,8 @@ function AdminPage({
     const results = res.results as GithubSyncResult[]
     setSyncResults(results)
     const synced = results.filter((r) => r.status === "synced").length
-    const failed = results.filter((r) => r.status === "failed").length
+    // 服务端发的失败状态是 "error"（"failed" 从来不存在，这条统计以前永远是 0）
+    const failed = results.filter((r) => r.status === "error").length
     const quota = typeof res.rateLimitRemaining === "number" ? res.rateLimitRemaining : null
     setNotice(
       `同步完成：${synced}/${results.length} 个标本指标已更新。` +
@@ -3145,10 +3168,14 @@ function AdminPage({
   const metricsIssues = parseMetricsText(metricsText).issues
   const timelineIssues = parseTimelineText(timelineText).issues
 
-  // 比对基线：已保存的项目用列表里那一行（管理端投影，保存后以库为准刷新过）；
+  // 比对基线：已保存的项目优先用打开抽屉时取回的完整记录（含四份文档），没有才退回列表行；
   // 新建项目用 createProject 生成的空白模板——否则一份没动过的新草稿关闭时也会弹确认。
+  const baselineFor = (id: string): Project | undefined =>
+    openedSnapshot && openedSnapshot.id === id
+      ? openedSnapshot
+      : items.find((item) => item.id === id) ?? undefined
   const draftBaseline = (base: Project): Project | undefined =>
-    items.find((item) => item.id === base.id) ?? newDraftBase ?? undefined
+    baselineFor(base.id) ?? newDraftBase ?? undefined
 
   const dirtyColumnCount = () => {
     if (!editing) return 0
@@ -3170,6 +3197,7 @@ function AdminPage({
   const closeDrawer = () => {
     setConfirmClose(0)
     setEditing(null)
+    setOpenedSnapshot(null)
     setPreviewDirText("")
     setDirImportError("")
     setDirImportNote("")
@@ -3183,12 +3211,25 @@ function AdminPage({
   }
 
   // 打开某个已保存项目的抽屉：清掉新建模板基线（否则 items 里查不到这一行时会拿错基线）
-  const openProject = (item: Project) => {
+  const openProject = async (item: Project) => {
     // 唤起者必须在这里（还在点击事件里）记：setEditing 之后焦点就进抽屉了，再也找不到回来该给谁
     drawerOpenerRef.current = document.activeElement as HTMLElement | null
     setNewDraftBase(null)
     setConfirmClose(0)
-    setEditing(item)
+    // 管理端列表不带四份长文档（响应体积）：先取全文再开抽屉，
+    // 否则文档框先显示空白，用户随手一存就把正文覆盖成空。
+    const seq = openSeqRef.current + 1
+    openSeqRef.current = seq
+    setNoticeBusy(`正在打开 SPEC—${item.id}…`)
+    const full = await fetchAdminProject(item.id)
+    if (seq !== openSeqRef.current) return
+    setNoticeText("")
+    if (!full.success || !full.data) {
+      setNoticeError(full.error || "打开失败：取不到这件标本的正文")
+      return
+    }
+    setOpenedSnapshot(full.data)
+    setEditing(full.data)
   }
 
   const requestClose = () => {
@@ -3261,7 +3302,7 @@ function AdminPage({
     // 判据与「未保存改动」提示共用 changedColumns，所以两边不会互相打脸。
     let payload: Project = draft
     if (!isNew) {
-      const baseline = items.find((item) => item.id === draft.id)
+      const baseline = baselineFor(draft.id)
       if (baseline) {
         const changed = changedColumns(
           baseline as unknown as Record<string, unknown>,
@@ -3422,7 +3463,7 @@ function AdminPage({
       stars: "0",
       year: new Date().getFullYear().toString(),
       shape: "aperture",
-      version: "v1.0.0",
+      version: "",
       updated: new Date().toISOString().slice(0, 10).replace(/-/g, "."),
       repository: "",
       challenge: { en: "", zh: "" },
@@ -3437,6 +3478,7 @@ function AdminPage({
       preview_images_json: "[]",
     }
     // 空白模板同时是"未保存改动"的比对基线：新建后一个字没改就直接关，不该弹确认
+    setOpenedSnapshot(null)
     setNewDraftBase(template)
     // 与 openProject 同理：唤起者要在点击事件里记，关抽屉时才还得回去
     drawerOpenerRef.current = document.activeElement as HTMLElement | null
@@ -4144,7 +4186,8 @@ function AdminPage({
                     </thead>
                     <tbody>
                       {computeActivityTimeline(items, siteContent).map((logItem, idx) => (
-                        <tr key={logItem.year}>
+                        // key 带 idx：自定义档允许两行写同一个年份，只按 year 会撞 key（删行也会删错）
+                        <tr key={`${logItem.year}-${idx}`}>
                           <td><strong>{logItem.year}</strong></td>
                           <td>
                             {siteContent.activityLogMode === "custom" ? (
@@ -4156,7 +4199,11 @@ function AdminPage({
                                   const cur =
                                     siteContent.customActivityLog && siteContent.customActivityLog.length > 0
                                       ? [...siteContent.customActivityLog]
-                                      : computeActivityTimeline(items, siteContent)
+                                      // 从自动档接手时只带作者改得动的字段：height 是派生值，
+                                      // 抄进库就把那一刻的比例永久烤成事实了
+                                      : computeActivityTimeline(items, siteContent).map(
+                                          ({ year, count, note }) => ({ year, count, note }),
+                                        )
                                   cur[idx] = { ...cur[idx], count: val }
                                   setSiteContent({ ...siteContent, customActivityLog: cur })
                                 }}
@@ -4790,13 +4837,23 @@ function AdminPage({
                     同步范围 · 已选 {syncSelected.length} / {items.length}
                   </h2>
                   <small className="sync-scope-limit">
-                    一次最多 10 个；勾选「同时抓取 README / Compose 文档」时最多 2 个
-                    （抓一个仓库的文档最多要 20 次请求，免费版每次调用只有 50 个子请求额度）
+                    一次最多 {syncRowCap(syncDocs)} 个
+                    {syncDocs
+                      ? `（抓文档时每行最多 20 次请求，免费版每次调用只有 50 个子请求额度；不抓文档是 ${SYNC_MAX_ROWS} 个）`
+                      : `（勾选「同时抓取 README / Compose 文档」后降到 ${SYNC_MAX_DOC_ROWS} 个——抓一个仓库的文档最多要 20 次请求）`}
+                    {items.length > syncRowCap(syncDocs)
+                      ? ` · 馆藏 ${items.length} 件，本批装不下，剩下 ${items.length - syncRowCap(syncDocs)} 件请分几次同步`
+                      : ''}
                   </small>
                 </div>
                 <div className="sync-scope-quick">
-                  <button type="button" onClick={() => setSyncScopeIds(null)}>
-                    全选
+                  {/* 「全选」以前发的是 null = 全表：馆藏超过一批上限时必定被服务端 400 拒掉，
+                      按钮写着全选却永远点不动，就是假控件。现在按当前模式取满一批。 */}
+                  <button
+                    type="button"
+                    onClick={() => setSyncScopeIds(items.map((item) => item.id).slice(0, syncRowCap(syncDocs)))}
+                  >
+                    全选本批（{Math.min(items.length, syncRowCap(syncDocs))}）
                   </button>
                   <button type="button" onClick={invertSyncScope}>
                     反选
@@ -5201,54 +5258,9 @@ function AdminPage({
               </div>
             </div>
             <div className="settings-grid">
-              <section className="settings-card">
-                <span className="eyebrow">IDENTITY</span>
-                <h2>站点信息</h2>
-                <label>
-                  站点名称
-                  <input
-                    value={siteContent.seoTitle}
-                    onChange={(event) =>
-                      setSiteContent({
-                        ...siteContent,
-                        seoTitle: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  联系邮箱
-                  <input
-                    type="email"
-                    value={siteContent.contactEmail}
-                    onChange={(event) =>
-                      setSiteContent({
-                        ...siteContent,
-                        contactEmail: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  站点简介
-                  <textarea
-                    value={siteContent.seoDescription}
-                    onChange={(event) =>
-                      setSiteContent({
-                        ...siteContent,
-                        seoDescription: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="admin-primary"
-                  onClick={saveSettings}
-                >
-                  保存更改
-                </button>
-              </section>
+              {/* 这里原来还有一张「站点信息」卡：联系邮箱与 GitHub 在「03 首页栏目」已经各有一个编辑器，
+                  「站点简介」绑的其实是 seoDescription——和「搜索与分享 → Meta 描述」同一个值。
+                  同一个值两处编辑是假状态的来源（在这边改"简介"，实际改的是搜索结果摘要），整卡删掉。 */}
               <section className="settings-card">
                 <span className="eyebrow">PREFERENCES</span>
                 <h2>展示偏好</h2>
@@ -5328,7 +5340,7 @@ function AdminPage({
                 <span className="eyebrow">SEO & SHARING</span>
                 <h2>搜索与分享</h2>
                 <label>
-                  页面标题
+                  页面标题（浏览器标签与分享卡；标头字标在「02 标头与导航」）
                   <input
                     value={siteContent.seoTitle}
                     onChange={(event) =>
@@ -5614,6 +5626,7 @@ function AdminPage({
                       setEditing({ ...editing, year: event.target.value })
                     }
                   />
+                  <small>由 GitHub 同步覆盖：取自仓库创建时间</small>
                 </label>
               </div>
               <div className="field-row">
@@ -5626,6 +5639,7 @@ function AdminPage({
                     }
                     placeholder="2026.05"
                   />
+                  <small>由 GitHub 同步覆盖：取自仓库创建时间</small>
                 </label>
                 <label>
                   最近更新
@@ -5636,6 +5650,7 @@ function AdminPage({
                     }
                     placeholder="2026.05.18"
                   />
+                  <small>由 GitHub 同步覆盖：取自仓库最近推送时间</small>
                 </label>
               </div>
               <label>
@@ -6227,6 +6242,8 @@ function PreviewGallery({
     () => images.map((url) => frameLabel(url, name)),
     [albumKey, name],
   )
+  // 「原图」直链要过与 src 同一道 http(s) 判据：库里的值不是天然可信（直写 D1 在本仓库的威胁模型内）
+  const originals = useMemo(() => images.map((url) => sanitizeImageUrl(url)), [albumKey])
 
   const total = images.length
   if (total === 0) return null
@@ -6578,9 +6595,11 @@ function PreviewGallery({
               </span>
             ) : null}
             {/* 原图直链：代理是为了省流量，但访客有权要未经转换的那一份 */}
-            <a href={images[zoom]} target="_blank" rel="noopener noreferrer">
-              {isZh ? "原图" : "Original"}
-            </a>
+            {originals[zoom] ? (
+              <a href={originals[zoom]} target="_blank" rel="noopener noreferrer">
+                {isZh ? "原图" : "Original"}
+              </a>
+            ) : null}
             <button type="button" autoFocus onClick={() => setZoom(null)} aria-label={isZh ? "关闭放大" : "Close zoom"}>
               ×
             </button>
@@ -6764,7 +6783,9 @@ function ProjectRoute({
         if (data) {
           setDetail(data)
           setState("ready")
-        } else if (!listed) {
+        } else {
+          // 404 一律按"不存在"处理。`listed` 只用于首屏占位，不能因为列表里曾经有它
+          // 就在下架/删除后继续展示陈旧内容（那会让人以为这件标本仍然公开）。
           setState("missing")
         }
       })
@@ -7131,6 +7152,13 @@ export default function App() {
   const shownSections = collectionEmpty
     ? homeSections.filter((id) => id === "curator")
     : homeSections
+  // 顶栏与页脚的章节链接也一起收：内容区只剩手记时，链接还留在原处就是三个滚不到任何东西的死锚点
+  const chromeSettings = collectionEmpty
+    ? {
+        ...effectiveSettings,
+        navItems: effectiveSettings.navItems.filter((item) => item.id === "curator"),
+      }
+    : effectiveSettings
 
   return (
     <div>
@@ -7139,7 +7167,7 @@ export default function App() {
         setLanguage={setLanguage}
         dark={dark}
         setDark={setDark}
-        settings={effectiveSettings}
+        settings={chromeSettings}
       />
       <main>
         {/* 读不到线上馆藏时说出来：以前只在控制台 warn，
@@ -7214,7 +7242,7 @@ export default function App() {
       </main>
       <SiteFooter
         items={items}
-        settings={effectiveSettings}
+        settings={chromeSettings}
         language={language}
         onOpen={openProject}
       />

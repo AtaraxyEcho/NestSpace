@@ -85,7 +85,8 @@ if [ -n "$ADMIN_TOKEN" ]; then
   # 令牌走临时头文件（`-H @file`）而不是 `-H "Authorization: ..."`：后者会把口令放进 curl 的
   # 进程参数，同机其他进程能读到。环境变量本身避不开（调用方式决定），但至少不进 argv。
   HEADER_FILE="$WORK/auth-header"
-  printf 'Authorization: Bearer %s\n' "$ADMIN_TOKEN" > "$HEADER_FILE"
+  # 子 shell 里收紧 umask：文件模式 0600，同机其他账号读不到那份 Bearer
+  ( umask 077; printf 'Authorization: Bearer %s\n' "$ADMIN_TOKEN" > "$HEADER_FILE" )
   AUTH_CODE=$(curl -s -o "$WORK/visits.json" -w '%{http_code}' --max-time 20 \
     -H @"$HEADER_FILE" "$BASE/api/admin/visits?days=7")
   rm -f "$HEADER_FILE"

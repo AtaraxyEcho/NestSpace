@@ -10,6 +10,16 @@ set -u
 
 PORT="${VISUAL_PORT:-8899}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd -W 2>/dev/null || pwd)"
+
+# 优先用仓库钉住的 wrangler（frontend/node_modules），与 CI/同事同一版本；还没 install 时回落到 npx
+if [ -x "$ROOT/frontend/node_modules/.bin/wrangler" ]; then
+  WRANGLER_BIN="$ROOT/frontend/node_modules/.bin/wrangler"
+else
+  WRANGLER_BIN=""
+fi
+run_wrangler() {
+  if [ -n "$WRANGLER_BIN" ]; then "$WRANGLER_BIN" "$@"; else npx wrangler "$@"; fi
+}
 WORK="$ROOT/.tmp-visual"
 mkdir -p "$WORK"
 LOG="$WORK/dev.log"
@@ -65,7 +75,13 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== 起 dev（$PORT） =="
-(cd "$ROOT/frontend" && npx wrangler dev --port "$PORT" --log-level warn > "$LOG" 2>&1 &)
+# 端口不是自己的就别起跑（同 usage-probe.sh）：就绪检查会拿到别人的应答，收尾会杀掉别人的 workerd
+if port_busy; then
+  echo "!! 端口 $PORT 已被占用（多半是另一个会话的 wrangler dev）。" >&2
+  echo "   先停掉它，或换端口：VISUAL_PORT=8898 bash scripts/visual-check.sh" >&2
+  exit 1
+fi
+(cd "$ROOT/frontend" && run_wrangler dev --port "$PORT" --log-level warn > "$LOG" 2>&1 &)
 READY=0
 for _ in $(seq 1 40); do
   if curl -s -o /dev/null "http://127.0.0.1:$PORT/api/projects"; then READY=1; break; fi

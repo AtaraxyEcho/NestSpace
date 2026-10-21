@@ -10,6 +10,21 @@
 /** 相册上限：详情页没必要展示更多，也避免同步把整篇 README 的装饰图都搬进来 */
 export const PREVIEW_IMAGE_LIMIT = 12
 
+/**
+ * 可代理的图源主机。**Worker 与管理端共用这一份**：以前两边各写一个 Set，闸门只核对 Worker
+ * 那一侧，前端漂移（多列一个主机）就会把名单外的地址送去绕代理，而 Worker 回 404 ⇒ 图挂掉。
+ * ⚠️ 绝不能把转换服务自身（`wsrv.nl` / `images.weserv.nl`）列进来：那等于开放代理，
+ * `/api/img?src=https://wsrv.nl/?url=<任意地址>` 会绕过整套限制。
+ */
+export const IMAGE_PROXY_HOSTS: ReadonlySet<string> = new Set([
+  'raw.githubusercontent.com',
+  'user-images.githubusercontent.com',
+  'camo.githubusercontent.com',
+  'objects.githubusercontent.com',
+  'github.com',
+  'cdn.jsdelivr.net',
+])
+
 /** 只放行带主机名的 http(s) 绝对地址；其余（含 data:、相对路径、`https://` 这种空壳、数组/对象）一律丢弃 */
 export function sanitizeImageUrl(raw: unknown): string {
   if (typeof raw !== 'string') return ''

@@ -16,7 +16,7 @@ preview_urls = false
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/", "/index.html", "/project/*", "/admin"]
+run_worker_first = ["/api", "/api/*", "/", "/index.html", "/project", "/project/*", "/admin", "/admin/*"]
 
 # Cloudflare D1 边缘数据库绑定
 [[d1_databases]]
@@ -28,6 +28,11 @@ database_id = "5e61e41e-0554-4ec4-8516-ee5f66a5f11d"
 # 03:17 UTC = 北京时间 11:17，避开低峰与整点任务。
 [triggers]
 crons = ["17 3 * * *"]
+
+# 运行时日志：不开的话线上错误只能靠 `wrangler tail` 现场守着，事后无法回看。
+# 免费档有每日事件额度，本站量级远低于它；敏感值不进日志（见 worker 的 console 调用）。
+[observability]
+enabled = true
 
 # 匿名使用度量（POST /api/usage；事件白名单见 worker 的 USAGE_EVENTS）。
 # 持久落点是 D1 访问台账（迁移 0016）：按天聚合、永久保留，管理端「访问统计」面板读取。

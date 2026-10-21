@@ -104,7 +104,9 @@ export function computeActivityTimeline(
     return settings.customActivityLog.map((item) => ({
       year: item.year,
       count: item.count,
-      height: item.height ?? Math.max(25, Math.min(100, Math.round((item.count / maxVal) * 100))),
+      // 高度只由 count 派生，**不读库里存的 item.height**：那是自动档烤进来的旧值，
+      // 认了它就会出现"改权重、条形不动、保存还报成功"的假状态
+      height: Math.max(25, Math.min(100, Math.round((item.count / maxVal) * 100))),
       note: item.note,
     }))
   }

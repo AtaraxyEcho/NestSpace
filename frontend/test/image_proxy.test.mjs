@@ -9,7 +9,8 @@ const ROUTE_URL = pathToFileURL(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'worker', 'index.ts'),
 ).href
 
-const { normalizeImageWidth, isProxyableImageHost, buildWeservUrl } = await import(ROUTE_URL)
+const { normalizeImageWidth, snapImageWidth, isProxyableImageHost, buildWeservUrl } =
+  await import(ROUTE_URL)
 
 // ============================================
 // 1. 宽度参数规范化
@@ -21,6 +22,16 @@ assert.equal(normalizeImageWidth('0'), 64, 'case 1d: 过小夹到下限')
 assert.equal(normalizeImageWidth('99999'), 2000, 'case 1e: 过大夹到上限')
 assert.equal(normalizeImageWidth('160.6'), 161, 'case 1f: 小数取整')
 assert.equal(normalizeImageWidth('-40'), 64, 'case 1g: 负数夹到下限')
+
+// 宽度吸附：`w` 可任意取值时，每个值都是一次独立的转换与缓存键（匿名调用者能把额度烧光）。
+// 前端只用 200 / 1600 / 2000 三档，所以服务端吸附到最近的一档。
+assert.equal(snapImageWidth(200), 200, 'case 1h: 缩略图档保持')
+assert.equal(snapImageWidth(1600), 1600, 'case 1i: 主图档保持')
+assert.equal(snapImageWidth(2000), 2000, 'case 1j: 放大档保持')
+assert.equal(snapImageWidth(64), 200, 'case 1k: 任意小宽度吸附到最近档')
+assert.equal(snapImageWidth(1200), 1600, 'case 1l: 中间值吸附到最近档')
+assert.equal(snapImageWidth(900), 200, 'case 1l2: 正好居中时取较小档（前端不会用到居中值）')
+assert.equal(snapImageWidth(1900), 2000, 'case 1m: 接近上限吸附到放大档')
 
 // ============================================
 // 2. 图源白名单（这层是防开放代理 / SSRF 的关键）

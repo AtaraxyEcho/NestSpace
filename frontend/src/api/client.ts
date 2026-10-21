@@ -65,8 +65,15 @@ export async function fetchSiteSettings(): Promise<SiteSettings> {
  * 访客看到的是"未找到标本 SPEC—001"，把"我们坏了"说成"这件东西不存在"。
  */
 export async function fetchPublicProjectById(id: string): Promise<Project | null> {
-  const res = await fetch(`/api/projects/${encodeURIComponent(id)}`)
-  if (res.status === 404) return null
-  if (!res.ok) throw new Error(`API error: ${res.status}`)
-  return (await res.json()) as Project
+  // 与列表同一档超时：没有它，一个卡住的请求会让详情页永远停在骨架屏
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 8000)
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, { signal: controller.signal })
+    if (res.status === 404) return null
+    if (!res.ok) throw new Error(`API error: ${res.status}`)
+    return (await res.json()) as Project
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }

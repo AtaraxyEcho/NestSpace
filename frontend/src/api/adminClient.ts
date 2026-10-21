@@ -93,6 +93,41 @@ export async function verifyAndFetchAdminProjects(customToken?: string): Promise
 }
 
 /**
+ * 取单件完整记录。管理端列表为控制响应体积不带四份长文档，抽屉打开时用这个接口取全文。
+ */
+export async function fetchAdminProject(
+  id: string,
+): Promise<{ success: boolean; data?: Project; error?: string }> {
+  const token = getAdminToken()
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+
+  try {
+    const res = await fetch(`/api/admin/projects/${encodeURIComponent(id)}`, { headers })
+    if (res.status === 401 || res.status === 403) {
+      clearTokenIfUnauthorized(res.status)
+      const errJson = await res.json().catch(() => ({}))
+      return {
+        success: false,
+        error: (errJson as any).error || '权限不足：口令无效或未被 Cloudflare 授权',
+      }
+    }
+    if (res.status === 429) {
+      return { success: false, error: '鉴权失败次数过多，已被临时限制，请稍后再试' }
+    }
+    if (res.status === 404) {
+      return { success: false, error: '这件标本已不存在（可能刚被删除）' }
+    }
+    if (!res.ok) {
+      return { success: false, error: `服务器响应异常: ${res.status}` }
+    }
+    return { success: true, data: (await res.json()) as Project }
+  } catch (err: any) {
+    return { success: false, error: `网络连接失败: ${err.message}` }
+  }
+}
+
+/**
  * 管理端保存或更新项目到 D1 数据库
  */
 export async function saveAdminProject(project: Project, isNew = false): Promise<{ success: boolean; error?: string }> {
@@ -331,6 +366,8 @@ export async function importGithubRepo(
   id?: string
   message?: string
   error?: string
+  /** 导入时各文档抓到的字符数（0 = 没抓到），用于在提示里如实说明 */
+  docs?: { readmeZh: number; readmeEn: number; composeDev: number; composeProd: number }
 }> {
   try {
     const headers = getAuthHeaders() as Record<string, string>

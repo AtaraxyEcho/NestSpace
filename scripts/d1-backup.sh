@@ -16,6 +16,8 @@
 # 注意：dump 里是 CREATE TABLE，直接灌回**非空库**会撞 "already exists"；恢复前先确认目标库
 # 是空的，或按需要删表（这一条不替你做决定）。
 set -u
+# dump 里是生产库全文，恢复演练的临时 sqlite 同样是——两者都别给同组/其他账号可读
+umask 077
 
 SCOPE="remote"
 VERIFY=1
@@ -40,6 +42,16 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -W 2>/dev/null || pwd)"
 FRONTEND="$ROOT/frontend"
+
+# 优先用仓库钉住的 wrangler（frontend/node_modules）；还没 install 时回落到 npx
+if [ -x "$FRONTEND/node_modules/.bin/wrangler" ]; then
+  WRANGLER_BIN="$FRONTEND/node_modules/.bin/wrangler"
+else
+  WRANGLER_BIN=""
+fi
+run_wrangler() {
+  if [ -n "$WRANGLER_BIN" ]; then "$WRANGLER_BIN" "$@"; else npx wrangler "$@"; fi
+}
 [ -f "$FRONTEND/wrangler.toml" ] || { echo "找不到 $FRONTEND/wrangler.toml" >&2; exit 1; }
 
 mkdir -p "$ROOT/backups"
@@ -55,7 +67,7 @@ echo "输出:   backups/$NAME"
 # 导出日志走文件而不是 `| tail`：管道会把 wrangler 的退出码换成 tail 的，
 # 导出失败也会"看起来成功"（只剩后面那两个内容检查兜底）。这里保留真实退出码。
 EXPORT_LOG="$ROOT/.tmp-backup.log"
-if ! (cd "$FRONTEND" && npx wrangler d1 export "$DB" --"$SCOPE" --skip-confirmation --output="$OUT_REL") > "$EXPORT_LOG" 2>&1; then
+if ! (cd "$FRONTEND" && run_wrangler d1 export "$DB" --"$SCOPE" --skip-confirmation --output="$OUT_REL") > "$EXPORT_LOG" 2>&1; then
   echo "✗ 导出失败：" >&2
   grep -vE '^[[:space:]]*$' "$EXPORT_LOG" | tail -6 | sed 's/^/    /' >&2
   rm -f "$EXPORT_LOG"
@@ -73,7 +85,7 @@ echo "✓ 已写出（${SIZE_KB}KB）"
 
 count_rows() {
   local db="$1" table="$2" scope="$3"
-  (cd "$FRONTEND" && npx wrangler d1 execute "$db" --"$scope" --json \
+  (cd "$FRONTEND" && run_wrangler d1 execute "$db" --"$scope" --json \
     --command "SELECT COUNT(*) AS n FROM $table;" 2> /dev/null) |
     node -e '
 let s = ""

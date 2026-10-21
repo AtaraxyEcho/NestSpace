@@ -116,7 +116,19 @@ assert.deepEqual(
   'case 3a: topics 取前 4 个写入 features',
 )
 const noTopics = buildProjectSyncUpdate(baseRow(), meta({ topics: [] }), [], null)
-assert.equal('features_json' in noTopics.columns, false, 'case 3b: 无 topics 时不覆盖已有特性')
+assert.deepEqual(
+  JSON.parse(String(noTopics.columns.features_json)),
+  [],
+  'case 3b: 仓库清空 topics 时写回空列表（GitHub 权威字段，不能留着旧特性）',
+)
+const noLanguage = buildProjectSyncUpdate(baseRow(), meta({ language: null, topics: [] }), [], null)
+assert.equal(
+  noLanguage.columns.language,
+  '',
+  'case 3d: 仓库没有主语言时写回空串（以前只在非空时写，面板会一直停在旧语言）',
+)
+const noRelease = buildProjectSyncUpdate(baseRow(), meta(), [], null)
+assert.equal(noRelease.columns.version, '', 'case 3e: 没有 Release 时 version 写回空串，不保留旧 tag')
 const blankTopics = buildProjectSyncUpdate(baseRow(), meta({ topics: ['  ', 'ok'] }), [], null)
 assert.deepEqual(JSON.parse(String(blankTopics.columns.features_json)), ['ok'], 'case 3c: 空白 topic 被剔除')
 
@@ -627,14 +639,39 @@ for (const key of requiredKeys) {
 assert.equal(adminRow.demoEnabled, true, 'case 17b: 0/1 转布尔只在管理端投影里做')
 assert.deepEqual(adminRow.features, ['f1'], 'case 17c: JSON 列在投影里已摊平成数组')
 assert.equal(adminRow.readme_zh, '值-readme_zh', 'case 17d: 原始列名保留是刻意为之（抽屉绑的就是它）')
-// 上面的守卫看不到 SQL：如果哪天把 SELECT * 换成显式列清单并漏掉一列，投影守卫仍然全绿
-// （种子是我们在测试里手工造的，压根没走 SQL）。这条直接把"仍取全列"钉在源码上。
+// 上面的守卫看不到 SQL：如果哪天改了列表查询并漏掉一列，投影守卫仍然全绿
+// （种子是我们在测试里手工造的，压根没走 SQL）。这条直接把"列清单完整"钉在源码上。
+// 列表自 2026-10 起**不带四份长文档**（每份上限 10 万字符 × 最多 500 行会让响应随馆藏线性放大），
+// 正文改由 `GET /api/admin/projects/:id` 在抽屉打开时按需取；has_* 让列表仍能显示文档有没有。
 const workerSrc = readFileSync(join(FRONTEND, 'worker', 'index.ts'), 'utf8')
-assert.match(
-  workerSrc,
-  /SELECT \* FROM projects ORDER BY sort_order/,
-  'case 17e: 管理端列表必须是整行取回（改成显式列清单时要同步扩这条断言的清单）',
+const adminListSql = workerSrc.match(/adminApp\.get\('\/projects'[\s\S]*?\.all\(\)/)?.[0] ?? ''
+assert.ok(adminListSql, 'case 17e: 找不到管理端列表查询')
+assert.doesNotMatch(
+  adminListSql,
+  /SELECT \* FROM projects/,
+  'case 17e: 管理端列表又变回 SELECT *（四份长文档会随馆藏放大）',
 )
+// 把 SELECT 与 FROM projects 之间的列拆出来，按别名比对（`(readme_zh <> '') AS has_readme_zh` 取别名）
+const selectList = adminListSql.match(/SELECT([\s\S]*?)FROM projects/)?.[1] ?? ''
+const selectedColumns = selectList
+  .split(',')
+  .map((part) => part.trim().split(/[\s)]+/).filter(Boolean).pop() ?? '')
+const docColumns = Object.values(EDITABLE_COLUMNS).filter((column) => /^(readme_|compose_)/.test(column))
+const requiredInList = Object.values(EDITABLE_COLUMNS).filter((column) => !docColumns.includes(column))
+const missingInList = requiredInList.filter((column) => !selectedColumns.includes(column))
+assert.deepEqual(
+  missingInList,
+  [],
+  `case 17e: 管理端列表漏列（抽屉打开会缺字段）：${missingInList.join(', ')}`,
+)
+for (const column of docColumns) {
+  assert.ok(
+    !selectedColumns.includes(column),
+    `case 17e: 列表不该带 ${column} 正文——它属于单件详情接口`,
+  )
+}
+assert.ok(selectedColumns.includes('has_readme_zh'), 'case 17e: 列表应带 has_readme_zh 供界面判断文档有无')
+assert.match(workerSrc, /adminApp\.get\('\/projects\/:id'/, 'case 17e: 缺少单件详情接口（抽屉靠它取全文）')
 
 // case 17f：**代码引用的列必须真的存在于 migrations/**
 // 动机（本轮实测到的真实风险）：公开列表/详情把 challenge_json / solution_json 写进了显式 SELECT，
@@ -841,6 +878,30 @@ for (const field of mappedSettingsFields) {
   )
 }
 
+// 18g：第四份清单——`src/types/siteSettings.ts` 的接口字段（含它 extends 的 FooterCopy）。
+// 「只在接口里加一个字段」是这几种漏法里唯一 tsc 全绿的：管理端渲染读不到、库里也没有列。
+// 在此之前 case 18 只比对「默认值 ↔ worker ↔ 迁移」，类型文件谁都没看。
+const ifaceSrc = readFileSync(join(FRONTEND, 'src/types/siteSettings.ts'), 'utf8')
+const ifaceFields = []
+for (const base of ['FooterCopy', 'SiteSettings']) {
+  const block = ifaceSrc.match(new RegExp(`export interface ${base}[^{]*\\{([\\s\\S]*?)\\n\\}`))
+  assert.ok(block, `case 18g: types/siteSettings.ts 里找不到 interface ${base}`)
+  for (const m of block[1].matchAll(/^ {2}(\w+)\??:/gm)) ifaceFields.push(m[1])
+}
+assert.ok(ifaceFields.length >= 40, `case 18g: 接口只解析出 ${ifaceFields.length} 个字段，闸门本身失效了`)
+for (const field of ifaceFields) {
+  assert.ok(
+    defaultSettingsFields.includes(field),
+    `case 18g: 接口字段「${field}」没有内置默认值 —— mergeSiteSettings 只遍历默认值的键，该字段渲染时会被吞掉`,
+  )
+}
+for (const field of defaultSettingsFields) {
+  assert.ok(
+    ifaceFields.includes(field),
+    `case 18g: 内置默认值「${field}」不在 SiteSettings 接口里 —— 类型与默认值两份清单已经漂了`,
+  )
+}
+
 // case 19：mergeSiteSettings 的「空 = 未填写」判据。详情页小标题这类文案靠它回退内置默认，
 // 而 Worker 存的是原样字符串（不 trim），管理端只敲一个空格就会在库里留下 '  '。
 // 空白必须与空串同义，否则前台渲染的是一个空白文案而不是默认文案（"清空=恢复默认"的承诺会破）。
@@ -996,4 +1057,46 @@ assert.match(
   'case 23c: 客户端所有写请求都走 getAuthHeaders()，这个头不能丢（一丢就全变 415）',
 )
 
-console.log('sync_update：全部用例通过（字段归属 / 格式口径 / 文档规则 / 地址解析 / 时间线 / 预览图 / 相册 / 写入校验 / 两种拼写冲突 / 管理端投影字段集 / 站点设置三份清单双向对齐 / 空白文案判据 / 站点设置写侧 / 改动集接线 / 写路径类型闸门）✓')
+
+// case 24：新建与更新必须落同一批列。PUT 的白名单里一直有 license / 四份文档，
+// 而 POST 的 INSERT 漏了它们 ⇒ 新建时手填的内容 201 成功却被丢弃（假状态）。
+// 这里直接读 worker 源码比对列清与占位符数量：改 INSERT 忘改 bind 会当场红。
+const workerSource = readFileSync(join(FRONTEND, 'worker', 'index.ts'), 'utf8')
+const insertMatch = workerSource.match(
+  /INSERT INTO projects \(([\s\S]*?)\) VALUES \(([\s\S]*?)\)\s*`/,
+)
+assert.ok(insertMatch, 'case 24a: 找不到 POST /projects 的 INSERT 语句')
+const insertColumns = insertMatch[1]
+  .split(',')
+  .map((name) => name.trim())
+  .filter(Boolean)
+const editableColumns = [
+  ...Object.values(EDITABLE_COLUMNS),
+  ...Object.values(EDITABLE_JSON_COLUMNS),
+]
+const missingColumns = editableColumns.filter((column) => !insertColumns.includes(column))
+assert.deepEqual(
+  missingColumns,
+  [],
+  `case 24b: 新建标本的 INSERT 漏了这些可编辑列（保存成功但字段被丢弃）：${missingColumns.join(', ')}`,
+)
+const placeholderCount = insertMatch[2].split(',').filter((part) => part.trim() === '?').length
+assert.equal(
+  placeholderCount,
+  insertColumns.length,
+  `case 24c: INSERT 有 ${insertColumns.length} 列但只有 ${placeholderCount} 个占位符`,
+)
+
+// case 25：站点设置里的 URL 列在写侧就要拒绝非 http(s)，别等渲染侧兜底。
+const badGithub = buildSiteSettingsWrite({ githubUrl: 'javascript:alert(1)' })
+assert.ok(badGithub.error && badGithub.error.includes('githubUrl'), 'case 25a: 非 http(s) 的 githubUrl 要点名拒绝')
+assert.deepEqual(badGithub.columns, [], 'case 25b: 被拒绝的字段不能顺带写进库')
+const goodUrls = buildSiteSettingsWrite({
+  githubUrl: 'https://github.com/AtaraxyEcho',
+  icpUrl: '',
+  logoImageUrl: 'https://cdn.example.com/logo.png',
+})
+assert.equal(goodUrls.error, undefined, 'case 25c: 合法 http(s) 与空串都放行')
+assert.deepEqual(goodUrls.columns, ['github_url', 'icp_url', 'logo_image_url'], 'case 25d: 三列按请求顺序落库')
+
+console.log('sync_update：全部用例通过（字段归属 / 格式口径 / 文档规则 / 地址解析 / 时间线 / 预览图 / 相册 / 写入校验 / 两种拼写冲突 / 管理端投影字段集 / 站点设置三份清单双向对齐 / 空白文案判据 / 站点设置写侧 / 改动集接线 / 写路径类型闸门 / 新建列覆盖 / 设置 URL 写侧校验）✓')

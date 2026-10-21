@@ -5,7 +5,9 @@
 > 是本项目的实际取值，用作逐步演示；换成你自己的域名与仓库即可，代码与构建产物里都不写死域名
 > （前后台互跳按 hostname 推导，`canonical` / `og:url` 按请求 origin 注入）。
 
-本项目已全面完成**前后端分离**改造，具备 **Cloudflare 全球边缘毫秒级分发**、**D1 边缘 SQLite 持久化**、**防网页劫持（CSP+HSTS）**，以及**管理 API 的三层防线防护**（边缘 Zero Trust 拦截 + 代码层 Bearer 密钥常量时间比较 + Access JWT 签名校验，默认 fail-closed）。
+形态：一个 Worker（Hono）+ 静态资产 + D1，没有常驻服务器。安全响应头由 `frontend/public/_headers`
+下发（严格 CSP、HSTS、`X-Frame-Options: DENY` 等）；管理 API 有三层防线——边缘 Zero Trust 拦截、
+代码层 Bearer 密钥常量时间比较、Access JWT 签名校验（未配置 Access 变量时只认 Bearer，默认 fail-closed）。
 
 ---
 
@@ -14,6 +16,8 @@
 ```text
 NestSpace/
 ├── README.md                     # 三分钟上手：本地跑起来、后台能改什么、检查项与上线顺序
+├── AGENTS.md                     # 给编码 agent 的事实清单（单一来源；frontend/AGENTS.md 与两处 CLAUDE.md 都只是指针）
+├── CLAUDE.md                     # @AGENTS.md
 ├── frontend/
 │   ├── dist/                     # vite 构建产物（含 _headers，作为 Worker 静态资产目录）
 │   ├── worker/                   # Cloudflare Worker（后端边缘 API）
@@ -44,26 +48,19 @@ NestSpace/
 │   ├── .dev.vars.example         # 本地开发环境变量模板（复制为 .dev.vars 使用，不入 Git）
 │   ├── index.html                # Vite HTML 壳（figma 插件在构建期注入 title / description / og；canonical 与 og:url 只留 `<!-- seo:origin-tags -->` 标记，由 Worker 按请求 origin 注入绝对地址）
 │   ├── vite.config.ts            # Vite + Tailwind v4 + Figma Make 插件；dev 下把 /api 代理到本地 wrangler
-│   ├── tsconfig.json             # 前端 TS 配置（worker/tsconfig.json 单独一套）
+│   ├── tsconfig.json             # 前端 TS 配置（浏览器环境；不含 Node 全局）
+│   ├── tsconfig.node.json        # 只给 vite.config.ts 用（process.env 需要 Node 类型）
 │   ├── .figma/make/site.json     # 站点标题 / 描述 / 收录开关（构建期注入 HTML 头部）
-│   ├── test/                     # 单元测试（纯函数 / 前后端判据一致性；pnpm test 依次跑这十七个文件）
-│   │   ├── jwt_verify.test.mjs   # JWT 校验与 Access 白名单
-│   │   ├── demo_url.test.mjs     # 演示地址规范化
-│   │   ├── sync_update.test.mjs  # GitHub 同步字段归属 / 时间线生成 / 代码列 ⊆ 迁移列（17f）/ 站点设置三份清单对齐（18）
-│   │   ├── image_proxy.test.mjs  # 图片代理：宽度夹取 / 图源白名单 / 转换地址构造
-│   │   ├── preview_frames.test.mjs # 观察台：在场张数 / 环形去重 / +N 口径 / URL 解析兜底
-│   │   ├── preview_dir.test.mjs  # 预览图目录导入：地址解析 / 位图筛选 / 排序 / 拼接 / 异常兜底
-│   │   ├── preview_rules.test.mjs # 相册判据前后端一致性 / 坏行行号 / 抽屉改动列判定 / 埋点白名单
-│   │   ├── nav_order.test.mjs    # 首页栏目顺序 = 导航顺序（缺项兜底 / 脏输入退化）
-│   │   ├── section_copy.test.mjs # 栏目标题取文（标签同源）/ 两类槽位判据 / 不烤默认 / 长度点名
-│   │   ├── bilingual.test.mjs    # 挑战/方案双语读侧：新列优先、旧列按内容落栏、坏 JSON 不抛错、回退标注
-│   │   ├── markdown.test.mjs     # 正文两种渲染口径（README 折行 / 后台正文硬换行）+ 零原始 HTML 的源码钉子
-│   │   ├── sync_scope.test.mjs   # 同步范围 ids：省略=全表、空数组=拒绝、形态与上限、去重
-│   │   ├── site_host.test.mjs    # 前后台互跳地址推导（admin.X ↔ X）/ 出货源码不写死域名与账号 / canonical 按 origin 补全
-│   │   ├── shell_guards.test.mjs # 首屏主题（深色两份取值一致 + 注入）与浏览器存储不可用时不白屏
-│   │   ├── route_path.test.mjs   # 路径↔路由（/project/<id>、/admin、未知路径回首页、旧哈希兼容、canonical 只给真路由）
-│   │   ├── visit_stats.test.mjs  # 访问统计分类判据（+8 切日 / 设备与语言分档 / 来源只归类 / 国家码）
-│   │   └── test_chain.test.mjs   # 闸门注册链与 test/ 目录一一对应（漏登记的闸门会在 CI 里静默不跑）
+│   ├── test/                     # 18 个纯函数闸门（pnpm test 依次跑；test_chain.test.mjs 核对
+│   │                             #   「注册链 = test/ 目录」，漏登记的闸门会在 CI 里静默不跑）
+│   │                             # 鉴权与地址：jwt_verify · site_host（admin.X ↔ X、canonical 按 origin）
+│   │                             # 列与清单对齐：sync_update（17f 代码列 ⊆ 迁移列 / 18 三份站点设置清单）
+│   │                             # 前后端同一判据：preview_rules · preview_frames · preview_dir · image_proxy
+│   │                             # 文案与版面：section_copy · nav_order · bilingual · markdown · demo_url
+│   │                             # 运行时兜底：shell_guards（深色两份取值一致、存储被禁不白屏）· route_path
+│   │                             # 台账与同步：visit_stats（+8 切日/设备语言分档/来源归类）· sync_scope
+│   │                             # 客户端与限流层：usage_stats（退出统计两层契约与回滚 / 会话级入口来源 /
+│   │                             #   访客 ID 形态 / 条形高度只由权重派生 / Cache API 限流三分支 / 名单单一来源）
 │   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（Analytics Engine 数据集可选、默认注释）
 │   └── package.json
 │
@@ -83,7 +80,7 @@ NestSpace/
 │   ├── 0012_add_project_license.sql
 │   │                             # 标本开源协议列（管理端填写；同步只填空白，不覆盖手工值）
 │   ├── 0013_add_detail_headlines.sql
-│   │                             # 详情页「挑战 / 方案」两段小标题（原先写死在组件里，现由管理端配置）
+│   │                             # 详情页「挑战 / 方案」两段小标题（管理端可配，中英各一份）
 │   ├── 0014_add_section_copy.sql
 │   │                             # 栏目与页面文案槽位（section_copy_json：首页描述行 + 详情页三处标题）
 │   ├── 0015_fill_seed_narrative.sql
@@ -93,12 +90,13 @@ NestSpace/
 │   └── 0017_add_curator_name.sql
 │                                 # 首页「馆长手记」的姓名槽位（curator_name，留空回退内置默认）
 │
-├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十七个闸门 + 构建（见第四节末）
+├── .github/workflows/ci.yml      # CI：pnpm 装依赖 + typecheck + 十八个闸门 + 构建（见第四节末）
 │
 ├── scripts/                      # 运维脚本
 │   ├── d1-migrate.sh             # 一键按序执行全部 D1 迁移（local / remote，可反复执行）
 │   ├── d1-backup.sh              # 导出 D1 到 backups/，并做一次真恢复演练（行数比对；--no-verify 跳过）
-│   ├── usage-probe.sh            # 接口探针：起 8898 的本地 Worker，自收进程（埋点 / 图片 / 品牌资产 / 双语写读 / 访问台账）
+│   ├── usage-probe.sh            # 接口探针：起 8898 的本地 Worker，自收进程（埋点 / 图片 / 品牌资产 / 相册写侧 /
+│   │                             #   新建落列 / 双语写读 / 同步范围 / 访问台账 / 深链注入）
 │   ├── visual-check.sh           # 页面级核对：起 8899 + 无头 Chrome，断言顶栏图标 / 姓名行 / 标题，截图到 .tmp-visual/
 │   ├── verify-production.sh      # 生产只读烟测：首页标题 / 公开接口 / 管理端 401 / 品牌资产（可带 ADMIN_TOKEN）
 │   ├── probe-visit-ledger.mjs    # 访问台账实测：PV/UV 去重、爬虫与管理端排除、跨站拒绝、事件计数（探针第 6 节）
@@ -121,10 +119,28 @@ NestSpace/
 ## 二、 部署到 Cloudflare Workers（步骤指引）
 
 本项目为 **Workers 形态**：单一 Worker（`worker/index.ts`，Hono）+ 静态资产（`dist/`）+ D1。
-`/api/*`、`/`、`/index.html`、`/project/*` 与 `/admin` 由配置中的 `run_worker_first` 优先进入 Worker
-（深链也必须进来，canonical / og:url / 主题标记都在 Worker 的注入里）；其余未知路径走静态资产并回退
+`/api/*`、`/`、`/index.html`、`/project`、`/project/*`、`/admin` 与 `/admin/*` 由配置中的
+`run_worker_first` 优先进入 Worker（深链与尾部斜杠的变体都要进来，canonical / og:url / 主题标记
+都在 Worker 的注入里，HTML 那条 240/分钟的兜底也挂在它身上）；其余未知路径走静态资产并回退
 `index.html`（SPA 兜底）。`[assets]` 里的 `binding = "ASSETS"` **不可删除**——Worker 依赖它取回首页
 HTML 做 SEO 注入（见第六节）；删掉会导致首页 503。
+
+**先选部署形态**——两种都只用免费额度，代码不用改：
+
+| | 无域名 · `workers.dev` | 自定义域名（默认推荐） |
+|---|---|---|
+| 前提 | 一个 Cloudflare 账号 | 账号 + 已托管在 Cloudflare 的主域 |
+| 开启 | `workers_dev = true` | 绑主域，再绑 `admin.<主域>` |
+| 访问地址 | `https://<worker>.<账号子域>.workers.dev` | 主域与 `admin.<主域>` |
+| 后台入口 | `/admin` **就地渲染** | `/admin` 会跳到 `admin.<主域>`，该子域必须绑定 |
+| 退出统计偏好 | 退回 localStorage（没有共享父域） | 跨子域 `Domain=<主域>` 的功能性 cookie |
+| 边缘身份 | 只能另配 Worker 级 Access（见第三节关于 workers.dev 的那条），否则只剩口令 | Access 应用整站拦截（第三节） |
+| 主要代价 | 后台与公开站**同源**：公开页一旦 XSS，sessionStorage 里的口令可被读走；地址是共享后缀 | 多一层 DNS 与 Access 配置 |
+
+无域名模式只改 `frontend/wrangler.toml` 的 `workers_dev = false → true`（`preview_urls` 继续关）。
+**以后绑定自定义域名时记得改回 false**，否则那条 workers.dev 地址会一直保留，成为绕过域名级策略的入口。
+下文第 1–4 步两种模式通用；第三节的「自定义域名 + Access」只针对自定义域名模式，无域名模式跳过它，
+改用强随机口令（`openssl rand -base64 32`）并在怀疑泄露时轮换。
 
 **为什么选这个形态，以及它的边界**：前后端在代码里是分开的，省掉的只是"一台一直开着的机器"
 （容器 / Nginx / 进程守护 / 系统补丁 / 备份作业），`git push` 即部署，整套跑在免费额度内。
@@ -161,6 +177,8 @@ database_id = "xxxx-xxxx-xxxx-xxxx"
 将该 `database_id` 填入 `frontend/wrangler.toml` 中的 `database_id` 字段并提交。
 （`frontend/wrangler.toml` 是全仓库唯一的 Worker 配置——Git 构建与本地 `wrangler dev`
 都读取它；D1 绑定写在配置里即可，**无需**再到控制台手动添加绑定。）
+仓库里这一行现在是站长自己的生产库 id，接手前先换成自己的：`database_id` 不是凭据（没有账号权限
+谁也读不到那个库），但留着它，`d1-migrate.sh remote` 会先去打别人的库、以权限错误收场。
 
 ---
 
@@ -178,17 +196,18 @@ bash scripts/d1-migrate.sh remote
 
 两条使用前提：
 
-- **脚本内部调的是裸 `wrangler`，需要它在 PATH 上**（`npm i -g wrangler` 或 `pnpm add -g wrangler`）。
-  手册里手动命令写成 `npx wrangler …` 只是为了不依赖全局安装，两者不矛盾——但**写在脚本外面的 `npx` 前缀
-  帮不到脚本内部**。
+- **wrangler 是仓库依赖，不再是"机器上装没装"的问题**：`frontend/devDependencies` 钉了 4.148.0，
+  `pnpm install` 后脚本会优先用 `frontend/node_modules/.bin/wrangler`；只有还没 install 时才回落到 PATH 上的全局版本。
+  手册里手动命令写成 `npx wrangler …` 也会优先命中本地那份。
 - **老库（此前手工逐条迁移过、`_migrations` 表是空的）首跑会被拒绝**：脚本检测到 `projects` 表已存在却没有任何
-  登记记录就会退出，避免重跑 `0002` 的 `INSERT OR REPLACE` 把 001–004 重置回种子值。核对结构确实已是最新后，
+  登记记录就会退出，避免把 17 个文件在生产库上从头跑一遍。核对结构确实已是最新后，
   登记一次基线即可：`bash scripts/d1-migrate.sh remote --baseline`（只登记、不执行；遇到结构未落地的文件会
   明确拒绝登记并 exit 1）。
 
 **不要压扁迁移历史**：`_migrations` 按**文件名**记账，把 `0001–0017` 合并成一个新文件后，生产库里这个名字
-从没被登记过 ⇒ 脚本会当成未执行真的跑一遍；而建表全是 `CREATE TABLE IF NOT EXISTS`，不会在 DDL 上报错挡下来，
-会一路跑到 `0002` 的种子写入。只有在**全新数据库**上才应该用单份 schema 快照替代历史。
+从没被登记过 ⇒ 脚本会当成未执行真的跑一遍。而且不会有任何东西挡下来：建表全是 `CREATE TABLE IF NOT EXISTS`，
+`ALTER TABLE ADD COLUMN` 撞已存在的列会被脚本认成"结构已在"放过——于是这一趟变成一次没人监督的生产库实验。
+只有在**全新数据库**上才应该用单份 schema 快照替代历史。
 
 **顺序要求**：迁移必须先于 Worker 代码生效。新版 Worker 引用了这几批新列，任何一批没先落到生产库就部署代码都会失败——**写路径由 `writeColumnErrorResponse` 翻成 400 并点名缺的那一列**（项目新建/更新、站点文案、逐仓库导入、同步的逐行失败都接了），**读路径用的是显式列清单，缺列仍是 500**。（`0015` 是纯数据迁移：不引入新列、代码不依赖它，单独跑或补跑都不会让任何请求失败。`0016` 是新建表：公开站不受影响，但 `/api/usage` 的统计写入会被静默丢弃、`/api/admin/visits` 会明确返回 503 并点名 0016。）
 
@@ -210,7 +229,7 @@ bash scripts/d1-migrate.sh remote
 > ⚠️ **顺序是硬约束，而且 Git 自动构建不会替你把关**：第 4 节的 Workers Builds 是"push 即部署"，
 > 一旦你为了跑迁移而先 push 了代码，部署就已经发生了。正确顺序是
 > **先 `bash scripts/d1-migrate.sh remote` → 再 push/部署**。
-> 反序的实际表现（本轮实测，不是推测）：`no such column: challenge_json` →
+> 反序的实际表现（实测，不是推测）：`no such column: challenge_json` →
 > `GET /api/projects` 与详情接口 500 → 首页不报错，但公开列表变为空并显示一句
 > 「馆藏尚未公开任何标本」的空状态（内置演示标本只作**首屏占位**，接口不可达时也继续显示；
 > 只有当服务端**明确回报**空馆藏（200 + `[]`）时，才显示这条空状态而不是拿演示数据顶着说"有数据"），
@@ -248,6 +267,9 @@ npx wrangler secret put GITHUB_TOKEN
    - **Protect with Cloudflare Access**：开启（保护 preview 部署，不影响公开生产站）
 3. D1 绑定由 `frontend/wrangler.toml` 声明，Git 构建自动生效，无需控制台手动绑定。
 
+**主机名要求**：见本节开头的形态对照——默认配置（`workers_dev = false`）下部署完没有可访问 URL：
+要么绑自定义域名（管理端子域随之成为必需），要么打开 `workers_dev` 走无域名模式（后台就地渲染）。
+
 ---
 
 ## 三、 管理端防护：代码层鉴权 + Zero Trust + 暴露面收敛
@@ -259,7 +281,7 @@ npx wrangler secret put GITHUB_TOKEN
 | Bearer `ADMIN_SECRET_KEY`（常量时间比较） | 代码层 | 一切未持密钥的调用，含 workers.dev / preview 等任意入口 |
 | Access JWT 签名校验（`Cf-Access-Jwt-Assertion` 头或 `CF_Authorization` Cookie） | 代码层 | 伪造身份头——明文头一律不信任，只认通过 RS256 签名验证的 JWT |
 | Zero Trust Access 边缘拦截 | 边缘层 | 让未认证请求根本到不了 Functions |
-| 鉴权失败限流 | 代码层 | 同一来源（按 `CF-Connecting-IP`）在 **10 分钟窗口**内累计 10 次**凭据错误**后返回 `429` 并带 `Retry-After: 600`，抑制在线口令爆破。计数只记"带了凭据但不对"（403）与身份不在名单内；**什么都没带的请求走 401 分支，不计数**（否则任何访客刷新一次后台就被记一笔）。计数器活在 Worker isolate 内存里（每个机房各一份），属尽力而为的抑制手段，**不能替代强口令**；付费的 WAF / Rate limiting 规则不在本方案内（见下段的边界说明） |
+| 鉴权失败限流 | 代码层 | 同一来源（`CF-Connecting-IP`）在 **10 分钟窗口**内累计 10 次**错误口令**后返回 `429` + `Retry-After: 600`；**什么都没带的走 401、不计数**，过期/伪造的 Access 令牌也不计——锁定判据在凭据校验之后，正确凭据永远不会被锁在外面。计数器活在 Worker isolate 内存里（每个机房各一份），属尽力而为的抑制手段，**不能替代强口令** |
 
 **只开密钥、不开 Access 时，边界是什么**：密钥本身不会泄漏——它存为 Worker secret、不进仓库与响应、
 比较是常量时间（先各自 SHA-256 再逐字节异或，长度旁路也被抹平）。但它是**长期有效的静态口令**，
@@ -282,9 +304,15 @@ npx wrangler secret put GITHUB_TOKEN
   公开读接口 `/api/projects`（列表与详情）与 `/api/site-settings` 共用 240/分钟（超出 `429` + `Retry-After: 60`；
   一次浏览正好是这三条）、`/api/img` 300/分钟（图片一页要十来张，给得更宽；被限的表现就是那张图裂掉，
   客户端有 `imgfail` 埋点兜着）、HTML 240/分钟。
-- **Cache API 桶**（`allowCachedRate`，同 colo 内共享、免费、不占 D1/KV 配额）：**只接在写入侧**——
-  `/api/usage` 的分钟与日桶、`pageview` 的分钟桶。理由是它是唯一能往 D1 灌行的公开写端点；
-  读侧那几个每次只是查询，放大倍数有限，没有第二层。
+  键空间有上限且**装满时是放行而不是拒绝**（宁可漏记也不无界增长）：分钟桶 2000 个键（窗口 60 秒会自己清空），
+  日桶单独给到 `USAGE_DAILY_STORE_MAX = 50000`——窗口是 24 小时，2000 个键在一个忙 isolate 里一天就满了，
+  满了之后日配额形同不存在，所以按"一个 isolate 一天可能见过多少来源 IP"重新算过。
+- **Cache API 桶**（`allowCachedRate`，同 colo 内共享、免费、不占 D1/KV 配额）：接在放大倍数最高的入口——
+  `/api/usage` 的分钟与日桶、`pageview` 的分钟桶，以及 `/api/img` 的分钟桶（每次未命中都要借第三方转码）。
+  其余读接口每次只是查询，没有第二层。
+  闸门 `test/usage_stats.test.mjs` 用桩 Cache 钉住了它的三种分支（累加到上限拒绝 / 换 name 或桶就重新计 /
+  缓存缺失与写失败一律放行不上抛）。**注意这条证据的边界**：桩只证明"缓存存在时这层算得对"，
+  不证明"生产上 `caches.default` 真的在"——后者要靠一次真实观测，别把它当已验证。
 
 请求体也各有一道闸：`/api/usage` 1024 字节（先按声明的 `Content-Length` 拒 `413`，再按真实字节数边读边停），
 管理端 2 MB（超出与不可解析同样返回 `400`，由调用方话术兜着）。
@@ -302,6 +330,11 @@ npx wrangler secret put GITHUB_TOKEN
 前后台互跳的地址都按当前访问的 hostname 推导（`admin.X` ↔ `X`，见 `App.tsx` 的
 `publicSiteOrigin()` / `adminSiteOrigin()`），所以下文用本项目的 `nestspace.online` 作示例，
 换成你自己的主域即可，不必改代码重新构建。
+
+**这不是可选项，而是代码的假设**：`hasAdminSibling()` 只看 hostname 的形状——任何真实域名都认为存在
+`admin.<主域>`，公开站上的 `/admin` 会被 `location.replace()` 跳过去。所以只部署主域、不绑 `admin.`
+子域时，后台在那个域名下**不可用**（本地、IP 直连、`*.workers.dev` / `*.pages.dev` 是例外：没有兄弟域，
+会就地渲染后台）。想让后台与公开站同域，需要改 `hasAdminSibling()` 的判据，而不是改某个配置项。
 
 1. **添加 DNS 记录**：
    - 进入 Cloudflare 控制台 ➔ `nestspace.online` ➔ **DNS** ➔ **Records**。
@@ -328,7 +361,7 @@ npx wrangler secret put GITHUB_TOKEN
    - 在应用详情页记录 **AUD Tag**（应用基本信息中可见），下一步要用。
 
 **防护与交互效果**：
-- 访客在公开主站 `https://nestspace.online` 浏览作品，若手动敲入 `#admin`，前端会自动重定向至 `https://admin.nestspace.online`；
+- 访客在公开主站 `https://nestspace.online` 浏览作品，若手动敲入 `/admin`，前端会自动重定向至 `https://admin.nestspace.online`；
 - 访问 `https://admin.nestspace.online` 时，整站直接被 Cloudflare 边缘节点拦截并弹出邮箱验证码登录页；
 - 验证通过后浏览器写入 `CF_Authorization` Cookie，页面自动进入馆长控制台，点击「← 返回公开站点」自动跳回主站；
 - 未授权者在最外层 CDN 即被拦截，连后台前端与 API 的一个字节都无法获取。
@@ -358,8 +391,13 @@ Bearer 密钥——同样是安全的默认状态（fail-closed）。
 
 ### 3. 关闭未受保护的入口（重要）
 
-Zero Trust 应用只对**配置的自定义域名**生效。以下入口默认不在保护范围内——即使代码层
-防线已能拦截，也应关闭暴露面，不给出任何试探机会：
+**经典的应用级 Access 只对配置的自定义域名生效。** 走无域名模式时没有可关的 workers.dev 入口（它就是唯一地址），
+此时要么接受"只剩口令"，要么改用 Cloudflare 的 **Worker 级 Access**（策略绑在 Worker 上，可覆盖自定义域、路由、
+`workers.dev` 子域与预览 URL）。注意：本项目代码按**经典应用级 JWT**（`ACCESS_TEAM_NAME` + `ACCESS_AUD_TAG`）校验，
+Worker 级 Access 下令牌形态是否仍带同样的 `iss`/`aud` **未经实测**，接入前先用一次真实请求确认，
+否则会出现"边缘放行了、Worker 仍判 401"的假故障。
+
+以下入口在自定义域名模式下默认不在保护范围内——即使代码层防线已能拦截，也应关闭暴露面，不给出任何试探机会：
 
 1. **`nestspace.<你的子域>.workers.dev` 默认域名**：自定义域名上线后，在 Worker 的
    **Settings ➔ Domains & Routes** 中停用 workers.dev 域名；
@@ -377,6 +415,22 @@ Zero Trust 应用只对**配置的自定义域名**生效。以下入口默认�
 ## 四、 本地全真模拟测试命令
 
 在本地使用 wrangler 进行全仿真运行（Worker + 静态资产 + 本地 D1 数据库）：
+
+**同一套代码，本地与生产有这些行为差异**（排查"本地好好的、线上不对"时先对照）：
+
+| 维度 | 本地（`wrangler dev`） | 生产（自定义域名） |
+|---|---|---|
+| 后台入口 | `http://localhost:8787/admin`，**就地渲染** | 公开站 `/admin` 会跳到 `admin.<主域>`；该子域不绑定则后台不可用 |
+| 数据 | `.wrangler/state` 里的本地 D1 | 远程 D1；迁移必须单独跑 `d1-migrate.sh remote` |
+| 密钥 | `frontend/.dev.vars`（不进仓库） | `wrangler secret put`（不进仓库） |
+| 资产 | 服务 `dist/` 快照，改完必须先 `pnpm run build` | Workers Builds 每次构建后部署 |
+| Cron | 不自动触发；`curl http://127.0.0.1:<端口>/cdn-cgi/local/scheduled` 手动跑 | 每天 03:17 UTC 自动执行 |
+| 退出统计偏好 | 退回 localStorage（没有共享父域可写 cookie） | 跨子域 `Domain=<主域>` 的功能性 cookie |
+| Access | 没有，只剩口令 | 建议开启（admin 子域由边缘整站拦截） |
+| 可访问性 | 任意端口 | 必须有主机名；默认只认自定义域名（`workers_dev` / `preview_urls` 关闭） |
+
+无域名模式（`workers.dev`）没有 `admin.` 兄弟域：后台入口和本地一样**就地渲染**，地址是 `*.workers.dev`；
+其余差异（数据、密钥、资产、cron）与表里的生产列相同。
 
 想要前端热更：另开一个终端跑 `pnpm run dev`（Vite 默认 8443，可用环境变量 `PORT` 覆盖；`/api` 代理到并行起的 8787，
 可用 `WRANGLER_DEV_URL` 覆盖代理目标）。注意 `wrangler dev` 服务的是 `dist/` 快照，所以走 8787 之前必须先 `pnpm run build`。
@@ -397,7 +451,7 @@ cp .dev.vars.example .dev.vars
 # 1. 本地执行全部迁移（在仓库根目录，可与生产用同一条命令）
 bash scripts/d1-migrate.sh local
 
-# 2. 构建静态资产（Worker 的资产目录指向 dist，必须先构建）
+# 2. 构建静态资产（Worker 的资产目录指向 dist，必须先构建；build 会先跑三套 tsconfig 的 typecheck）
 pnpm run build
 
 # 3. 启动 Worker 本地仿真服务器（自动挂载 dist、.dev.vars 和本地 D1）
@@ -408,7 +462,7 @@ npx wrangler dev
 改动鉴权或证书校验逻辑后，运行安全回归：
 
 ```bash
-# 全部 17 条闸门（纯函数、不联网；其中 test/jwt_verify.test.mjs 是 13 条 JWT 校验 + 6 条身份名单）
+# 全部 18 条闸门（纯函数、不联网；test_chain.test.mjs 核对"注册链 = test/ 目录"，漏登记会红）
 pnpm test
 # 前置：Node ≥ 22.18（`frontend/.mise.toml` 已钉 22）。单测直接 `import` .ts 源文件，
 # 靠的是 Node 原生的 TS 类型剥离——22.6–22.17 不带 flag 会在 import 阶段就报错。
@@ -419,7 +473,9 @@ pnpm typecheck
 # 一条命令跑完的接口端到端探针（自己起 dev、自己收尾，只杀自己起的进程）：
 #   健康检查 / 埋点端点的接受与拒绝（含白名单外事件）/ /api/img 三档是否真返回 webp /
 #   管理端 PUT 的两条写路径与相册 400 话术（测完把 001 的两列原值写回）
-# 端口固定在 8898，避开 8787（另一个会话可能在用）。
+# 端口固定在 8898（避开 8787），起 dev 前先探测该端口是否已被占用：占着就立即退出，
+#   否则"等就绪"会拿到别人实例的应答、实测写进那一支的库，收尾还按端口把别人的 workerd 收掉。
+#   要并行跑就换端口：PROBE_PORT=8897 bash scripts/usage-probe.sh
 bash scripts/usage-probe.sh
 ```
 
@@ -429,13 +485,13 @@ bash scripts/usage-probe.sh
 
 ### CI（`.github/workflows/ci.yml`）
 
-push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十七个纯函数闸门）、
+push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十八个纯函数闸门）、
 `pnpm run build`。用 **pnpm** 不是风格问题：仓库里只有 `pnpm-lock.yaml`，`npm ci` 会直接 ENOLOCK 失败。
 版本钉在 `frontend/.mise.toml` 的同一套（node 22 / pnpm 10.34.3）。
 
 闸门里 `17f` 与 `18` 两条是 CI 真正的价值所在：**代码引用的列必须存在于 `migrations/`**、
 **站点设置的三份清单（内置默认 / Worker 白名单 / 迁移列）必须双向对齐**。这两种错在本地全是运行时问题
-（保存 500、或"保存成功但字段被丢弃"），以前只能靠我记得手动跑测试。
+（保存 500、或"保存成功但字段被丢弃"），只有钉进闸门才会在 CI 里被拦住。
 
 两点刻意的取舍：
 - **没有 `wrangler deploy --dry-run` 这一步**：wrangler 不在 `devDependencies` 里（本地用的是全局二进制），
@@ -492,7 +548,8 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
 ## 六、 站点文案与备案号管理（管理端）
 
 主标题、副标题、关于文案、GitHub/邮箱、SEO 标题描述、**页脚备案号**与**底部栏文案**存储在 D1 的
-`site_settings` 表中（迁移 `0003`，页脚文案字段见迁移 `0005`），通过 `#admin` 管理端编辑保存后即时生效，无需重新部署：
+`site_settings` 表中（迁移 `0003`，页脚文案字段见迁移 `0005`），通过管理端编辑保存后即时生效，无需重新部署
+（入口按环境而定，见本节末「管理端入口」）：
 
 **管理端按「页面」分栏，页面内按栏目分卡**（2026-10-10）：侧栏依次是
 `01 馆藏总览 · 02 标头与导航 · 03 首页栏目 · 04 详情页文案 · 05 底部栏文案 · 06 项目管理 · 07 GitHub 同步 · 08 站点设置 · 09 访问统计`。
@@ -508,20 +565,14 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
 | 05 底部栏文案 | 页脚各栏与版权行，支持 `{name}` `{since}` `{year}` 模板变量 |
 | 06 项目管理 | 每件标本的增删改与排序 |
 | 07 GitHub 同步 | 按编号选择范围拉取仓库指标与文档（勾选后连同 README 里的图一起提取预览图） |
-| 08 站点设置 | 站点信息、展示偏好（语言 / 主题 / 开关）、SEO 标题与描述、ICP 备案号、域名只读信息 |
+| 08 站点设置 | 展示偏好（语言 / 主题 / 开关）、页面标题与 Meta 描述、ICP 备案号、域名只读信息（联系方式与简介在 03 首页栏目，同一值只有一处编辑） |
 | 09 访问统计 | 累计 / 近 7·30·90 天 PV·UV、热门页面、来源 / 设备 / 语言 / 地域、时段分布、行为事件与本设备排除开关（面板本身只读，不写库） |
 
-以前首页四段的配置散在三个视图里（名称在「导航与标头」、指标在「馆藏统计」、显隐在「站点设置 → 展示偏好」），
-现在收进「03 首页栏目」一页，卡片的顺序就是访客在页面上看到的顺序：陈列 → 统计（指标 / 年鉴 / 该段描述）→ 手记（关于与联系 / 手记正文）→ 目录（该段描述）。
-**中途走过头一次**：先把四个栏目各升成一条侧栏项（`03 首页·陈列 … 06 首页·目录`），结果四条各只装一两张卡、
-看着像四个空壳——"按栏目分"指的是**页面内分区**，不是侧栏条目数。合并后这一页只留一个保存按钮：
-原先四块各有页级按钮、卡内还挂着「保存馆藏指标设置」这类按钮，它们调的是同一个 `saveSettings`、
-提交的都是整份改动集，标签暗示的作用域并不存在（点"只存指标"其实会把手记的改动一起写进去）。
-
-序号只在 `src/App.tsx` 的 `ADMIN_NAV` 里维护一份，页内 eyebrow 与顶栏标题都取自它——
-以前侧栏一份、页内各写一遍（「内容管理」是侧栏 04 却自称 `/ 02`），搬家之后只会更乱。
-搬动只改 JSX 归属与编号：**状态字段与写路径一个字没动**，所有卡仍调同一个 `saveSettings`
-（PUT 只发与库里不同的顶层键）。
+「03 首页栏目」把原先散在三个视图里的首页四段配置收成一页，卡片顺序就是访客看到的顺序：
+陈列 → 统计（指标 / 年鉴 / 该段描述）→ 手记（关于与联系 / 手记正文）→ 目录（该段描述），这一页只有一个保存按钮。
+侧栏序号、页内 eyebrow 与顶栏标题同源（`src/App.tsx` 的 `ADMIN_NAV`，只维护一份）。
+"按栏目分"指的是页面内分区，不是侧栏条目数；分栏只改 JSX 归属与编号，**状态字段与写路径没动**，
+所有卡仍调同一个 `saveSettings`（PUT 只发与库里不同的顶层键）。
 
 - **03 首页栏目**：主标题 / 副标题（陈列段）、关于文案 / GitHub 主页 / 联系邮箱、手记正文（手记段）、统计指标与年鉴、目录段与统计段的描述行；中英各一份，用页内语言页签切换；
 - **站点设置 → 站点信息 / 搜索与分享**：SEO 标题与 Meta 描述（保存后动态应用到页面标题与描述）；
@@ -531,32 +582,25 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
   两种语言模式下都会显示）、中文尾注（斜体，留空则不显示）、HABITAT / FIELD 属性值；
   改名或改文案都在此完成，无需改代码。
 - **按页面分开的「栏目与页面文案」卡**（迁移 `0014`，`src/utils/sectionCopy.ts`）：五个槽位存成一列 JSON
-  （`section_copy_json`，键形如 `home.catalogue` / `detail.anatomy`）。**首页栏目的大标题不在这里**——
-  它就是「导航项控制」里的那个名称本身，改一次，顶栏、页脚章节列、栏目标题三处同时变（以前标题写死在
-  JSX 里，改名只管到导航条，这就是"导航改了名、栏目标题不动"的根因）。这里放的是补充文案：
-  `home.*` 是标题下的描述行（内置默认为空 = 不渲染，所以不填时前台与改造前逐字一致），
-  `detail.*` 替换原先写死的三处详情页标题（内置默认就是被替换的那句原文）。
+  （`section_copy_json`，键形如 `home.catalogue` / `detail.anatomy`），放的是补充文案——`home.*` 是标题下的
+  描述行（内置默认为空 = 不渲染），`detail.*` 是详情页三处小标题（内置默认就是原文）。
+  **首页栏目的大标题不在这里**：它就是「导航项控制」里的那个名称本身，改一次，顶栏、页脚章节列、栏目标题三处同变。
   两类槽位两套判据，不可混用：**并排显示**（`EN <em>/ ZH</em>`）的按语言各取、该语言空则回退**该语言**的
   内置默认；**按访客语言只显示一种**的走 `pickSiteHeading` 跨语言回退。混用会让"只填英文"的标题框把中文侧
   也顶成英文。闸门 `section_copy.test.mjs` 钉住同源、两类判据、"内置默认不许被 merge 进 state"（否则任何一次
   保存都会把默认烤进库，以后改默认再也传不下去）与超限点名。
 - **04 详情页文案 → 详情页正文小标题**（迁移 `0013`，`src/utils/bilingual.ts` 的 `pickSiteHeading`）：
-  详情页 FIELD NOTES 两栏 `THE CONDITION` / `THE RESPONSE` 下面的那两句标题，原先写死在组件里，
-  现由管理端配置，中英各一份、随访客语言切换。内置默认就是原来那两句英文
-  （`Why it needed to exist.` / `A narrow tool, carefully shaped.`），中文默认留空 = 中文模式也显示这两句英文；
+  详情页 FIELD NOTES 两栏 `THE CONDITION` / `THE RESPONSE` 下面的那两句标题，中英各一份、随访客语言切换。
+  内置默认是 `Why it needed to exist.` / `A narrow tool, carefully shaped.`，中文默认留空 = 中文模式也显示这两句英文；
   两栏都留空则回退内置默认（清空 = 恢复默认，不是删掉标题；只敲空格同样算留空）。
-  **这两句是唯一的真源**：前台的小标题、「06 项目管理」抽屉里那两栏正文的上排标注，都读同一个值——
-  改完标题，后台的指称跟着变（抽屉里因此不再写死「挑战 / 背景」「解决方案」）。这张卡自己的标题也刻意
-  不含这两个词（它管的就是能把这两个词改掉的东西），锚点用不可配置的排版标签 `THE CONDITION` /
-  `THE RESPONSE`。项目抽屉底部有「去改这两段的小标题」直达这张卡；抽屉里有未保存改动时它只弹确认、
-  不会把人带走。
-  栏名本身（`THE CONDITION` / `THE RESPONSE`）是排版语汇，刻意不做双语、也不可配置。
-- **正文的换行与样式**（`src/utils/markdown.tsx` + `markdownLines.ts`）：挑战 / 方案正文按 Markdown 渲染，
-  且开启 `breaks` 口径——**单个回车就是硬换行**，空行分段，`- ` 列表、`**粗体**`、`` `代码` `` 生效；
-  编辑抽屉里每栏下面有只读预览，与前台同一口径。README **保持默认口径**（源码按 80 列折行，
-  句中换行不是排版意图，不能变成硬换行）——所以这是两套判据，不是一套全局行为。
-  全程 markdown → React 节点，**零 `dangerouslySetInnerHTML`**（闸门 case 4 钉着）；首页卡片简介仍是纯文本，
-  因为它靠四行钳制控高，塞块级元素会把按钮又顶出去。
+  **这两句是唯一真源**：前台小标题与「06 项目管理」抽屉里那两栏正文的上排标注读同一个值，改完标题后台指称跟着变。
+  栏名本身（`THE CONDITION` / `THE RESPONSE`）是排版语汇，不做双语、也不可配置——所以这张卡以它们为锚点，
+  抽屉底部另有一条直达这张卡的入口（有未保存改动时只弹确认，不会把人带走）。
+- **正文的换行与样式**（`src/utils/markdown.tsx` + `markdownLines.ts`）：**两套口径，不是一套全局行为**——
+  挑战 / 方案正文用 `breaks`（单个回车就是硬换行，空行分段，`- ` 列表、`**粗体**`、`` `代码` `` 生效，
+  抽屉里每栏下面的只读预览与前台同源）；README **保持默认口径**（源码按 80 列折行，句中换行不是排版意图）。
+  全程 markdown → React 节点，**零 `dangerouslySetInnerHTML`**（闸门 `markdown.test.mjs` 4a/4b 按属性用法匹配钉着）。
+  首页卡片简介仍是纯文本：它靠四行钳制控高，塞块级元素会把按钮顶出去。
 - **项目管理 → 顺序**：表格每行的 ▲ / ▼ 直接调整公开站点与后台列表的展示顺序
   （按 `sort_order` 升序落库，只写顺序真正变化的行）；抽屉里的「排序权重」仍可手工指定数值。
 - **底部栏**：中英文各一份，随访客语言切换。含品牌区小标与说明段落、三列标题、
@@ -564,9 +608,9 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
   `{since}`（馆藏起始年份）、`{year}`（当前年份）占位符；其中「章节导航列」的链接顺序、
   名称与显示状态直接跟随**02 标头与导航**的配置，改导航即同步改页脚；
 - **08 站点设置 → 展示偏好**（迁移 `0006`）：默认语言（跟随浏览器 / 中文 / English）、默认主题
-  （跟随系统 / 白日标本室 / 夜间标本室）、是否展示首页统计栏目、是否展示前台深浅色与
-  语言切换按钮。**默认值等于既有行为**：语言与主题跟随访客浏览器与系统，统计与两个切换按钮全部开启；
-  「公开项目统计」开关已从展示偏好搬到 **03 首页栏目**的统计卡旁（它管的就是那一段）；关闭时同步从导航与页脚移除该入口，避免留下点不到的链接；
+  （跟随系统 / 白日标本室 / 夜间标本室）、是否展示前台深浅色与语言切换按钮。**默认值等于既有行为**：
+  语言与主题跟随访客浏览器与系统，两个切换按钮全部开启。「是否展示首页统计栏目」的开关在
+  **03 首页栏目**的统计卡旁；关闭时同步从导航与页脚移除该入口，不留点不到的链接；
 - **SEO 生效范围**：管理端保存的标题与 Meta 描述会即时改写浏览器内的文档标题，同时由边缘 Worker
   注入到首页 HTML 的 `<title>` / `description` / `og:*`（**因此不执行 JS 的爬虫与社交平台也能读到**；
   注入结果按 isolate 缓存 60 秒，保存后最多 1 分钟生效）。页面语言也会同步写入 `<html lang>`。
@@ -574,10 +618,10 @@ push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worke
   由同一次注入按当前请求的 origin 换成绝对地址——因此换主域、上 preview 子域都不用改 `index.html`。
   （标记不能写成 `href="/"` 之类的相对地址：`vite:build-html` 会把根斜杠当站内资产去读文件，
   `pnpm build` 直接以 `EISDIR` 失败。）
-- **首屏主题不闪**：展示偏好选「白日/夜间」这类**显式**值时，同一次注入会把 `data-theme` 直接打在
-  `<html>` 上（这份 SELECT 也顺带读 `default_theme`），于是第一帧就是对的，不用等 JS 起来；
-  选「跟随系统」时不注入，由 `index.css` 里 `@media (prefers-color-scheme: dark)` 那一段兜底。
-  两处深色取值必须一致，`test/shell_guards.test.mjs` 会逐项比对（改一处忘另一处就红）。
+- **首屏主题不闪**：展示偏好选「白日/夜间」这类**显式**值时，同一次注入把 `data-theme` 直接打在 `<html>` 上
+  （这份 SELECT 顺带读 `default_theme`），第一帧就是对的，不用等 JS 起来；选「跟随系统」时不注入，
+  由 `index.css` 里 `@media (prefers-color-scheme: dark)` 那一段兜底。两处深色取值必须一致
+  （`test/shell_guards.test.mjs` 逐项比对，改一处忘另一处就红）。
   **社交分享图目前未配置**（站点没有 `og:image`）：要添加就把图片放进 `frontend/public/`，
   并在 `.figma/make/site.json` 声明 `openGraph.image`，重新构建部署后生效；后台不提供修改。
 - **站点设置 → 域名与部署**：**只读信息卡**（当前访问域名、公开站点入口）。主域名、DNS 记录与
@@ -590,20 +634,20 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
 
 保存的语义有两条，都是为了让"默认值"保持是默认值：
 
-- **只发改动的列**：管理端「保存并发布」 PUT 的是与库里那份**不同的字段**（判据与项目抽屉共用
-  `changedColumns`），不再整份回传。以前整份传的是"已套内置默认"的那一份，于是**任何一次保存都会把
-  当时所有内置默认抄进 `site_settings` 那一行**，之后在代码里改默认文案就再也传不到线上（库值赢）。
-  零改动时直接短路、不发请求。
+- **只发改动的列**：管理端「保存并发布」PUT 的是与库里那份**不同的字段**（判据与项目抽屉共用
+  `changedColumns`）。整份回传会把"当时套着的内置默认"一起抄进 `site_settings` 那一行，之后在代码里
+  改默认文案就再也传不到线上（库值赢）。零改动时直接短路、不发请求。
 - **超长值点名拒绝，不静默截断**：单个文本/JSON 字段上限 5000 字符，超了返回 400 并写明是哪个字段
   （`「heroEn」有 6000 字符，超过 5000 字符上限`）；截断后再回"已保存"就是假状态。
-  上限常量在 Worker 里刻意**不导出**：Workers 运行时把入口模块的每个具名导出当 handler 映射，
-  函数和对象可以、**标量会直接把 workerd 打死**（`Incorrect type for map entry …`，dev 与生产同一 runtime）。
+  上限常量在 Worker 里刻意**不导出**，原因见第七节末尾的 workerd 导出约束。
+- **URL 列在写侧校验**：`githubUrl` / `icpUrl` / `logoImageUrl` 必须是 http(s) 绝对地址，否则 400 并点名字段；
+  空串表示不显示（回退内置默认）。渲染侧另有一道 `settingsHref`，两道都留。
 
 另有两点使用约定：
 
 - **管理端入口**：公开界面（页头/详情页/页脚）不展示任何管理入口按钮。直接访问 `https://admin.你的域名`
   （建议收藏）；在公开站上敲 `https://你的域名/admin`（旧的 `#admin` 也认）会自动跳到该子域。**没有 `admin.` 兄弟域可用的环境**
-  （本地、IP 直连、`*.workers.dev` / `*.pages.dev` 预览域）不做跳转，`#admin` 就地打开后台——
+  （本地、IP 直连、`*.workers.dev` / `*.pages.dev` 预览域）不做跳转，`/admin` 就地打开后台——
   判据是 `src/utils/siteHost.ts` 的 `hasAdminSibling()`，所以不存在"跳到不存在的域名"这种死链。
   这只是减少暴露面，真正的安全边界在管理 API 层（见第三节三层防线）。
 - **GitHub 同步**：管理端「07 GitHub 同步」按各项目的仓库地址调用 GitHub 公开 API，
@@ -613,8 +657,8 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   Token（只走请求头，不进 URL）。
   同步为**串行**执行（刻意不并发，避免对匿名 API 造成突发压力）；一旦某个仓库返回 `403`
   （频率超限）**立即停止后续请求**，其余标本标记为"已跳过"而不是逐个白白重试；仓库列表接口
-  最多取 3 页（300 个），超出时管理端会明确提示"仅列出最近更新的 N 个"；所有列表类查询统一
-  带 `LIMIT 500` 安全阀（当前馆藏规模远低于该值）。
+  最多取 3 页（300 个），超出时管理端会明确提示"仅列出最近更新的 N 个"；项目列表类查询带
+  `LIMIT 500`（`QUERY_ROW_LIMIT`）安全阀（当前馆藏规模远低于该值）。
   **每次调用最多处理 10 个标本；开启「同时抓取 README / Compose 文档」时最多 2 个**——
   上限是从免费版 Workers **每次调用 50 个子请求**（GitHub fetch 与 D1 查询都计入）算出来的：
   一行不开文档最坏 3 个（仓库 + releases + 写库），开文档最坏 20 个（README 中英/通用与两个
@@ -622,19 +666,22 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   留下"已写几行、后面的行没有结果"的半更新状态；因此接口在**任何写入之前**返回 400，让管理端分批操作。
   `frontend/test/sync_scope.test.mjs` 用导出的 `syncRowCost` 钉住这套算术，改动候选路径或上限都会红。
 - **同步的字段归属**（迁移 `0007/0008/0012` 之后）：
-  - **GitHub 权威、每次覆盖**：`stars`、`updated`、`version`、`language`、`date`/`year`（仓库创建时间）、
+  - **GitHub 权威、每次覆盖（空值也写回）**：`stars`、`updated`、`version`、`language`、`date`/`year`（仓库创建时间）、
     `metrics_json`（STARS / FORKS / OPEN ISSUES）、`features_json`（仓库 topics，前 4 个）、
     `timeline_json`（按仓库事实生成：建档 / 最多 4 个 Release / 最近推送，按月倒序，最多 8 条）；
-    管理端「Stars 展示值 / 版本 / 技术语言 / 特性列表 / 指标」这几个输入框因此会被同步覆盖，界面已标注。
+    管理端「Stars 展示值 / 版本 / 技术语言 / 年份 / 采集月份 / 最近更新 / 特性列表 / 指标」这些输入框
+    因此会被同步覆盖（空值也会写回），界面已逐项标注。
   - **编辑所有、只在空白时填充**：`description_json`、README/Compose 文档与预览图（项目图片 `preview_image_url` + 相册 `preview_images_json`）、
     以及**开源协议 `license`**（迁移 `0012`，管理端「项目管理 → 编辑 → 开源协议」可填，展示在首页标本卡片右下角）；
     后台手写内容一律不覆盖。
-    「空」= 待填：主动清空后下次同步会重新自动填充（详见下一节）。
+    「空」= 待填：主动清空后下次同步会重新自动填充。
     > 协议取自仓库响应里的 `license.spdx_id`（`GET /repos/{owner}/{repo}` 已带，**不额外发请求**）；
     > GitHub 识别不出协议时的 `NOASSERTION` 与我们认不出的情形都不写；没有 LICENSE 文件时该字段为 `null`，同样不写。
     > 为什么不让同步覆盖：协议是"作者怎么授权"的声明，不能让一次同步替作者改口。
   - 星数展示口径统一为一份实现（≥1000 用 `2.8k`），卡片与指标卡不会再出现 `2.8k` 与 `2800` 并存。
-- **无 Release 的项目**：`version` 保持空串（不再编造 `v1.0.0`），前台会省略版本位而不是显示空占位。
+- **无 Release 的项目**：`version` 保持空串（手动新建与同步都不再编造 `v1.0.0`），前台会省略版本位而不是显示空占位。
+- **删除标本会连带删掉按编号聚合的台账行**（`visit_page_day` / `visit_event_day`）：不清理会让「热门页面」
+  永久保留已删标本，而新标本按 `max+1` 复用该编号时还会继承它的历史统计。
 - **同步的健壮性**：所有 GitHub 出网请求带 10 秒超时（含 Access 证书端点），单个卡住的响应不会拖住整个同步；
   响应里回传 `rateLimitRemaining`，管理端在同步/扫描提示里显示"GitHub 剩余额度"；
   403 会结合配额头与响应体区分"频率超限"与"该仓库被拒绝"，只有确认限流才短路后续请求；
@@ -648,14 +695,13 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
     （仓库无对应文件或已达 GitHub 匿名 API 频率限制），不会假称"已存在"；
   - 导入新标本时同样抓取一次；文档也可在「项目管理 → 编辑」的四个文档编辑框中手工维护。
 - **详情页预览图**（迁移 `0010`）：详情页 OVERVIEW 顶部有一块「PREVIEW / 01」观察台相册，展示项目截图。
-  数据分两列且**互不等价**：**项目图片** `preview_image_url`（详情页 hero 大图与对外 `previewImageUrl` 用，
-  是显式字段；首页卡片仍是占位标本图、`og:image` 是构建期静态文件）与**相册** `preview_images_json`（观察台用，有序数组）。管理端有四个入口：「项目图片」输入框
+  数据分两列且**互不等价**：**项目图片** `preview_image_url`（显式字段，作用范围见下面「两个字段互不兼任」那条）
+  与**相册** `preview_images_json`（观察台用，有序数组）。管理端有四个入口：「项目图片」输入框
   （含「用相册第一张填入」捷径）、「预览图」多行文本框、「按目录批量导入」，以及同步时从 README 自动提取。
   **公开列表与公开详情都返回这两列**：`ProjectRoute` 会先用列表项当初始值渲染详情页，列表若只给项目图片，
   相册会在详情到达前短暂只显示一张（无导航）。README/Compose 文档仍只在详情接口返回。
-  - **位置**：预览区在 **OVERVIEW 面板内**（不再夹在页签与面板之间），切到 README / DEPLOYMENT 时不会看到它；
-    hero 右栏在项目**有项目图片时显示它**（相框按图片自身比例自适应，夹在 `[0.8, 2.2]`），
-    该项为空才退回原来的占位标本图。
+  - **位置**：预览区在 **OVERVIEW 面板内**，切到 README / DEPLOYMENT 时不会看到它；
+    hero 右栏有项目图片时显示它（相框按图片自身比例自适应，夹在 `[0.8, 2.2]`），该项为空才退回占位标本图。
   - **自动提取**：同步（含勾选「同时抓取文档」的全量同步）会把 README 里的**全部真实截图**（`![](…)` 或
     `<img src=…>`）按出现顺序解析出来；**跳过 shields.io / badge 等徽章**，**位图优先于 SVG 矢量图**，去重、
     **最多 12 张**；相对路径按仓库默认分支拼成 `raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>`，
@@ -669,94 +715,60 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
     （缺协议、非 http(s)、重复、超过 12 张），**绝不"丢掉坏行后回成功"**——那会让后台显示"已保存并同步到 D1"
     而库里实际少图，是本项目在演示入口上已经定过的红线（宁 400 不降级）。
     两列各自只在"请求体里出现该键"时才写，所以只改相册不会把项目图片抹掉（部分更新语义）；
-    写侧**不再做任何"空项目图片→取相册第一张"的推导**（那是假状态来源，见下）。
+    写侧不做任何"空项目图片→取相册第一张"的推导（那是假状态来源，见下面「两个字段互不兼任」那条）。
     POST 与 PUT 共用同一条规则（`validatePreviewInput` + `previewFieldsFromBody`）——
-    同一请求体在两条路径必须落库一致（本仓库为 `demoUrl` 踩过两条路径不一致的坑）。
+    同一请求体在两条路径必须落库一致（`demoUrl` 就踩过两条路径不一致的坑）。
     读取侧仍保持宽容：绕过 Worker 直接写库的脏值不会让接口 500，只会被过滤掉。
-  - **画框方向自适应**：整台观察台按**当前那张**的自身宽高换画框尺寸——横图用宽板（桌面 `min(720px, 80%)`，
-    ≤760px 为 86%），竖图（手机截图）收窄成竖板（桌面 `min(230px, 36%)`，≤760px 为 62%），
-    画框高度固定（桌面 `min(72%, 420px)`、手机 `min(74%, 320px)`），一律 `contain` **不裁切截图**。
-    方向不写在数据库里，由 `<img>` 解码后的 `naturalWidth/naturalHeight` 得出并按张序缓存进 state；
-    命中缓存的图可能先于 `load` 监听器就绪，所以挂载时还查一次 `img.complete`，否则竖图首帧会先套横框。
-  - **相册交互**：只渲染**当前张 + 左邻 + 右邻**，总数 >3 时再多渲染一张代表「往后还有」的后牌
-    （编号牌上标 `+N`，N = 未显示的张数）——一张 12 图的相册不会同时解码 12 张大图。
-    2 张时左右邻会绕回同一张，`previewFrames()`（`src/utils/previewFrames.ts`，纯函数 + `test/preview_frames.test.mjs` 闸门）
-    去重只留一张侧牌；1 张时不渲染翻页控件，舞台 `tabindex="-1"`（不可 Tab 停留）。
-    下方是**缩略图索引条**（每张 58×44 的小图 + 左上角 `0N` 角标，可换行，触控目标 ≥44px），两侧 ←/→ 翻页，
-    末端一个「放大」按钮。为什么不是裸编号：`01…12` 无法预告"第 7 张是什么"，十几张时访客只能逐张盲翻；
-    管理端抽屉早就用同一批 URL 渲染缩略图，前台没理由更弱。索引小图与管理端**共用同一档宽度**
-    （`IMAGE_WIDTH.thumb = 200` → 同一个 `/api/img` URL → 同一份边缘缓存）。
-    舞台支持 ←→ 方向键、回车/空格（放大当前张）、指针拖动、以及**鼠标悬停时的 3D 倾斜**：位移超过 8px 才算起拖并接管指针
-    （此时牌面自己的 click 会被重定向，不会「拖一下就顺手改了当前张」），再超过 45px 才真的翻页；
-    8–45px 之间什么都不发生（回弹）。鼠标点侧牌可直接切过去，**键盘**选张走方向键与索引条。
-    可访问名 = **可见的编号牌文字 + 文件名**（`FRAME / 03 pipeline-console`、索引条是 `03 pipeline-console`）：
-    这样既满足 WCAG 2.5.3（名称包含可见标签文字），又不会把整条 URL 目录念给读屏——目录那行 `<small>`
-    是 `aria-hidden`，且**没有目录可显示时整行不渲染**（免得跟项目名重复一行）。
-    索引条整体是 `role="group"` + 组名，否则一排缩略图对读屏没有上下文；文件名同时挂 `title`（只对鼠标有效）。
-    页码用 `aria-live="polite"`；后牌是 `aria-hidden` 的 `<div>`（纯版面，不进读屏顺序）。
-  - **放大看图层**（点主牌 / 「放大」按钮 / 舞台内回车）：整幅实底图层，`role="dialog"` + `aria-modal`，
-    图取 `IMAGE_WIDTH.zoom = 2000`（就是 `/api/img` 的宽度上限）。层内 ←/→ 继续翻同一本相册、Esc 或点空白关闭，
-    关闭时还原 `body` 滚动。**背景用实底页面色而不是半透明压暗**：截图多为浅色 UI，压暗会把图边缘吃进背景里；
+  - **版面**：观察台是 3D 封面流（`perspective: 1800px` + `preserve-3d`，四张牌 active / next / previous / back），
+    画框按**当前那张**的自身宽高切换横板 / 竖板（横图桌面 `min(720px, 80%)`、竖图 `min(230px, 36%)`，
+    高度固定 `min(72%, 420px)`），一律 `contain` 不裁切截图；方向不入库，由 `<img>` 解码后的
+    `naturalWidth/naturalHeight` 得出并按张序缓存，挂载时补查一次 `img.complete`（缓存命中会早于 `load` 监听器）。
+    **≤760px 不用这套封面流**：只显示当前张，邻位信息交给索引条（它是确定可见的，不依赖 3D 残片）；
+    侧牌在窄屏**直接不渲染**——`useNarrowScreen()` 与 CSS 共用同一个 760 断点，因为 `display: none` 的 `<img>`
+    仍会发请求，只靠 CSS 隐藏会让"首屏只让一张图抢带宽"落空。过渡统一 ≤280ms、不加 blur；
+    `prefers-reduced-motion` 只把主牌变换写回原点、保留侧牌排布（那是版面不是动画）。
+    `.preview-gallery` 用 `overflow-x: clip` 裁掉超出列宽的侧牌：选 `clip` 不选 `hidden`，因为 `clip` 不算
+    grouping（不会把 `transform-style` 压平），也不会凭空多出一个滚动容器。
+  - **只渲染当前张 + 左邻 + 右邻**，总数 >3 时再多一张后牌（编号牌标 `+N`，N = 未显示的张数）；2 张时左右邻
+    绕回同一张，`previewFrames()`（纯函数 + `test/preview_frames.test.mjs`）去重只留一张侧牌；1 张时不渲染翻页控件。
+    侧牌与后牌**等主牌定妆后才开始请求**（`load` 与 `error` 都算定妆，坏图不会冻住整台），定妆前是同尺寸占位盒
+    所以不跳版；冷缓存首屏因此只有 1 张 1600 走 Worker→转换服务那两跳。**不给侧牌降档**：同一张图会产生两种
+    转换变体（12 张全翻一遍：12 次 → 24 次），免费转换服务反而多承担一倍的真实请求。
+  - **缩略图索引条**（每张 58×44 的小图 + 左上角 `0N` 角标，可换行，触控目标 ≥44px；窄屏单独一行横向滚动）：
+    与前台、管理端抽屉共用 `IMAGE_WIDTH.thumb = 200` 同一档 → 同一个 `/api/img` URL → 同一份边缘缓存。
+    为什么不是裸编号：`01…12` 无法预告"第 7 张是什么"，十几张时访客只能逐张盲翻。
+  - **交互**：←→ 方向键、回车/空格放大、指针拖动（位移 >8px 才算起拖并接管指针，>45px 才真的翻页，
+    中间回弹；拖拽时牌面自己的 click 被重定向，不会「拖一下就顺手改了当前张」）、鼠标点侧牌直接切、
+    鼠标悬停 3D 倾斜（只在 `pointerType === 'mouse'` 响应）。可访问名 = **可见的编号牌文字 + 文件名**
+    （满足 WCAG 2.5.3 的名称包含可见标签，又不把整条 URL 目录念给读屏；目录那行 `aria-hidden`，无目录时整行不渲染）；
+    索引条整体是 `role="group"`，页码 `aria-live="polite"`，后牌是 `aria-hidden` 的 `<div>`。
+  - **放大看图层**（点主牌 / 「放大」按钮 / 舞台内回车）：`role="dialog"` + `aria-modal`，图取
+    `IMAGE_WIDTH.zoom = 2000`（就是 `/api/img` 的宽度上限），层内 ←/→ 继续翻同一本相册、Esc 或点空白关闭并还原
+    `body` 滚动。**背景用实底页面色而不是半透明压暗**：截图多为浅色 UI，压暗会把图边缘吃进背景里；
     层里另给「原图」直链（新标签打开未转换的原地址），代理是为了省流量，不是替访客做选择。
-  - **首屏只让主牌抢带宽**：侧牌与后牌**等主牌定妆后才开始请求**（`load` 与 `error` 都算定妆，坏图不会冻住整台），
-    定妆前它们是同尺寸的占位盒，所以不跳版。冷缓存时首屏只有 1 张 1600 走 Worker→转换服务那两跳，
-    而不是 4 张同时抢；命中边缘缓存（实测 ~7ms）时肉眼没有差别。**没有**给侧牌降档——
-    降档会让同一张图产生两种转换变体（12 张全翻一遍：12 次 → 24 次），第三方免费转换服务反而吃更多请求。
-  - **3D 封面流（取代竖向牌堆）**：`perspective: 1800px` + `transform-style: preserve-3d`，
-    四张牌按 `data-position` 排成 active / next / previous / back，侧牌 `rotateY ±42deg` 向两侧摊开。
-    与上一版竖向牌堆的取舍：侧牌按**自身宽度**的 76% / 23% 位移，会把一部分牌面推到主牌轮廓之外。
-    实测（把舞台宽度钉成 360px / 838px、关掉过渡后读边界）两侧各露出 **110–150px**，
-    而横向扇形当年是位移量级不够导致后牌被主图整块压住。
-    > 诚实标注：这组数字是在 0×0 的浏览器面板里**钉宽度**测的，当时生效的是 ≤760 那组位移常量
-    > （±78%/±22%、scale .72/.74）；桌面那组（±76%/±23%、scale .76/.79）与它接近但**未在真实视口下复测**。
-    **≤760px 不再沿用这套 3D 封面流**：主牌占 78% 时两侧残片只剩 20–30px，"后面还有图"这个线索基本读不出来，
-    十几个格子还会换 3 排挤占正文。手机版面改为**只显示当前张**（侧牌/后牌 `display: none`、主牌 86% 并写回静态变换），
-    第一行放 ←/→ 与「放大」，缩略图索引单独一行**横向滚动**（用显式 `order`，不靠 DOM 顺序凑），
-    44px 触控目标保持。邻位信息交给索引条——它是确定可见的，不依赖 3D 残片能否被看见。
-    **侧牌在窄屏是直接不渲染的**（`useNarrowScreen()` 与 CSS 共用同一个 760 断点）：
-    `display: none` 的 `<img>` 仍会发请求，只靠 CSS 隐藏会让"首屏只让一张图抢带宽"落空。
-    过渡统一 ≤280ms、**不加 blur**、倾斜只在 `pointerType === 'mouse'` 时响应；
-    `prefers-reduced-motion` 由 CSS 把主牌变换写回 `translate(-50%, -50%)`（JS 设的 `--tilt-*` 因此不生效），
-    但**保留侧牌的 3D 排布**——那是版面不是动画。
-    装饰层也随之外收：椭圆轨道的内圈虚线与内阴影在 ≤1100px 撤掉（只留一条椭圆线），≤760px 整条不画
-    （那里已经没有 3D 排布，轨道没有指代对象）；区块的径向主色渐变由 10% 降到 7%——
-    坐标纸底纹 + 两层渐变 + 双层轨道同时在场会跟主牌抢注意力。
-    `.preview-gallery` 上加 `overflow-x: clip`，把侧牌超出列宽的部分裁掉，免得蹭到左栏文案：
-    选 `clip` 而不选 `hidden`，是因为 `hidden` 在另一轴仍为 `visible` 时会被强算成 `auto`、凭空多出一个滚动容器；
-    而 `clip` 按规范**不算** grouping——`transform-style` 被压平的条件是 overflow "any value other than
-    visible **or clip**"。**早前一版这里写成「clip 放到 .preview-stage 上会按规范把 3D 压平」是错的**（引据方向反了），
-    代码本身没问题（裁的是列盒，与舞台同宽），错的只是理由，已更正。
-  - **文案栏的数据都是真的**：左栏页码 `0N / 0M` 与进度段宽度（`--preview-progress`）按相册实际张数与
-    当前序号计算；每张牌的标题与副标题取**图片 URL 自身的文件名与目录**（`frameLabel` 解 `pathname`，
-    百分号解码失败就原样显示），没有说明文字时退回项目名——**不写参照稿里那种虚构的界面描述与指标**。
-  - **项目图片与相册是两个字段**（不再让相册首张兼任封面）：`preview_image_url` 是**显式**字段，
-    抽屉里的名字就叫「**详情页大图（项目图片）**」——名字即作用范围：它只驱动详情页 hero 与对外 `previewImageUrl`，
-    **首页卡片仍用占位标本图、`og:image` 仍是构建期静态文件**（这两点在字段说明里明写，不让管理员猜）。
-    独立输入框 +「用相册第一张填入」按钮（带过之后两者互不影响，调整相册顺序不会改大图）。
-    写侧 `validatePreviewInput` **不再做任何推导**：不给该键就不动这一列（部分更新），显式空串就是清空；
-    只有 README 同步在**库里该项为空**时才补，补的是**从 README 提取到的那一组图的第一张**
-    （不是"库里已有的相册的第一张"——见上面「同步时给项目图片补的是 README 里提取到的首张图」那句）。
-    读侧 `publicGallery` 仍保留退化：项目图片为空时对外报告相册第一张，所以老数据不会因为解耦而没图。
-    管理端抽屉里的缩略图条，会给等于项目图片的那一张打上「详情页大图」标记。
-    > 用户可见文案统一到「项目图片」：服务端 400 话术（`项目图片地址无效…`）与同步备注（`预览图已从 README 提取（项目图片 / 相册 5 张）`）
-    > 以前写的是「封面」，与抽屉里的字段名两种叫法——同一个概念只留一种词。
+  - **文案栏的数据都是真的**：左栏页码 `0N / 0M` 与进度段宽度按相册实际张数与当前序号计算；每张牌的标题与
+    副标题取**图片 URL 自身的文件名与目录**（`frameLabel` 解 `pathname`，百分号解码失败就原样显示），
+    没有说明文字时退回项目名——不写虚构的界面描述与指标。
+  - **两个字段互不兼任**（相册首张不再代做封面）：`preview_image_url` 是显式字段，抽屉里就叫「**详情页大图（项目图片）**」，
+    只驱动详情页 hero 与对外 `previewImageUrl`；**首页卡片仍用占位标本图、`og:image` 仍是构建期静态文件**
+    （字段说明里明写，不让管理员猜）。管理端是独立输入框 +「用相册第一张填入」按钮，带过之后两者互不影响
+    （调整相册顺序不会改大图）。写侧 `validatePreviewInput` 不做任何推导：不给该键就不动这一列，显式空串就是清空。
+    读侧 `publicGallery` 保留退化：项目图片为空时对外报告相册第一张，老数据不会因为解耦而没图；
+    抽屉的缩略图条会给等于项目图片的那一张打上「详情页大图」标记。
+    用户可见文案统一到「项目图片」——服务端 400 话术与同步备注曾写「封面」，同一个概念只留一种词。
   - **按目录批量导入预览图**（`POST /api/admin/preview-import`，body `{dir}`）：填图片所在目录地址即可，
     支持 `raw.githubusercontent.com/owner/repo/分支/路径`、`github.com/owner/repo/{tree|blob}/分支/路径`
-    以及省略协议/省略域名三种写法；**只支持 GitHub**（gitlab 等一律 400 说明原因），
-    只列**一层**目录（子目录只计数不递归），只取位图扩展名
-    （png/jpg/jpeg/webp/gif/avif/bmp，SVG 与 markdown 被过滤并计入 `skippedNonBitmap`），
-    排除徽章类文件名，**按文件名排序**保证顺序稳定，路径逐段 `encodeURIComponent`（空格 → `%20`）。
-    分支名带 `/` 时切分会歧义，因此解析器给出第二个候选「整段当路径 + 用默认分支」再试一次；
-    只给 `owner/repo/X` 一段时直接要求写全（避免把分支名当目录）。
-    返回 `images / found / truncated / skippedNonBitmap / skippedBadge / subDirectories / rateLimitRemaining`，
-    **上限 12 张**：超出部分标 `truncated` 并如实告知还剩几张没填。
-    前端把结果**并入草稿文本框**（去重、凑满 12 即停），必须再点「保存项目」才写库——导入本身不改数据库。
-    旁边有个「**整体替换现有相册**」开关（默认追加）：相册本来就满 12 张时，"只能追加"等于导入无效。
-    GitHub 配额来源：Worker 的 `GITHUB_TOKEN`（`.dev.vars.example` 已改为"建议配置"），
-    或抽屉里那条请求自动带上的「GitHub 同步」栏 token；两者都没有时走匿名 60 次/小时，
-    触发限制返回 **429 并说明剩余配额**。撞限后**输入内容保留、按钮变成「重试」**，并提示填 token 可绕开匿名限额，
-    不必重填地址；导入的失败原因与统计（新增/替换几张、跳过重复、过滤非位图与徽章、被上限挤掉几张）
-    **就近显示在按钮下面**，不只放在顶部那条会被冲掉的通知里。
+    以及省略协议/省略域名三种写法；**只支持 GitHub**（gitlab 等一律 400 说明原因），只列**一层**目录
+    （子目录只计数不递归），只取位图扩展名（png/jpg/jpeg/webp/gif/avif/bmp，SVG 与 markdown 计入
+    `skippedNonBitmap`），排除徽章类文件名，**按文件名排序**保证顺序稳定，路径逐段 `encodeURIComponent`。
+    分支名带 `/` 时切分会歧义，解析器因此给出第二个候选「整段当路径 + 用默认分支」再试一次；
+    只给 `owner/repo/X` 一段时直接要求写全。返回 `images / found / truncated / skippedNonBitmap /
+    skippedBadge / subDirectories / rateLimitRemaining`，**上限 12 张**，超出标 `truncated` 并如实告知还剩几张没填。
+    前端把结果**并入草稿文本框**（去重、凑满 12 即停），必须再点「保存项目」才写库——导入本身不改数据库；
+    旁边「整体替换现有相册」开关默认追加（相册本来就满 12 张时"只能追加"等于导入无效）。
+    配额来源：Worker 的 `GITHUB_TOKEN`，或抽屉那条请求自动带上的「GitHub 同步」栏 token；两者都没有时走匿名
+    60 次/小时，撞限返回 **429 并说明剩余配额**，输入内容保留、按钮变成「重试」。失败原因与统计
+    （新增/替换几张、跳过重复、过滤非位图与徽章、被上限挤掉几张）**就近显示在按钮下面**，不只放在顶部那条通知里。
   - **抽屉的四个关闭入口都有未保存保护**：Esc / 点遮罩 / 右上角 × / 底部「取消」全部收敛到 `requestClose()`。
     判据与保存路径**共用同一个 `changedColumns()`**（`src/utils/projectDiff.ts`，纯函数 + `test/preview_rules.test.mjs` 闸门），
     所以不会出现"关闭时说没改动、保存却写进去"的分裂；有改动时在页脚上方展开一条确认条
@@ -769,55 +781,43 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
     （`sanitizeImageUrl` / `PREVIEW_IMAGE_LIMIT` 由 Worker 再导出，`galleryRowIssues` 是它的逐行诊断视图）；
     `test/preview_rules.test.mjs` 把同一批输入喂给前后端两侧，要求**结论必须一致**。服务端仍是最终裁决。
   - **后台通知分三种生命周期**：结果类（`info`）6 秒自动让位，失败类（`error`）常驻、带关闭按钮并用
-    `role="alert"` + 红边，在途类（`busy`，如「正在读取目录…」）不自动消失——抓取可能超过 10 秒，
-    自动消失会让人觉得没反应。以前只有一条永不消失、新消息覆盖旧消息的通知位。
-  - **管理端抽屉的缩略图也走 `/api/img`**：以前是 `<img src=原图>` 直连，一次开抽屉要拉十几张几百 KB 的 PNG，
-    而公开页同一张图走 webp + 边缘缓存——**管理员看到的字节量与速度不该和访客不是同一份**。
-    现在与前台索引条共用 `IMAGE_WIDTH.thumb = 200` 同一档（同一个 URL → 同一份缓存）。
-  - **管理端与公开站不再共用一份行数据**（这是「保存后再次打开没有回显」的根因修复）：
-    `/api/projects` 是对外投影（camel 命名，**不含** `readme_zh / readme_en / compose_dev / compose_prod /
-    internal_notes / sort_order / docs_synced_at / preview_images_json / preview_image_url`），
-    而编辑抽屉绑的就是这些原始列名。以前 `App` 只有一份 `items`，而标签页重新聚焦时的
-    `refreshPublicData` 会用公开投影覆盖它——人在后台切出去复制一个 URL 再回来，抽屉里这六项就整片空了，
-    只有刷新页面（`AdminGateway` 重新拉管理端列表）才恢复。现在管理端单独持有 `adminItems`，
-    退出后台时再显式重取一次公开数据给前台用。
-    同时 `saveProject` 成功后**改为重取管理端列表**（和「保存展示顺序」同一条模式），
-    不再把本地 payload 拼回列表——这样回显显示的永远是库里的行，服务端的规范化结果不会看不见。
+    `role="alert"` + 红边，在途类（`busy`，如「正在读取目录…」）不自动消失——抓取可能超过 10 秒。
+  - **管理端与公开站不共用一份行数据**：`/api/projects` 是对外投影（camel 命名，**不含**
+    `readme_zh / readme_en / compose_dev / compose_prod / internal_notes / sort_order / docs_synced_at /
+    preview_images_json / preview_image_url`），而编辑抽屉绑的就是这些原始列名。管理端单独持有 `adminItems`
+    （公开数据只有一份 `items` 时，标签页重新聚焦会拿对外投影覆盖它——切出去复制个 URL 再回来，这九项就整片空了），
+    退出后台时再显式重取一次公开数据给前台用。`saveProject` 成功后**重取管理端列表**而不是把本地 payload
+    拼回列表——回显显示的永远是库里的行，服务端的规范化结果不会看不见。
+    管理端列表也**不带四份长文档**（各上限 10 万字符 × 最多 500 行会让响应随馆藏线性放大），
+    只回 `has_readme_*` 之类的有无标记；抽屉打开时用 `GET /api/admin/projects/:id` 取全文再渲染。
   - **PUT 只提交改动过的列**（`saveProject` 拿列表里的当前行做基线逐项比较）：整行全量回写会把抽屉打开期间
     后台同步/导入刚写进库的字段（`stars`、`version`、`README`、时间线…）用陈旧值悄悄盖回去，
     那是另一种"提示成功但库里被改坏"。没有检测到任何改动时直接不发请求（也不报"已保存"）。
     同一条规则也用在「一键切换状态」与「保存展示顺序」上（各只提交 `status` / `sort_order` 一列）；
     POST 新建仍提交全量，因为要落所有列的默认值。
-    顺带两处同源修正：抽屉的相册文本框**不再**在项目图片非空时把它当作第一行（否则任何一次保存都会把
-    项目图片固化成相册，并让 `has_preview_images` 变 1，此后同步永不再为该项目的相册补图）；
-    `.admin-notice` 的 `z-index` 从 50 抬到 220——抽屉遮罩是 100，原来抽屉里看到的保存失败/导入结果全被盖住。
-  - **访客正在看的那一张要经得起重拉**（同一个根因在详情页的表现）：`items` 换成一批新对象 →
-    `ProjectRoute` 依赖 `listed` 重跑 → `project.previewImages` 换成新数组引用。
-    所以 `PreviewGallery` 的复位 effect 依赖的是 **`images.join("|")`**（相册内容），不是数组引用；
-    内容没变就不动，访客正看第 5 张不会因为切了一下标签页被硬打回第 1 张（换标本 / 后台改图才复位）。
-  - **预览区留白**：用「密集档」间距（`--section-pad-dense`），而不是叙述段落的 loose 档，避免图被推到很下方。
-    区块级 eyebrow 重新编号为 `PREVIEW / 01 → FIELD NOTES / 02 → ANATOMY / 03 → EVOLUTION / 04 →
-    NEIGHBOURING SPECIMENS / 05`；预览区无相册时整段不渲染，编号按版面身份保留（不从 01 起排）。
+    抽屉的相册文本框不会在项目图片非空时把它当作第一行——否则任何一次保存都把项目图片固化成相册，
+    并让 `has_preview_images` 变 1，此后同步永不再为该项目的相册补图。
+  - **访客正在看的那一张要经得起重拉**：`items` 换成一批新对象 → `ProjectRoute` 依赖 `listed` 重跑 →
+    `project.previewImages` 换成新数组引用。所以 `PreviewGallery` 的复位 effect 依赖 **`images.join("|")`**
+    （相册内容）而不是数组引用——内容没变就不动，切一下标签页不该把访客从第 5 张打回第 1 张。
+  - **预览区用「密集档」间距**（`--section-pad-dense`，不是叙述段落的 loose 档）。区块级 eyebrow 编号为
+    `PREVIEW / 01 → FIELD NOTES / 02 → ANATOMY / 03 → EVOLUTION / 04 → NEIGHBOURING SPECIMENS / 05`；
+    预览区无相册时整段不渲染，编号按版面身份保留（不从 01 起排）。
 - **图片代理**（同源 `GET /api/img`）：详情页所有相册图都经它中转，**这是解决"图显示慢"的关键**。
   - **为什么需要**：图源是站外的 GitHub raw（原图常见几百 KB 的 PNG，且只缓存 5 分钟）；Workers 运行时装不了
     图片解码器、Cloudflare 自带的 Image Resizing 要付费。因此由 Worker 借免费的转换服务
-    （`wsrv.nl`）把图压成 **webp** 再回给浏览器：实测 446KB 的 PNG → 1600 档约 **31KB**
-    （上一版还有 160 档缩略图约 3.4KB；该档现在前台已无调用路径，数字只作为「转换后体量级」的历史实测留档）。
-  - **接口**：`/api/img?w=<宽度>&src=<原图 URL>`。宽度夹到 `[64, 2000]`（默认 1600）。
-    前台有**三档**（`IMAGE_WIDTH`）：`plate = 1600`（观察台的牌，台上同时最多 4 张全按主图清晰度取，
-    避免同一张图因侧牌降档产生两种转换变体）、`thumb = 200`（索引条角标小图与管理端抽屉的缩略图，
-    两处同一档 = 同一份缓存）、`zoom = 2000`（放大层，就是服务端 `IMG_WIDTH_MAX` 的上限）。
-    翻到邻牌时不必再请求一次更大的尺寸。**也别给侧牌/后牌单设小档**——后牌每次翻页会换成另一张，
-    相册里每张图迟早都会当一次后牌，分档会让同一张图产生两种转换变体（12 张全看完：12 次 → 24 次），
-    免费的第三方转换服务反而多承担一倍的真实转换。**冷缓存首屏的实际账**（按常量推算，未做真实视口复测）：
-    大图请求由「主牌 + 3 张侧后牌」4 次降到 **1 次**（侧牌等主牌定妆后才发），
-    换来索引条为每张图多要一个 200 档小图（懒加载、去重、边缘缓存 7 天）——
-    即约 `1×31KB + 最多 12×几 KB`，比原来的 `4×31KB` 仍是一档的下降；索引条那部分是为了"看得清要翻什么"付的代价。
-    代价是 4 张 1600×1000 同尺寸牌同时在场，解码内存比上一版多约十几 MB——
-    低配手机上是这套版面需要留意的一点（**未实测**）。
-    管理端抽屉的缩略图**也走这条通道**（与索引条共用 200 档）：以前它是 `<img src=原图>` 直连，
-    管理员一次开抽屉要拉十几张几百 KB 的 PNG，看到的字节与速度都不是访客那一份。
-    要核对"原地址本身是否可达"用放大层里的「原图」直链，而不是靠抽屉缩略图。
+    （`wsrv.nl`）把图压成 **webp** 再回给浏览器：实测 446KB 的 PNG → 1600 档约 **31KB**。
+  - **接口**：`/api/img?w=<宽度>&src=<原图 URL>`。宽度先夹到 `[64, 2000]`（默认 1600），再**吸附到前台实际使用的三档**
+    （200 / 1600 / 2000）：否则任意宽度都是一个独立缓存键与一次真实转换。缓存键还会去掉 `src` 的 query/fragment，
+    但取图仍用原地址（签名类 URL 的 query 可能是必需的）；只接受默认端口；除 isolate 桶外还有一层 Cache API 桶。
+    前台三档 `IMAGE_WIDTH`：
+    `plate = 1600`（观察台的牌，台上最多 4 张全按主图清晰度取，**不给侧牌/后牌单设小档**，理由见上面
+    "只渲染当前张 + 左邻 + 右邻"那条）、`thumb = 200`（索引条角标小图**与管理端抽屉的缩略图同一档**：
+    同一个 URL → 同一份边缘缓存，管理员看到的字节量与速度就是访客那一份）、`zoom = 2000`（放大层，
+    等于服务端 `IMG_WIDTH_MAX`）。冷缓存首屏的实际账（按常量推算，未做真实视口复测）：大图请求由 4 次降到
+    **1 次**，换来索引条为每张图多要一个 200 档小图（懒加载、去重、边缘缓存 7 天），约 `1×31KB + 最多 12×几 KB`。
+    留意两点：台上 4 张 1600 同尺寸牌在场会让低配手机的解码内存上升（**未实测**）；要核对"原地址本身是否可达"
+    用放大层里的「原图」直链，而不是靠抽屉缩略图。
   - **边缘缓存**：转换结果写入 `caches.default`，`Cache-Control: public, max-age=604800`
     （不写 `stale-while-revalidate`——Cache API 的 `put`/`match` 不支持，写了是空承诺）。
     **每个「源图 × 宽度」在每个边缘节点只真的转换一次**；实测命中约 7ms，回源约 1s。
@@ -837,39 +837,28 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
     白名单，不构成开放重定向），绝不白屏。
   - **依赖与隐私**：`wsrv.nl` 是免费的第三方公共服务（BSD-3-Clause 开源，文档未承诺配额或 SLA），
     图片会经过它的服务器。若将来开通 Cloudflare Image Resizing，只需改 `buildWeservUrl` 这一处即可切换。
-- **详情页布局约定**（`frontend/src/index.css` 的 `:root` token）：
-  - **统一栅格**：`--gutter`（`clamp(20px, 6vw, 96px)`）是 header / hero / 各 section **共用的左右边缘**。
-    原先三处各自为政（header 固定 40px、hero 叠加 6vw+4vw、section 6vw），最宽处差到 100px 以上。
-    **文档区（README / DEPLOYMENT）例外，保持居中**——它是阅读版面，与叙述区左边缘不一致是刻意选择。
-  - **纵向两档**：`--section-pad-loose`（叙述段）与 `--section-pad-dense`（预览 / 统计等密集区块），
-    取代原来所有区块一律 `128px`。
-  - **锚点偏移**：`--sticky-offset`（72px 吸顶头 + 16px）作为 `scroll-margin-top`，
-    用在各 section、compose 块与 README 的 h1–h4 上——原来「READ FIELD NOTES」与 README 目录跳转
-    的落点会被吸顶头盖住。
-  - **文档列宽**：`220px`（目录）+ `minmax(0, 920px)`（正文），`justify-content: center`，间隙
-    `clamp(32px, 5vw, 96px)`；760px 以下收成单列。
-    曾经收窄到 `58ch` 想让行长更讲究，但实际太窄（尤其中英文混排与长 compose 行），已放宽。
-- **详情页排版约定**：**观察台自己**的微标签（`FRAME / 0N`、图注、索引条角标、页码）统一到 **10px**（参照稿是
-  7/8/9px 混用）；但详情页其余小字**没跟着抬**——共享的 `.eyebrow` 仍 9px、`.document-section > aside` 目录项
-  与 `.doc-toc-item` 仍 9px、NEIGHBOURING 区块的 `.related-grid span` 仍 8px（原来 7px 的 COPY 按钮已抬到 10px）。
-  `h1` 行距 `.76 → .9`（`.76` 会把中文行距压太紧）；README 标题只有**一套**字号——
-  原 `.markdown-body h2` 的 `48–78px` 会被 `.markdown-body .readme-doc h2` 完全盖掉，
-  且在 deployment 面板里是 52px 的隐患，已合并为 `clamp(26px, 2.6vw, 34px)`。
-  > 注意：`.eyebrow`（9px）与首页 / 页脚 / 管理端的 8px 微标签**本轮仍未动**，全站抬到 10px 需单独确认。
-- **DEPLOYMENT 代码块**：头部（路径 + COPY）从绝对定位改为 **flex 行**，去掉 54px 占位内边距与
-  `min-height: 118px`，因此**短 compose 文件不再被撑高**；`pre` 用 `max-height: min(72vh, 760px)` +
-  `overscroll-behavior: contain`（既看得下较长的 compose，又不至于和整页抢滚动）；
-  宽度随上面的文档列一起放宽到 920px；COPY 按钮 7px→10px、触控目标 ≥32px。
-  滚动条统一为一档**低对比细条**（`scrollbar-width: thin` + `::-webkit-scrollbar`，深色块内用浅色 thumb）——
-  刻意**不隐藏**滚动条，避免丢掉「这里能滚」的可发现性。
+- **详情页版面契约**（`frontend/src/index.css` 的 `:root` token）：
+  - `--gutter` = `clamp(20px, 6vw, 96px)` 是 header / hero / 各 section **共用的左右边缘**；
+    **文档区（README / DEPLOYMENT）刻意例外，保持居中**——它是阅读版面。
+  - 纵向两档：`--section-pad-loose`（叙述段）与 `--section-pad-dense`（预览 / 统计等密集区块）。
+  - `--sticky-offset` = `calc(72px + 16px)` 作 `scroll-margin-top`，用在各 section、compose 块与 README 的
+    h1–h4 上，否则锚点落点被 72px 吸顶头盖住。
+  - 文档列宽 `220px`（目录）+ `minmax(0, 920px)`（正文）居中，间隙 `clamp(32px, 5vw, 96px)`；760px 以下收成单列。
+  - 小字：观察台自己的微标签（`FRAME / 0N`、图注、索引条角标、页码）与 COPY 按钮统一 **10px**；
+    共享的 `.eyebrow` 与文档目录项仍 9px、`.related-grid span` 仍 8px。README 标题只有一套字号
+    `clamp(26px, 2.6vw, 34px)`，`h1` 行距 `.9`（`.76` 会把中文行距压太紧）。
+    > 未办：全站微标签统一到 10px（首页 / 页脚 / 管理端仍有 8–9px 的）需要单独确认，目前只抬了观察台与 COPY。
+  - DEPLOYMENT 代码块：头部是 flex 行（路径 + COPY），`pre` 用 `max-height: min(72vh, 760px)` +
+    `overscroll-behavior: contain`，宽度随文档列一起到 920px，COPY 触控目标 ≥32px；滚动条统一为低对比细条
+    （`scrollbar-width: thin` + `::-webkit-scrollbar`，深色块内用浅色 thumb），**刻意不隐藏**，
+    免得丢掉「这里能滚」的可发现性。
 - **管理端写接口对请求体本身也是严格的**：`POST/PUT /api/admin/projects*`、`POST /api/admin/github-import`、
   `PUT /api/admin/site-settings` 收到**不可解析的请求体**时返回 **400**（此前会抛错变成 500，把客户端问题
   报成服务端问题）。`POST /api/admin/github-sync` 的请求体是可选的，缺失或不可解析按默认方式同步，不报错。
 - **同一列不接受两种拼写**：管理端用 D1 原始列名（`preview_images_json` / `preview_image_url`），
   公开投影用 camel 名（`previewImages` / `previewImageUrl`）。两者同时出现在一个写请求里且内容不一致时，
-  `previewFieldsFromBody` 直接 **400 点名两种写法**，不再像以前那样让 camel 悄悄赢过 snake——
-  那会造成"抽屉里编辑的是 A、库里存的是 B、后台还提示已保存成功"的假状态。内容一致时按管理端口径写入，
-  只给其中一种也照常接受。
+  `previewFieldsFromBody` 直接 **400 点名两种写法**——让其中一种悄悄赢会造成"抽屉里编辑的是 A、库里存的是 B、
+  后台还提示已保存成功"的假状态。内容一致时按管理端口径写入，只给其中一种也照常接受。
 - **详情页文档展示**：仅 `GET /api/projects/:id` 返回文档内容（列表接口不携带，避免体积膨胀）。前台
   README tab 用内置极简 Markdown 渲染器（`frontend/src/utils/markdown.tsx`）把 Markdown 转成 React
   元素——**不解析也不透传原始 HTML**，链接只放行 http/https/mailto；当前语言缺 README 时回退另一种语言
@@ -894,14 +883,12 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   `deck` / `outbound` / `imgfail` 仍会进「行为事件」表，看事件分布时要知道这一点。
   管理端面板底部有 **「本设备不计入访问」** 开关：管理端在 `admin.<主域>`、公开站在 `<主域>`，
   两边 localStorage 不互通，因此生产环境用一枚 `Domain=<主域>` 的**功能性偏好 cookie**
-  （值只有 `1`/删除，不含任何标识）让公开站也读到；本地/IP/无兄弟域时退回 localStorage。
+  （值只有 `1`/删除，不含任何标识）让公开站也读到；本地/IP/`*.workers.dev`（同源、无兄弟域）退回 localStorage。
 - **为什么不用 Analytics Engine 当主落点**：AE 只能写、不能从 Worker 读，要在自己的管理端展示
   还得额外引 CF API token；D1 按天聚合后正常流量一天只有几十行。
   ⚠️ **但每次 pageview 会写 7–9 行**（日聚合 + 页面 + 小时 + 四个维度 + 身份 + 去重索引）。
-  代码侧限流是**免费路径**：isolate 内存桶挡住同实例连打，Cloudflare Cache API 的分钟/日桶
-  在同一 colo 内共享、不占 D1/KV 配额（单 IP 日配额 1000 条 ≈ 最坏 9k 行，约日额度的 9%）。Cache API 不是全局原子计数
-  （可能被淘汰、并发读改写会少计），跨机房/IP 轮换的分布式压力仍超出免费代码侧的能力边界；
-  WAF 或 Durable Objects 是可选的进一步收紧项，**不配置也能上线**。
+  所以这道写入口靠代码侧限流兜住（两种桶的构成与能力边界见第三节）：单 IP 日配额 1000 条
+  ≈ 最坏 9k 行，约 D1 日写额度的 9%。WAF 或 Durable Objects 是可选的进一步收紧项，**不配置也能上线**。
   AE 绑定仍是**可选的第二通道**（默认注释；未启用 AE 的账号部署会 `code 10089`，本地 dev 测不出来）。
 - **部署顺序（硬前提）**：先本地、再远程，最后部署新 Worker：
   ```bash
@@ -976,19 +963,16 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   - `public/brand/logo-banner.png`（200px 高的横版整标）→ **只给 README / 文档当头图**，标头仍不用它：
     字标是深墨色，放进深色主题的标头会直接看不见，而标头本来就有站点自己的排印文字（`logo_text`）。
     它**保留原件的近白底、不抠成透明**——同一张图在 GitHub 深色主题里是一块浅色卡片，抠透明就只剩看不见的一行字。
-  - 旧的 `logo-mark-on-{dark,light}.png` / `logo-lockup-on-{dark,light}.png`（里面还是旧名 `OmniNest`）与
-    `design/logo_{dark,light}.png`、两张旧核对图已删除。
-  为什么以前要两版、现在不用：旧素材是"浅发主体"或"深发主体"，一张只能压住一种底色，所以按**目标背景**
-  命名（不是按原件底色——这个坑记在脚本头注释里）。新素材是浅发 + 深色衣着，两头都立得住 ⇒ 一张够用。
-  **判据始终是"抠图后主体与背景的明暗关系"**：换标时先跑脚本，看 `frontend/design/preview.png`
-  （同一张标分别贴在深、浅两种底上 + 一行真实尺寸的图标）再决定要不要恢复两版。
+  - 旧的深浅两版素材（`logo-mark-on-{dark,light}.png` / `logo-lockup-on-{dark,light}.png`，里面还是旧名
+    `OmniNest`）与 `design/logo_{dark,light}.png` 已删除。**判据是"抠图后主体与背景的明暗关系"**：旧素材是
+    "浅发主体"或"深发主体"，一张只能压住一种底色；新素材浅发 + 深色衣着，两头都立得住 ⇒ 一张够用。
+    换标时先跑脚本，看 `frontend/design/preview.png`（同一张标分别贴在深、浅两种底上 + 一行真实尺寸的图标）
+    再决定要不要恢复两版。
   抠图**从四边泛洪**而不是全局阈值（头发接近底色，全局阈值会在人脸上打出洞）；底色取**边框像素的中位数**
   而不是均值（这张图下边压着深色衣服，均值会把底色拖成中灰 ⇒ 几乎什么都抠不掉）；新素材的透明被压平成了
   棋盘格（PNG 无 alpha 通道），所以只保留**最大连通块**——被主体包住的棋盘残屑都是独立小块，这样一并清掉。
-  浏览器图标：`favicon.ico`（16/32/48）**透明底 + 等比 contain**——不铺底、也不"居中裁成正方形"。
-  两版旧做法都被否过：先是一枚深墨**圆盘底**在浅色标签栏里成了一团黑，而方形裁切把人物上下各切掉一截、
-  看着像被挤压。新素材浅发 + 深色衣着，两种标签栏底色上都读得清，所以透明就够了（`design/preview.png`
-  下方两行就是它在深、浅两种底上的真实尺寸样子）。`apple-touch-icon.png` 例外，仍铺深墨底：
+  浏览器图标：`favicon.ico`（16/32/48）**透明底 + 等比 contain**——不铺深墨底（浅色标签栏里会成一团黑）、
+  也不"居中裁成正方形"（会把人物上下各切掉一截）。`apple-touch-icon.png` 例外，仍铺深墨底：
   iOS 会把透明区域按黑色渲染，不铺底等于让深色衣着融进黑底，圆角由系统遮罩。
   - 渲染收在一个组件里：`LogoContent`（内容）+ `LogoWordmark`（首页的 `<a>` 外壳）；
     详情页返回入口是 `<button>`，所以那里用 `LogoContent` 而不是把 `<a>` 套进 `<button>`（非法 HTML）。
@@ -999,31 +983,30 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
     而 Workers Builds 的 git clone 不解 LFS 指针 —— 那样 `dist/brand/*.png` 会变成 ~130 字节的指针文本，
     配上 `not_found_handling=single-page-application`（缺失路径返回 200 + index.html）与 CSP
     `img-src 'self'`，logo 与 favicon 都会**静默坏图**，控制台什么都不报。
-    已在 `.gitattributes` 里给 `public/brand/*.png` 单独关掉 filter/diff/merge/text
+    已在 `.gitattributes` 里给 `public/brand/*.png` 与 `public/brand/*.ico` 单独关掉 filter/diff/merge/text
     （`git check-attr` 实测四项均 unset）；原件 `frontend/design/` 继续走 LFS 无妨，它不参与构建。
-  - ⚠️ **内置默认不会覆盖已存的偏好**：`logo_type` 在生产库里已经是 `'text'`（当年保存过一次），
-    代码里的默认值 `'both'` 只对"该列为空"的情况生效。要让标头出图，去
-    「02 标头与导航 → 显示模式」选「图标 + 文字」保存一次即可（这是一次生产写，由你执行）。
-- **顶部进度条改为整页滚动进度**：`--page-progress` 以前由螺旋段（cabinet）自己的滚动比例写入，
-  而栏目顺序现在可配置 —— cabinet 一旦被拖到后面，前面几段全程读 0，进度条看着是坏的。
-  改在 `App` 顶层按 `scrollY / (scrollHeight - innerHeight)` 计算，与段落顺序无关；
-  螺旋段自己的投影动画仍用段内比例，没有改。
+  - ⚠️ **内置默认不会覆盖已存的偏好**：代码里的默认值只对"该列为空"生效，库里一旦存过值就以库值为准——
+    所以改了默认文案而线上没变，先读 `/api/site-settings` 看那一列是不是已有值，别改代码。
+    显示模式（`logo_type`）就属于这一类：要标头出图，去「02 标头与导航 → 显示模式」选「图标 + 文字」保存一次。
+    （线上这一列当前是 `'both'`，即已经出图；具体线上取值属于运维现场，不在本手册里维护。）
+- **顶部进度条是整页滚动进度**：`--page-progress` 在 `App` 顶层按 `scrollY / (scrollHeight - innerHeight)` 计算，
+  与段落顺序无关（栏目顺序可配置，若仍读螺旋段自己的滚动比例，cabinet 被拖到后面时前面几段全程读 0，
+  进度条看着就是坏的）；螺旋段自己的投影动画仍用段内比例，没有改。
 - **首页内容栏目顺序 = 管理端导航顺序**：`src/utils/navOrder.ts` 的 `orderHomeSections(navItems)` 是纯函数
   （闸门：`test/nav_order.test.mjs`），首页四段按它渲染；导航里没有的段落**排到末尾而不是消失**，
   外链/未知 id 不参与排版。`visible` 开关只管导航条上那个链接在不在，**不会**把对应段落从页面上删掉——
-  段落显隐仍由 `homeStatsVisible` 单独控制（现在挂在 **03 首页栏目**），两件事刻意不合并。
-- **栏目标题 = 导航标签本身**（迁移 `0014` 配套，`src/utils/sectionCopy.ts`）：`CABINET RECORD / 02` 那两段的
-  `<h2>` 以前是写死在组件里的字面量，于是"后台把 Catalogue 改成 Statistics"只管到导航条，栏目标题仍是老词。
-  现在四段标题都由 `navLabel(item, lang)` 从导航项取，与顶栏、页脚章节列、后台预览**同一份判据**
-  （闸门：`test/section_copy.test.mjs`），改名必然三处同变。刻意**不加**标题覆盖字段：加了就得配
-  "已被覆盖、不跟随导航名称"的指示，否则改导航名会被静默顶掉，等于把原 bug 换个形式留下。
-  eyebrow（`CABINET RECORD`、`ANATOMY / 03` 这类）按既定约定保持单语硬编码，只有其中 `/ 02` 的序号改为
-  随渲染位置派生（默认顺序下仍是 02，所以不产生视觉差异）。
+  段落显隐仍由 `homeStatsVisible` 单独控制（在 **03 首页栏目**），两件事刻意不合并。
+- **栏目标题 = 导航标签本身**（迁移 `0014` 配套，`src/utils/sectionCopy.ts`）：四段标题都由
+  `navLabel(item, lang)` 从导航项取，与顶栏、页脚章节列、后台预览**同一份判据**
+  （闸门：`test/section_copy.test.mjs`），所以后台改名必然三处同变。刻意**不加**标题覆盖字段：
+  加了就得配"已被覆盖、不跟随导航名称"的指示，否则改导航名会被静默顶掉。
+  eyebrow（`CABINET RECORD`、`ANATOMY / 03` 这类）保持单语硬编码，只有其中 `/ 02` 的序号随渲染位置派生
+  （默认顺序下仍是 02，不产生视觉差异）。
 - **挑战 / 解决方案改为中英双语**（迁移 `0011`）：库里新增 `challenge_json` / `solution_json`（`{en, zh}`），
   沿用 `description_json` 那一套（`EDITABLE_JSON_COLUMNS` + 管理端投影守卫）。
   - **旧单列降级为只读兜底，不双写**：新列为空时把旧列的值当中文（历史内容确实都是中文写的），
     所以老标本不会因为这次改动整段变空；`test/bilingual.test.mjs` 锁住这条退化路径。
-  - **"没写过"与"被清空"必须分得开**（本轮实测到反例，早期版本写成两者都回退，会让删除永远不生效）：
+  - **"没写过"与"被清空"必须分得开**（若两者都回退旧列，删除就永远不生效）：
     抽屉保存的永远是完整一对，清空后写入 `{"en":"","zh":""}` = **显式空记录，不再回退旧列**；
     只有 `''`、`'{}'`、坏 JSON，以及 `'[]'` / `'null'` / `'0'` / `'"abc"'` 这类垃圾形状才算"没写过"，
     继续用旧列兜底（垃圾形状**不会**被当成正文渲染，页面上不会出现引号或字面量 null）。
@@ -1032,25 +1015,27 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
   - 前台规则与 README 一致：当前语言没有内容时显示另一种语言并标注「中文原文 / ENGLISH 原文」
     （`pickBilingual` 的 `fallback` 标志），两栏都空才显示「尚未记录」。
   - 管理端抽屉里是「中文 / English」两个并排输入框（`BilingualField`），窄屏收成单列。
-- **`description` 现在与挑战/方案同一套规则**（此前是"同一个概念两种规则"）：三处读侧投影改用
-  `asBilingual(row.description_json)`（trim、形状校验、默认值统一为 `{en:'',zh:''}`——旧写法管理端默认 `{}`
-  会让 `description.en` 是 `undefined`）；写侧 POST/PUT 共用 `normalizeJsonValue`；
-  详情页与卡片改用 `pickBilingual`，缺当前语言时回退并标注「原文」（卡片那处不加标注，那里是提要位置）。
-  - **同步与导入不再两个口径**：以前同步首次填充写 `{en:t, zh:t}`、导入写 `{en:t, zh:''}`。
-    现在两处都走 `pairFromSingleText`：**含 CJK 就只填中文，否则只填英文**。
-    为什么不同塞两边——同塞会让"当前语言有内容"成立，中文站于是把英文简介当中文文案显示，
+- **`description` 与挑战 / 方案同一套规则**：三处读侧投影走 `asBilingual(row.description_json)`
+  （trim、形状校验、默认值统一为 `{en:'',zh:''}`——默认 `{}` 会让 `description.en` 是 `undefined`）；
+  写侧 POST/PUT 共用 `normalizeJsonValue`；详情页与卡片用 `pickBilingual`，缺当前语言时回退并标注「原文」
+  （卡片那处不加标注，那里是提要位置）。
+  - **同步与导入同一口径**：两处都走 `pairFromSingleText`——**含 CJK 就只填中文，否则只填英文**。
+    不同塞两边的理由：同塞会让"当前语言有内容"成立，中文站于是把英文简介当中文文案显示，
     **连「原文」标注都不给**，那是对访客撒谎。猜错的代价只是标注方向反了，可见内容不变。
-  - **抽屉里两个简介框去掉了 `required`**：单语填充现在是正常状态，留着 required 等于
-    逼管理员编一段翻译才能保存；改为框下说明"至少填一种"。
+  - **抽屉里两个简介框不设 `required`**：单语填充是正常状态，留着 required 等于
+    逼管理员编一段翻译才能保存；框下说明"至少填一种"。
   - 闸门：`test/bilingual.test.mjs`（读侧统一 / 单语配对器 / POST-PUT 同 body 同落库）、
     `test/sync_update.test.mjs` case 4a/4a2（英文描述只进 en、中文描述只进 zh）。
-- **同步可以只挑几个标本**：`POST /api/admin/github-sync` 现在接受可选 `ids`（参数化 `IN` 列表）。
+- **同步可以只挑几个标本**：`POST /api/admin/github-sync` 接受可选 `ids`（参数化 `IN` 列表）。
   - 语义：**省略 = 全表**（老行为不变）；**空数组 = 400 拒绝**，绝不退化成全表——
     那会变成"界面显示选了 0 个、实际把整个馆藏都刷了一遍"的假状态（闸门：`test/sync_scope.test.mjs`）。
-  - 未知 id 只是匹配不到，返回 200 + 空结果，不报错；`ids` 入参最多 100 条（D1 单语句绑定参数上限），
-    单次实际处理最多 10 个（抓取文档时 2 个，见上方子请求预算），超出 400 并提示分批。
-  - 管理端「GitHub 同步」新增「同步范围」勾选卡：默认全选（等价于以前点一下按钮的效果），
-    另有全选 / 反选 / 清空，按钮上直接写「(${N})」，一个都没选时按钮禁用并说明原因。
+  - 未知 id 只是匹配不到，返回 200 + 空结果，不报错；`ids` 入参最多 100 条（`SYNC_ID_LIMIT`，
+    与一条语句的绑定参数规模相称），单次实际处理最多 10 个（抓取文档时 2 个，见上方子请求预算），超出 400 并提示分批。
+  - 管理端「GitHub 同步」的「同步范围」勾选卡：按钮是「全选本批（N）」——N 取当前模式的上限
+    （不抓文档 `SYNC_MAX_ROWS`，抓文档 `SYNC_MAX_DOC_ROWS`，两个数与 Worker 共用 `src/utils/syncLimits.ts`）。
+    以前那里是「全选」= 不带 `ids`（全表），馆藏一旦超过一批上限就必定被服务端 400，按钮写着却永远点不动。
+    另有反选 / 清空；反选可能选出超过一批的数量，所以**发起前客户端先按同一个上限拦住**，
+    不再白跑一次 Worker 与 GitHub 配额。一个都没选时按钮禁用并说明原因。
     附带收益：GitHub 匿名配额只有 60/小时，现在能只刷刚改过的那一两个仓库。
   - 探针 `bash scripts/usage-probe.sh` 的第 5 节实测这五条（单个=只跑它 / 抓文档选 3 个=400 且不发出任何
     GitHub 请求 / 空数组=400 / 形态不对=400 / 未知 id=200 且 0 条）；第 4 节实测双语写读往返（先快照、测完按快照复原）。

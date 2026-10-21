@@ -1,5 +1,9 @@
 -- 0002_seed_initial_data.sql: 注入由 App.tsx 抽取的 4 个初始项目数据
-INSERT OR REPLACE INTO projects (
+-- 用 INSERT OR IGNORE 而不是 OR REPLACE：REPLACE 是"先删后插"，会把 0007/0008/0010/0011/0012
+-- 之后加上的列（README/Compose、演示入口、预览图、双语、协议）连带清成默认值——
+-- 一旦台账读不到或被误登记导致本文件重跑，那四件标本的全部编辑成果就没了。
+-- 空库上两种写法结果一致（都是插入这 4 行），所以这只影响"重放"这一种情况。
+INSERT OR IGNORE INTO projects (
     id, date, status, name, cn, latin, habitat, type, language, stars, year, shape, version, updated, repository, challenge, solution, description_json, features_json, metrics_json, timeline_json, internal_notes, sort_order
 ) VALUES 
 (

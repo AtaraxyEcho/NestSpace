@@ -1,3 +1,5 @@
 User-agent: *
 Allow: /
 Disallow: /api/
+# 管理端不参与收录：公开站上的 /admin 会跳到 admin.<主域>（那边还有 Access 挡着）
+Disallow: /admin

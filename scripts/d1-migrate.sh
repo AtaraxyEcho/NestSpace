@@ -7,7 +7,8 @@
 #   bash scripts/d1-migrate.sh remote --baseline      # 老库基线：把现有迁移全部登记为"已应用"，不执行
 #
 # 为什么需要记录表：
-#   0002 用的是 INSERT OR REPLACE，盲目重跑会把 001–004 号标本重置回种子值、抹掉后台编辑。
+#   0002 原本是 INSERT OR REPLACE（重放会抹掉 001–004 后来的编辑与后加列），现改成 INSERT OR IGNORE；
+#   但"只执行未登记的迁移"这条纪律照旧：登记一次就不会再动已存在的行，也不会拿生产库重复实验。
 #   因此本脚本用 `_migrations` 表登记每个已执行的文件，**只执行未登记的迁移**。
 #
 # 老库（此前手工逐条迁移、没有记录表）：
@@ -31,11 +32,6 @@ for arg in "$@"; do
   esac
 done
 
-if ! command -v wrangler > /dev/null 2>&1; then
-  echo "找不到 wrangler，请先安装（npm i -g wrangler）" >&2
-  exit 1
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MIGRATIONS_DIR="$REPO_ROOT/migrations"
@@ -48,9 +44,19 @@ TRACK_TABLE="_migrations"
   exit 1
 }
 
+# 优先用 devDependencies 里钉住的那份（版本与 CI/机器一致）；还没 install 时才回落到 PATH
+if [ -x "$FRONTEND_DIR/node_modules/.bin/wrangler" ]; then
+  WRANGLER="$FRONTEND_DIR/node_modules/.bin/wrangler"
+elif command -v wrangler > /dev/null 2>&1; then
+  WRANGLER="wrangler"
+else
+  echo "找不到 wrangler：先在 frontend/ 跑 pnpm install（仓库钉了版本），或全局安装" >&2
+  exit 1
+fi
+
 # 用 frontend/ 下的相对路径调用 wrangler：绝对 MSYS 路径（/d/...）Windows 版 wrangler 读不懂
 sql_command() {
-  (cd "$FRONTEND_DIR" && wrangler d1 execute "$DB_NAME" --"$SCOPE" --json --command "$1" 2> /dev/null)
+  (cd "$FRONTEND_DIR" && "$WRANGLER" d1 execute "$DB_NAME" --"$SCOPE" --json --command "$1" 2> /dev/null)
 }
 
 # 列出某个迁移文件可校验的 DDL 目标，每行 `column|表|列` 或 `table|表名`
@@ -147,12 +153,23 @@ if ! sql_command "CREATE TABLE IF NOT EXISTS $TRACK_TABLE (name TEXT PRIMARY KEY
   exit 1
 fi
 
-applied="$(sql_column name < <(sql_command "SELECT name FROM $TRACK_TABLE ORDER BY name;"))"
+# 读台账必须自己确认可读。「读失败」和「台账为空」不能混成一回事：
+# 把它当成空表，下面的老库保护也一起失效（它的判据同样是一次 sql_command），
+# 于是脚本会把 0001…0017 在生产库上从头跑一遍。
+registry="$(sql_command "SELECT name FROM $TRACK_TABLE ORDER BY name;")"
+if ! printf '%s' "$registry" | grep -q '"success": *true'; then
+  echo "无法读取迁移记录表 $TRACK_TABLE（wrangler 没有返回成功 JSON）。" >&2
+  echo "为避免把已应用的迁移当成没应用而整批重跑，这里直接退出。" >&2
+  echo "先确认库名与登录态：wrangler d1 execute $DB_NAME --$SCOPE --command \"SELECT 1;\"" >&2
+  exit 1
+fi
+applied="$(printf '%s' "$registry" | sql_column name)"
 
-# 2) 老库保护：结构已存在但没有任何记录 → 默认拒绝，避免重跑 0002 覆盖种子数据
+# 2) 老库保护：结构已存在但没有任何记录 → 默认拒绝，避免把整批迁移在生产库上重跑一遍
 if [ "$BASELINE" -eq 0 ] && [ -z "$applied" ] && sql_command "SELECT name FROM sqlite_master WHERE type='table' AND name='projects';" | grep -q '"name": *"projects"'; then
   echo "检测到该库已有 projects 表，但没有任何迁移记录。" >&2
-  echo "直接执行会重跑 0002 的 INSERT OR REPLACE，把 001–004 号标本重置回种子值。" >&2
+  echo "直接执行会把 0001…0017 全跑一遍：建表与加列会被当成「结构已在」放过，" >&2
+  echo "但这一趟等于没人监督地在生产库上实验。" >&2
   echo "确认库结构已是最新后，请先登记一次基线：" >&2
   echo "    bash scripts/d1-migrate.sh $SCOPE --baseline" >&2
   exit 1
@@ -160,8 +177,14 @@ fi
 
 record() {
   local output
+  # 文件名直接拼进 SQL，所以按字符集校验（不是 glob：`*` 会把引号也放进来）。
+  # 迁移目录里只可能是 `NNNN_名字.sql`，其余一律拒绝登记。
+  if [[ ! "$1" =~ ^[0-9]{4}_[A-Za-z0-9_]+\.sql$ ]]; then
+    echo "拒绝登记不合形态的迁移文件名：$1" >&2
+    return 1
+  fi
   output="$(sql_command "INSERT OR REPLACE INTO $TRACK_TABLE (name) VALUES ('$1');")"
-  # 登记失败不能静默：下次运行会重跑该迁移，0002 这类 INSERT OR REPLACE 会覆盖编辑过的种子行
+  # 登记失败不能静默：下次运行会重跑该迁移，覆盖型/数据型迁移的重放都会动到已存在的数据
   printf '%s' "$output" | grep -q '"success": *true'
 }
 
@@ -201,7 +224,7 @@ missing_targets() {
 # 执行一个迁移文件：成功或补齐则 0，补不齐则 1（绝不把未生效的迁移登记成已应用）
 run_migration() {
   local file="$1" name="$2" output missing stmt
-  output="$(cd "$FRONTEND_DIR" && wrangler d1 execute "$DB_NAME" --"$SCOPE" --file="../migrations/$name" 2>&1)"
+  output="$(cd "$FRONTEND_DIR" && "$WRANGLER" d1 execute "$DB_NAME" --"$SCOPE" --file="../migrations/$name" 2>&1)"
 
   if printf '%s' "$output" | grep -q '"success": *true'; then
     if record_or_fail "$name"; then
@@ -315,7 +338,12 @@ while IFS= read -r file; do
     continue
   fi
 
-  run_migration "$file" "$name"
+  if ! run_migration "$file" "$name"; then
+    # 迁移之间有硬依赖（0005 之后要用 0004 的列）。继续往下跑只会制造
+    # "后面的也登记了、结构却半吊子"的新状态，停在这里才接近可恢复。
+    echo "!! $name 未成功，后面的迁移一律不执行；修好后重跑本脚本（已成功的会被跳过）" >&2
+    break
+  fi
 done < <(find "$MIGRATIONS_DIR" -maxdepth 1 -name '*.sql' | sort)
 
 echo

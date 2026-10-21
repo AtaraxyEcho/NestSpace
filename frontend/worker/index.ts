@@ -6,7 +6,8 @@ import { getCookie } from 'hono/cookie'
 // allowImportingTsExtensions。管理端表单的即时校验必须走同一份规则，否则会出现
 // "前端说不违法、保存却 400"——那是本项目在后台明令禁止的假状态。
 // 本文件仍再导出 sanitizeImageUrl，闸门测试既有的 import 路径因此不必改。
-import { PREVIEW_IMAGE_LIMIT, sanitizeImageUrl } from '../src/utils/previewRules.ts'
+import { PREVIEW_IMAGE_LIMIT, sanitizeImageUrl, IMAGE_PROXY_HOSTS } from '../src/utils/previewRules.ts'
+import { SYNC_MAX_ROWS, SYNC_MAX_DOC_ROWS } from '../src/utils/syncLimits.ts'
 // 双语字段（挑战/方案）的读侧规则，与前台/管理端共用同一份（旧单列只读兜底）
 import { asBilingual, pairFromSingleText } from '../src/utils/bilingual.ts'
 import { canonicalPathFor, isValidProjectId } from '../src/utils/siteRoute.ts'
@@ -52,12 +53,11 @@ const QUERY_ROW_LIMIT = 500
 // D1 单条语句最多绑定 100 个参数；同步接口的 IN (...) 直接由 ids 占位，超过会在执行层报错
 const SYNC_ID_LIMIT = 100
 // 免费版每次调用 50 个子请求（GitHub fetch 与 D1 查询都计入），D1 也是每次调用 50 次查询。
-// 批次上限就从这里算出来（每行的最坏成本见 syncRowCost，闸门 case 钉住算术）：
+// 批次上限就从这里算出来（常量与前端文案共用 `src/utils/syncLimits.ts`，每行的最坏成本见 syncRowCost，
+// 闸门 case 钉住算术）：
 //   不开文档：10 行 × 3 + SELECT + Access 取证书 = 32
 //   开文档抓取：2 行 × 20 + 2 = 42
 // 超了就让管理员分批，绝不写到一半再 500——那是"部分落库 + 没有逐行结果"的最糟形态。
-const SYNC_MAX_ROWS = 10
-const SYNC_MAX_DOC_ROWS = 2
 // 入口模块的具名导出只能是函数或 ExportedHandler：标量导出会让 workerd 直接起不来
 // （踩过两次，闸门 test/sync_scope.test.mjs 有一条静态钉子）。需要给闸门读的就包成函数。
 export const syncCaps = () => ({ ids: SYNC_ID_LIMIT, rows: SYNC_MAX_ROWS, docRows: SYNC_MAX_DOC_ROWS })
@@ -261,17 +261,9 @@ const IMG_CACHE_CONTROL = 'public, max-age=604800'
 /** 允许经代理**同源直出**的图片类型（栅格）。SVG 等矢量是活动内容，不能同源返回 */
 const RASTER_IMAGE_TYPE_RE = /^image\/(png|jpe?g|webp|gif|avif|bmp)$/i
 
-// 只代理真实的图源主机。**绝不要把转换服务自身（wsrv.nl）列进来**：
-// 那等于开放 `/api/img?src=https://wsrv.nl/?url=<任意地址>`，白名单会被绕开，
-// 还会把任意内容缓存到我们自己的边缘缓存里。
-const IMG_ALLOWED_HOSTS = new Set([
-  'raw.githubusercontent.com',
-  'user-images.githubusercontent.com',
-  'camo.githubusercontent.com',
-  'objects.githubusercontent.com',
-  'github.com',
-  'cdn.jsdelivr.net',
-])
+// 图源白名单住在 `src/utils/previewRules.ts` 的 IMAGE_PROXY_HOSTS，**与前端同一份**：
+// 两边各写一遍时闸门只看得到 Worker，前端漂移会把名单外的地址送去绕代理而 Worker 回 404（图挂）。
+// ⚠️ 转换服务自身（wsrv.nl / images.weserv.nl）绝不允许进这份名单，否则代理会被当成开放重定向。
 
 /** 宽度参数规范化：缺失或非法用默认值，并夹到 [MIN, MAX] */
 export function normalizeImageWidth(raw: unknown): number {
@@ -280,9 +272,22 @@ export function normalizeImageWidth(raw: unknown): number {
   return Math.min(IMG_WIDTH_MAX, Math.max(IMG_WIDTH_MIN, Math.round(value)))
 }
 
+// 前端只用到三档（plate / thumb / zoom）。以前 `w` 可任意取 64–2000 的整数，
+// 每次「源图 × 宽度」都是独立的缓存键与一次真实转换 ⇒ 匿名调用者能靠换 w 把转换额度烧光。
+// 现在吸附到最近的一档：合法请求不受影响，键空间从约 1900 档压到 3 档。
+const IMG_SNAP_WIDTHS = [200, 1600, 2000] as const
+
+/** 把任意合法宽度吸附到前端实际使用的三档之一（取最近） */
+export function snapImageWidth(width: number): number {
+  return IMG_SNAP_WIDTHS.reduce(
+    (best, candidate) => (Math.abs(candidate - width) < Math.abs(best - width) ? candidate : best),
+    IMG_SNAP_WIDTHS[0],
+  )
+}
+
 /** 是否允许经转换服务代理的图源主机 */
 export function isProxyableImageHost(host: unknown): boolean {
-  return IMG_ALLOWED_HOSTS.has(String(host ?? '').trim().toLowerCase())
+  return IMAGE_PROXY_HOSTS.has(String(host ?? '').trim().toLowerCase())
 }
 
 /** 构造免费转换服务的地址（统一压成 webp + 指定宽度） */
@@ -294,6 +299,12 @@ export function buildWeservUrl(src: string, width: number): string {
 app.get('/img', async (c) => {
   // 未命中缓存时每次都要 Worker 去上游取图并转码，是本站最贵的一个端点——先按 IP 粗拦一层
   if (!allowImageRequest(clientIpOf(c), Date.now())) {
+    return c.text('Too Many Requests', 429, { 'Retry-After': '60' })
+  }
+  // 第二层：同 colo 共享的 Cache API 桶。isolate 桶会随 isolate 轮换失效，
+  // 这个端点又是唯一"每次未命中都要借第三方转码"的公开入口，值得多一层。
+  const minuteBucket = String(Math.floor(Date.now() / 60_000))
+  if (!(await allowCachedRate(c, 'img-min', IMG_RATE_LIMIT, 60, minuteBucket))) {
     return c.text('Too Many Requests', 429, { 'Retry-After': '60' })
   }
   const rawSrc = c.req.query('src') ?? ''
@@ -314,11 +325,21 @@ app.get('/img', async (c) => {
   if (!isProxyableImageHost(target.hostname)) {
     return c.text('Image host not allowed', 404)
   }
+  // 只允许默认端口：`URL.hostname` 会丢掉端口，不拦的话 `https://github.com:8443/x`
+  // 也能过白名单（转换服务要替我们去连那个端口）。
+  if (target.port && target.port !== '80' && target.port !== '443') {
+    return c.text('Image host not allowed', 404)
+  }
 
-  const width = normalizeImageWidth(c.req.query('w'))
+  // 宽度吸附到三档；缓存键再去掉 query/fragment——否则匿名调用者换一个随机查询串
+  // 就得到一个新缓存键、一次新转换。真正取图仍用原地址（签名类 URL 的 query 可能是必需的）。
+  const width = snapImageWidth(normalizeImageWidth(c.req.query('w')))
   const upstream = buildWeservUrl(target.toString(), width)
+  const canonical = new URL(target.toString())
+  canonical.search = ''
+  canonical.hash = ''
   const cache = typeof caches === 'undefined' ? undefined : caches.default
-  const cacheKey = new Request(upstream, { method: 'GET' })
+  const cacheKey = new Request(buildWeservUrl(canonical.toString(), width), { method: 'GET' })
   if (cache) {
     const cached = await cache.match(cacheKey)
     // 缓存命中的响应头是只读的，直接返回会让全局安全头中间件设置失败（500），
@@ -456,10 +477,14 @@ const allowPageView = createRateLimiter({
 // 1000 条/天 ≈ 最坏 9000 行写入，给正常流量留足空间，也把单 IP 的放大倍数压到日额度的 ~9%。
 // 同样是 isolate/Cache API 的尽力而为状态，挡不住 IP 轮换——跨机房压力仍是免费方案的边界。
 const USAGE_DAILY_LIMIT = 1000
+// 日桶的键空间必须比分钟桶大得多：窗口是 24 小时，`evictExpired` 只会清掉满一天的键，
+// 一个 isolate 若在一天里见过超过 storeMax 个来源 IP，就会装满 ⇒ 新键不记账 = 静默放行。
+// 5 万个键约 5–7 MB（每个是一把 IP 字符串 + 两个数），仍受 isolate 内存上限约束、不会无界增长。
+const USAGE_DAILY_STORE_MAX = 50_000
 const allowUsageDaily = createRateLimiter({
   limit: USAGE_DAILY_LIMIT,
   windowMs: 24 * 60 * 60 * 1000,
-  storeMax: USAGE_STORE_MAX,
+  storeMax: USAGE_DAILY_STORE_MAX,
 })
 
 /**
@@ -471,7 +496,9 @@ const allowUsageDaily = createRateLimiter({
  * 并发读改写会少计），所以它是"把单 IP 的放大倍数压下来"，不是全局精确配额。
  * 跨机房、IP 轮换的分布式压力仍超出免费代码侧的能力边界；WAF/DO 是可选收紧项。
  */
-async function allowCachedRate(
+// 导出给闸门用桩 Cache 验证这一层的判据（函数导出对 workerd 安全；标量导出会让它起不来）。
+// ⚠️ 闸门只能证明"缓存存在时这层算得对"；"生产上它真的存在"要另有一次真实观测才算。
+export async function allowCachedRate(
   c: any,
   name: string,
   limit: number,
@@ -822,7 +849,7 @@ async function recordVisitEvent(
 
   // imgfail 的主机名只接受图片代理白名单里的图源，其余不落 host（同样是基数防线）
   const host =
-    input.event === 'imgfail' && IMG_ALLOWED_HOSTS.has(input.host) ? input.host : ''
+    input.event === 'imgfail' && IMAGE_PROXY_HOSTS.has(input.host) ? input.host : ''
 
   // 非页面浏览：只保留按 (事件, 方式, 主机名, 引用) 聚合的计数
   if (input.event !== 'pageview') {
@@ -903,7 +930,19 @@ async function recordVisitEvent(
     )
   }
 
-  await c.env.DB.batch(statements)
+  try {
+    await c.env.DB.batch(statements)
+  } catch (err) {
+    // 去重行是先在批外插入的：批失败时不撤回它，这个访客当天重试会拿到 changes=0，
+    // UV 就永远少计一次。撤回后重试仍能正确记一次（并发同访客最多也只多算一次）。
+    if (isNewVisitorToday) {
+      await c.env.DB.prepare('DELETE FROM visit_day_visitor WHERE day = ? AND vkey = ?')
+        .bind(day, vkey)
+        .run()
+        .catch(() => {})
+    }
+    throw err
+  }
 }
 
 // ==========================================
@@ -1001,13 +1040,6 @@ export function isAccessIdentityAllowed(
 adminApp.use('*', async (c, next) => {
   const key = clientKey(c)
   const now = Date.now()
-  if (isLockedOut(key, now)) {
-    return c.json(
-      { error: '429 Too Many Requests: 鉴权失败次数过多，请稍后再试' },
-      429,
-      { 'Retry-After': String(Math.ceil(AUTH_FAILURE_WINDOW_MS / 1000)) },
-    )
-  }
 
   // CSRF 纵深：控制台在"已被 Access 放行、没输过口令"时是**纯 Cookie 认证**，
   // 此时一个跨站页面发出的简单请求（text/plain 属于 CORS 免预检类型）也会带上 CF_Authorization。
@@ -1054,8 +1086,8 @@ adminApp.use('*', async (c, next) => {
       if (verdict.valid) {
         const identity = readJwtIdentity(jwt)
         if (!isAccessIdentityAllowed(identity, c.env.ACCESS_ALLOWED_EMAILS)) {
+          // 身份由 Access 验签过，只是不在用途名单里：不记口令失败次数（它防的是猜口令）
           console.warn('Admin auth rejected: identity not in allowlist')
-          noteAuthFailure(key, now)
           return c.json({ error: '403 Forbidden: 该身份不在管理端允许名单内' }, 403)
         }
         authFailures.delete(key)
@@ -1064,6 +1096,15 @@ adminApp.use('*', async (c, next) => {
       }
       console.warn('Admin auth rejected via Access JWT:', verdict.reason)
     }
+  }
+
+  // 走完两道防线都没过才看锁定：到这里的请求没有有效凭据，锁它不影响任何人正常登录
+  if (isLockedOut(key, now)) {
+    return c.json(
+      { error: '429 Too Many Requests: 鉴权失败次数过多，请稍后再试' },
+      429,
+      { 'Retry-After': String(Math.ceil(AUTH_FAILURE_WINDOW_MS / 1000)) },
+    )
   }
 
   // 没带任何凭据 → 401（让客户端知道该提供凭据）；带了但不对 → 403（不提示重试）
@@ -1075,7 +1116,9 @@ adminApp.use('*', async (c, next) => {
     )
   }
 
-  noteAuthFailure(key, now)
+  // 只把"带了口令但不对"记为失败：过期/伪造的 Access 令牌与无效身份不计，
+  // 否则访客带一个过期 cookie 刷新几次就能把操作者自己的 IP 锁十分钟。
+  if (providedSecret) noteAuthFailure(key, now)
   return c.json({ error: '403 Forbidden: 管理端接口未授权访问' }, 403)
 })
 
@@ -1099,8 +1142,18 @@ async function readJsonBody(c: any): Promise<Record<string, any> | null> {
 // 管理端：获取全量项目（含草稿、归档、内部笔记）
 adminApp.get('/projects', async (c) => {
   try {
+    // 列表**不带四份长文档**（每份上限 10 万字符 × 最多 500 行）：抽屉打开时再按需取全文。
+    // has_* 让列表能显示"这份文档有没有"，而不必把正文一起搬过来。
     const { results } = await c.env.DB.prepare(`
-      SELECT * FROM projects ORDER BY sort_order ASC, date DESC LIMIT ${QUERY_ROW_LIMIT}
+      SELECT id, date, status, name, cn, latin, habitat, type, language, stars, year, shape, version, updated,
+             repository, license, internal_notes, sort_order, demo_url, demo_enabled,
+             challenge_json, solution_json, description_json, features_json, metrics_json, timeline_json,
+             preview_image_url, preview_images_json,
+             (readme_zh <> '') AS has_readme_zh,
+             (readme_en <> '') AS has_readme_en,
+             (compose_dev <> '') AS has_compose_dev,
+             (compose_prod <> '') AS has_compose_prod
+      FROM projects ORDER BY sort_order ASC, date DESC LIMIT ${QUERY_ROW_LIMIT}
     `).all()
 
     const formatted = results.map(adminProjectRow)
@@ -1109,6 +1162,24 @@ adminApp.get('/projects', async (c) => {
   } catch (err: any) {
     console.error('Admin fetch error:', err)
     return c.json({ error: 'Failed to fetch admin projects' }, 500)
+  }
+})
+
+// 管理端：单件详情。列表不带四份长文档，抽屉打开时按这个接口取全文（含 readme/compose）。
+adminApp.get('/projects/:id', async (c) => {
+  try {
+    const row = await c.env.DB.prepare('SELECT * FROM projects WHERE id = ?')
+      .bind(c.req.param('id'))
+      .first()
+    if (!row) {
+      return c.json({ error: 'Project not found' }, 404)
+    }
+    return c.json(adminProjectRow(row))
+  } catch (err: any) {
+    const typed = writeColumnErrorResponse(err)
+    if (typed) return typed
+    console.error('Admin project detail error:', err)
+    return c.json({ error: 'Failed to fetch project' }, 500)
   }
 })
 
@@ -1330,10 +1401,12 @@ adminApp.post('/projects', async (c) => {
     await c.env.DB.prepare(`
       INSERT INTO projects (
         id, date, status, name, cn, latin, habitat, type, language, stars, year, shape, version, updated, repository,
+        license,
         demo_url, demo_enabled,
         challenge_json, solution_json, description_json, features_json, metrics_json, timeline_json, internal_notes, sort_order,
+        readme_zh, readme_en, compose_dev, compose_prod,
         preview_image_url, preview_images_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       body.id,
       body.date || new Date().toISOString().slice(0, 7).replace('-', '.'),
@@ -1347,9 +1420,12 @@ adminApp.post('/projects', async (c) => {
       body.stars || '0',
       body.year || new Date().getFullYear().toString(),
       body.shape || 'aperture',
-      body.version || 'v1.0.0',
+      // 以前这里默认 'v1.0.0'：没有 Release 的项目会被编造一个版本，且同步只在有 tag 时才写，
+      // 于是这个假版本会一直留着。空串表示"无 Release"，前台会省掉版本位（与手册一致）。
+      body.version || '',
       body.updated || new Date().toISOString().slice(0, 10).replace(/-/g, '.'),
       body.repository || '',
+      String(body.license ?? '').trim(),
       demoUrl,
       demoEnabled,
       normalizeJsonValue('challenge', body.challenge),
@@ -1361,6 +1437,12 @@ adminApp.post('/projects', async (c) => {
       normalizeJsonValue('timeline', body.timeline),
       body.internal_notes || '',
       body.sort_order || 0,
+      // 文档与协议：PUT 白名单里一直有这五列，但 INSERT 以前漏了 ⇒ 新建时手填的内容
+      // 会被静默丢弃（201 + "已保存"，重开却是空的）。两条写路径必须落同一批列。
+      String(body.readme_zh ?? ''),
+      String(body.readme_en ?? ''),
+      String(body.compose_dev ?? ''),
+      String(body.compose_prod ?? ''),
       previewImageUrl,
       JSON.stringify(previewImages),
     ).run()
@@ -1551,11 +1633,21 @@ adminApp.put('/projects/:id', async (c) => {
     assignments.push('updated_at = CURRENT_TIMESTAMP')
     values.push(id)
 
+    // 演示开关与地址是一对约束：把判据也放进 WHERE，避免"检查后、写入前"被另一次保存插进来
+    // 落成 demo_enabled=1 而 demo_url 为空（后台显示已上线、前台没有按钮）。
+    const demoPairTouched = demoUrlPatch !== undefined || demoEnabledPatch !== undefined
+    const guard = demoPairTouched ? " AND (demo_enabled = 0 OR demo_url <> '')" : ''
     const result = await c.env.DB.prepare(
-      `UPDATE projects SET ${assignments.join(', ')} WHERE id = ?`,
+      `UPDATE projects SET ${assignments.join(', ')} WHERE id = ?${guard}`,
     ).bind(...values).run()
 
     if ((result.meta.changes ?? 0) === 0) {
+      if (demoPairTouched) {
+        const exists = await c.env.DB.prepare('SELECT id FROM projects WHERE id = ?').bind(id).first()
+        if (exists) {
+          return c.json({ error: '开启演示入口前必须先填写演示地址' }, 400)
+        }
+      }
       return c.json({ error: 'Project not found' }, 404)
     }
     return c.json({ success: true, message: '项目更新成功' })
@@ -1575,6 +1667,13 @@ adminApp.delete('/projects/:id', async (c) => {
     if ((result.meta.changes ?? 0) === 0) {
       return c.json({ error: 'Project not found' }, 404)
     }
+    // 台账里按标本编号聚合的行也一起删：否则"热门页面"会永久保留一件已删标本，
+    // 而新建标本沿用 `max+1` 的编号时还会**继承**它的历史 PV（删除后重建同号 = 数据串台）。
+    // 清理是尽力而为：0016 尚未迁移时这两张表不存在，不该让删除操作失败。
+    await c.env.DB.batch([
+      c.env.DB.prepare('DELETE FROM visit_page_day WHERE ref = ?').bind(id),
+      c.env.DB.prepare('DELETE FROM visit_event_day WHERE ref = ?').bind(id),
+    ]).catch(() => {})
     return c.json({ success: true, message: '项目已删除' })
   } catch (err: any) {
     console.error('Admin delete error:', err)
@@ -2168,6 +2267,23 @@ export function buildTimelineEvents(
     .slice(0, TIMELINE_MAX_EVENTS)
 }
 
+/**
+ * 同步时"只在空白处填充"的列 → 该列自己的"空"判据（写回时放进 SQL CASE，
+ * 保证不会覆盖同步期间管理员刚补的内容）。
+ * 注意预览相册的"空"是 `'[]'`、描述 JSON 的"空"是 `'{"en":"","zh":""}'`——
+ * 直接拿 `= ''` 判会把这两种默认值当成"已有内容"，同步就再也不会自动补图/补简介。
+ */
+const SYNC_FILL_ONLY_CONDITIONS: Record<string, string> = {
+  license: `(license IS NULL OR license = '')`,
+  readme_zh: `(readme_zh IS NULL OR readme_zh = '')`,
+  readme_en: `(readme_en IS NULL OR readme_en = '')`,
+  compose_dev: `(compose_dev IS NULL OR compose_dev = '')`,
+  compose_prod: `(compose_prod IS NULL OR compose_prod = '')`,
+  preview_image_url: `(preview_image_url IS NULL OR preview_image_url = '')`,
+  preview_images_json: `(preview_images_json IS NULL OR preview_images_json IN ('', '[]'))`,
+  description_json: `(description_json IS NULL OR description_json IN ('', '{}', 'null', '{"en":"","zh":""}'))`,
+}
+
 export function buildProjectSyncUpdate(
   row: SyncSourceRow,
   meta: RepoMeta,
@@ -2186,10 +2302,11 @@ export function buildProjectSyncUpdate(
   if (pushed) columns.updated = pushed
 
   const latestRelease = String(releaseList[0]?.tag_name ?? '').trim()
-  if (latestRelease) columns.version = latestRelease
-
   const language = String(meta.language || '').trim()
-  if (language) columns.language = language
+  // 这四个字段归 GitHub 所有（手册：GitHub 权威、每次覆盖）。即使仓库删了 Release、
+  // 换了语言或清空 topics，也要把空值写回去——只在非空时写会让面板永远停在旧值上。
+  columns.version = latestRelease
+  columns.language = language
 
   const created = String(meta.created_at || '').slice(0, 7).replace(/-/g, '.')
   if (created) {
@@ -2197,9 +2314,8 @@ export function buildProjectSyncUpdate(
     columns.year = created.slice(0, 4)
   }
 
-  // 时间线由 GitHub 事实生成（与字段归属一致：权威字段每次覆盖）
-  const timeline = buildTimelineEvents(meta, releaseList)
-  if (timeline.length > 0) columns.timeline_json = JSON.stringify(timeline)
+  // 时间线由 GitHub 事实生成（权威字段每次覆盖）
+  columns.timeline_json = JSON.stringify(buildTimelineEvents(meta, releaseList))
 
   // 指标卡与 stars 共用同一口径，避免出现"2.8k"与"2800"并存的矛盾
   const metricValue = (raw: unknown) =>
@@ -2222,9 +2338,7 @@ export function buildProjectSyncUpdate(
   const topics = Array.isArray(meta.topics)
     ? meta.topics.filter((topic): topic is string => typeof topic === 'string' && topic.trim() !== '')
     : []
-  if (topics.length > 0) {
-    columns.features_json = JSON.stringify(topics.slice(0, 4))
-  }
+  columns.features_json = JSON.stringify(topics.slice(0, 4))
 
   const descText = String(meta.description || '').trim()
   if (descText) {
@@ -2428,7 +2542,15 @@ adminApp.post('/github-sync', async (c) => {
         const { columns, notes } = buildProjectSyncUpdate(row, data, releases, docs)
         if (fetchDocs && !needsDocs) notes.push('文档均已存在，跳过抓取')
         const entries = Object.entries(columns)
-        const sets = entries.map(([column]) => `${column} = ?`)
+        // 「只填空白」的列把判据下沉进同一条 UPDATE：以前用的是同步开始时的快照，
+        // 管理员在同步跑的那几十秒里补的协议/文档/预览图会被随后写回的 GitHub 值覆盖。
+        // 列名全部来自 buildProjectSyncUpdate 的常量，不来自请求，不存在注入面。
+        const sets = entries.map(([column]) => {
+          const emptyCondition = SYNC_FILL_ONLY_CONDITIONS[column]
+          return emptyCondition
+            ? `${column} = CASE WHEN ${emptyCondition} THEN ? ELSE ${column} END`
+            : `${column} = ?`
+        })
         const values: (string | number)[] = entries.map(([, value]) => value)
         sets.push('updated_at = CURRENT_TIMESTAMP')
         values.push(row.id)
@@ -2459,6 +2581,10 @@ adminApp.post('/github-sync', async (c) => {
     return c.json({ success: true, results: outcomes, rateLimitRemaining: lastRateLimitRemaining })
   } catch (err: any) {
     console.error('GitHub sync error:', err)
+    // 第一条 SELECT 就点名了 license / preview_images_json / docs_synced_at 这些后加的列：
+    // 迁移没落地时必须给可执行的 400，而不是把部署顺序问题报成一句 Sync failed 500
+    const typed = writeColumnErrorResponse(err)
+    if (typed) return typed
     return c.json({ error: 'Sync failed' }, 500)
   }
 })
@@ -3099,6 +3225,19 @@ function writeColumnErrorResponse(err: any): Response | null {
  */
 const SITE_SETTINGS_TEXT_MAX = 5000
 
+/** 站点设置里的 URL 列：空串允许（= 回退默认 / 不显示），非空必须是带主机名的 http(s) 绝对地址 */
+function isHttpUrlText(text: string): boolean {
+  try {
+    const url = new URL(text)
+    return (url.protocol === 'http:' || url.protocol === 'https:') && Boolean(url.hostname)
+  } catch {
+    return false
+  }
+}
+
+/** 这三列只承载外链/图片地址：写侧先校验，别把 `javascript:` 之类的值存进库再指望渲染侧拦 */
+const SETTINGS_URL_FIELDS = new Set(['githubUrl', 'icpUrl', 'logoImageUrl'])
+
 export function buildSiteSettingsWrite(
   body: Record<string, unknown>,
 ): { columns: string[]; values: (string | number)[]; error?: string } {
@@ -3116,7 +3255,13 @@ export function buildSiteSettingsWrite(
   }
 
   for (const [field, column] of Object.entries(SITE_SETTINGS_COLUMNS)) {
-    if (body[field] !== undefined) push(column, String(body[field]).trim(), field)
+    if (body[field] === undefined) continue
+    const text = String(body[field]).trim()
+    if (SETTINGS_URL_FIELDS.has(field) && text && !isHttpUrlText(text)) {
+      problems.push(`「${field}」必须是 http(s) 绝对地址（留空表示不显示）`)
+      continue
+    }
+    push(column, text, field)
   }
   for (const [field, column] of Object.entries(SITE_SETTINGS_JSON_COLUMNS)) {
     if (body[field] !== undefined) push(column, JSON.stringify(body[field]), field)
@@ -3504,8 +3649,12 @@ root.get('/', serveIndexWithSeo)
 root.get('/index.html', serveIndexWithSeo)
 // 路径路由后的深链：详情页与 /admin 也要由 Worker 取回首页 HTML 再注入
 // （canonical/og:url/主题标记都在这条路径上；不加这两行，深链会直接由资产层 SPA 兜底返回未注入的那份）
+// 裸路径与尾部斜杠的变体一并登记：Hono 的 '/admin' 不匹配 '/admin/'，'/project/*' 不匹配 '/project'，
+// 漏掉它们就等于给同一页开了两条"一份有注入、一份没有"的入口。
+root.get('/project', serveIndexWithSeo)
 root.get('/project/*', serveIndexWithSeo)
 root.get('/admin', serveIndexWithSeo)
+root.get('/admin/*', serveIndexWithSeo)
 
 export default {
   fetch: root.fetch.bind(root),
