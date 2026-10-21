@@ -29,7 +29,7 @@ jobs:
 
       # 版本与 frontend/.mise.toml 保持一致（pnpm 10.34.3 / node 22）。
       # 不要用 npm：仓库里只有 pnpm-lock.yaml，`npm ci` 会直接 ENOLOCK。
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10.34.3
 
