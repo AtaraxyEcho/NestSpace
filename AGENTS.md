@@ -9,7 +9,7 @@
 - 装依赖：`cd frontend && pnpm install --frozen-lockfile`
   （仓库只有 `frontend/pnpm-lock.yaml`，`npm ci` 会 ENOLOCK；wrangler 4.148.0 也在这份依赖里，
   脚本优先用它，不再依赖机器上的全局版本）
-- 改完必跑：`pnpm run typecheck`（前端 / Worker / `vite.config.ts` 三套 tsconfig）→ `pnpm test`（18 条纯函数闸门）→ `pnpm run build`
+- 改完必跑：`pnpm run typecheck`（前端 / Worker / `vite.config.ts` 三套 tsconfig）→ `pnpm test`（19 条纯函数闸门）→ `pnpm run build`
   （`build` 自己也先跑 typecheck：Workers Builds 只执行这一条命令，不能让它跳过类型检查）
 - 接口级实测：仓库根 `bash scripts/usage-probe.sh`（自起 8898 的 dev、自收尾；端口已被占用就直接退出，
   不去应答/击杀另一个会话的实例）

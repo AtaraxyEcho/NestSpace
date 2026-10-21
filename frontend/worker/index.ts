@@ -10,7 +10,16 @@ import { PREVIEW_IMAGE_LIMIT, sanitizeImageUrl, IMAGE_PROXY_HOSTS } from '../src
 import { SYNC_MAX_ROWS, SYNC_MAX_DOC_ROWS } from '../src/utils/syncLimits.ts'
 // 双语字段（挑战/方案）的读侧规则，与前台/管理端共用同一份（旧单列只读兜底）
 import { asBilingual, pairFromSingleText } from '../src/utils/bilingual.ts'
-import { canonicalPathFor, isValidProjectId } from '../src/utils/siteRoute.ts'
+import { canonicalPathFor, isValidProjectId, pathForRoute, routeFromPath } from '../src/utils/siteRoute.ts'
+// 搜索引擎文件（sitemap / robots 的 Sitemap 行 / 详情页 head 文案）的纯函数，与 node 闸门共用
+import {
+  brandFromTitle,
+  buildHomeNoscript,
+  buildProjectSeo,
+  buildSitemap,
+  toSitemapLastmod,
+  withSitemapDirective,
+} from '../src/utils/seoFiles.ts'
 // 访问统计的纯分类判据（+8 切日、设备/语言/来源/国家分档）
 import {
   beijingDayHour,
@@ -81,13 +90,22 @@ app.use('*', async (c, next) => {
   for (const [name, value] of Object.entries(API_SECURITY_HEADERS)) {
     c.res.headers.set(name, value)
   }
+  // JSON 接口要允许爬虫抓取（SPA 渲染正文时会请求它们），但不作为独立页面索引；
+  // 图片响应不加，保留图片搜索。
+  if ((c.res.headers.get('Content-Type') ?? '').includes('application/json')) {
+    c.res.headers.set('X-Robots-Tag', 'noindex')
+  }
 })
 
 // 处理函数抛错时 Hono 会直接产出错误响应，上面的收尾逻辑不会执行，
 // 因此在 onError 里补上同一套防护头，避免异常响应缺少安全头。
 app.onError((err, c) => {
   console.error('Unhandled API error:', err)
-  return c.json({ error: 'Internal Server Error' }, 500, API_SECURITY_HEADERS)
+  return c.json(
+    { error: 'Internal Server Error' },
+    500,
+    { ...API_SECURITY_HEADERS, 'X-Robots-Tag': 'noindex' },
+  )
 })
 
 // ==========================================
@@ -3495,10 +3513,15 @@ export async function verifyAccessJwt(
 // 因此在边缘取回首页 HTML 并把 <title> / description / og 标签替换为 D1 中的最新值。
 // 取不到静态首页或注入失败时一律回退为原始响应，绝不影响主站可用性。
 // ==========================================
-type SeoOverrides = { title: string; description: string; theme: string }
+type SeoOverrides = { title: string; description: string; theme: string; brand: string }
+
+// 详情页按项目覆写的 head 文案；首页只有 noscript 摘要，没有标题覆写
+type PageSeo = { title?: string; description?: string; noscript?: string }
 
 // index.html 里的占位标记：Worker 用它换取按请求 origin 生成的 canonical / og:url
 const SEO_ORIGIN_MARKER = '<!-- seo:origin-tags -->'
+// noscript 摘要的落点：静态首页在 #root 后面留一个标记，Worker 按路径替换
+const SEO_NOSCRIPT_MARKER = '<!-- seo:noscript -->'
 
 const SEO_CACHE_TTL_MS = 60 * 1000
 let seoOverridesCache: { value: SeoOverrides; expiresAt: number } | null = null
@@ -3509,7 +3532,9 @@ async function loadSeoOverrides(db: D1Database): Promise<SeoOverrides> {
     return seoOverridesCache.value
   }
   const row: any = await db
-    .prepare('SELECT seo_title, seo_description, default_theme FROM site_settings WHERE id = 1')
+    .prepare(
+      'SELECT seo_title, seo_description, default_theme, logo_text FROM site_settings WHERE id = 1',
+    )
     .first()
   const value: SeoOverrides = {
     // 按 trim 判定：库里存的是原样字符串，管理端只敲一个空格就会让下面的 `if (seo.title)` 成立，
@@ -3518,6 +3543,8 @@ async function loadSeoOverrides(db: D1Database): Promise<SeoOverrides> {
     description: String(row?.seo_description ?? '').trim(),
     // 只有显式 'dark' / 'light' 才往 <html> 上打标记；'' / 'system' 表示跟随访客系统
     theme: String(row?.default_theme ?? '').trim(),
+    // 详情页标题的品牌位：站点名带分隔符时取前缀，否则退回字标（见 brandFromTitle）
+    brand: String(row?.logo_text ?? '').trim(),
   }
   seoOverridesCache = { value, expiresAt: now + SEO_CACHE_TTL_MS }
   return value
@@ -3536,26 +3563,29 @@ function injectSeoOverrides(
   seo: SeoOverrides,
   origin: string,
   requestPath: string,
+  page: PageSeo = {},
 ): string {
   let out = html
   // 一律用替换函数、不用替换串：文案里出现 $& / $' / $1 时，替换串会把它当成"引用匹配到的内容"改写坏
-  if (seo.title) {
-    const title = escapeHtmlAttribute(seo.title)
-    out = out.replace(/<title>[\s\S]*?<\/title>/i, () => `<title>${title}</title>`)
+  const title = page.title || seo.title
+  if (title) {
+    const escaped = escapeHtmlAttribute(title)
+    out = out.replace(/<title>[\s\S]*?<\/title>/i, () => `<title>${escaped}</title>`)
     out = out.replace(
       /<meta property="og:title"[^>]*>/i,
-      () => `<meta property="og:title" content="${title}" />`,
+      () => `<meta property="og:title" content="${escaped}" />`,
     )
   }
-  if (seo.description) {
-    const description = escapeHtmlAttribute(seo.description)
+  const description = page.description || seo.description
+  if (description) {
+    const escaped = escapeHtmlAttribute(description)
     out = out.replace(
       /<meta name="description"[^>]*>/i,
-      () => `<meta name="description" content="${description}" />`,
+      () => `<meta name="description" content="${escaped}" />`,
     )
     out = out.replace(
       /<meta property="og:description"[^>]*>/i,
-      () => `<meta property="og:description" content="${description}" />`,
+      () => `<meta property="og:description" content="${escaped}" />`,
     )
   }
   // 规范地址与社交卡片：构建产物里只有一个标记、不含任何域名（见 index.html），
@@ -3578,7 +3608,49 @@ function injectSeoOverrides(
       tag.replace(/\/?>$/, (close) => ` data-theme="${theme}"${close}`),
     )
   }
+  // 不执行 JS 的爬虫只读静态 HTML：详情页/首页把摘要放进 noscript；
+  // 管理端没有摘要，把标记拿掉，不留下空注释。
+  if (out.includes(SEO_NOSCRIPT_MARKER)) {
+    out = out.replace(SEO_NOSCRIPT_MARKER, () => page.noscript ?? '')
+  }
   return out
+}
+
+async function loadPageSeo(
+  db: D1Database,
+  seo: SeoOverrides,
+  pathname: string,
+): Promise<PageSeo> {
+  const route = routeFromPath(pathname)
+  if (route === 'home') {
+    return { noscript: buildHomeNoscript(seo.title, seo.description) }
+  }
+  if (!route.startsWith('project/')) return {}
+  const id = route.slice('project/'.length)
+  try {
+    const row: any = await db
+      .prepare(
+        "SELECT name, cn, description_json, repository FROM projects WHERE id = ? AND status IN ('LIVE', 'BETA')",
+      )
+      .bind(id)
+      .first()
+    if (!row) return {}
+    const description = asBilingual(row.description_json)
+    return buildProjectSeo(
+      {
+        name: String(row.name ?? ''),
+        cn: String(row.cn ?? ''),
+        descriptionEn: description.en,
+        descriptionZh: description.zh,
+        repository: String(row.repository ?? ''),
+      },
+      brandFromTitle(seo.title, seo.brand),
+    )
+  } catch (err) {
+    // 项目 head 是增强项：查库失败就退回站点文案，不让详情页因此 500
+    console.error('Project SEO lookup failed, falling back to site SEO:', err)
+    return {}
+  }
 }
 
 async function serveIndexWithSeo(c: any) {
@@ -3591,13 +3663,19 @@ async function serveIndexWithSeo(c: any) {
       title: '',
       description: '',
       theme: '',
+      brand: '',
     }
     let origin = ''
+    let pathname = '/'
     try {
-      origin = new URL(c.req.raw.url).origin
+      const requestUrl = new URL(c.req.raw.url)
+      origin = requestUrl.origin
+      pathname = requestUrl.pathname
     } catch {
       origin = ''
+      pathname = '/'
     }
+    const page = await loadPageSeo(c.env.DB, seo, pathname)
 
     const assetRequest = new Request(c.req.raw.url, {
       method: 'GET',
@@ -3625,7 +3703,7 @@ async function serveIndexWithSeo(c: any) {
     headers.delete('last-modified')
     headers.delete('content-encoding')
     return new Response(
-      injectSeoOverrides(html, seo, origin, new URL(c.req.raw.url).pathname),
+      injectSeoOverrides(html, seo, origin, pathname, page),
       {
         status: assetRes.status,
         headers,
@@ -3641,11 +3719,70 @@ async function serveIndexWithSeo(c: any) {
   }
 }
 
+// 搜索引擎文件：sitemap 从 D1 生成，robots 在静态规则末尾补一条按请求 origin 的 Sitemap 行。
+// 两者都要登记在 run_worker_first，否则资产层会把它们 SPA 兜底成 index.html。
+async function serveRobots(c: any) {
+  const origin = new URL(c.req.raw.url).origin
+  const fallback = 'User-agent: *\nAllow: /\n'
+  try {
+    const assetRes = await c.env.ASSETS.fetch(
+      new Request(new URL('/robots.txt', c.req.raw.url), { headers: c.req.raw.headers }),
+    )
+    const body = assetRes.ok ? await assetRes.text() : fallback
+    return new Response(withSitemapDirective(body, origin), {
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600',
+      },
+    })
+  } catch (err) {
+    console.error('robots.txt lookup failed:', err)
+    return new Response(withSitemapDirective(fallback, origin), {
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    })
+  }
+}
+
+async function serveSitemap(c: any) {
+  const origin = new URL(c.req.raw.url).origin
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, updated_at FROM projects WHERE status IN ('LIVE', 'BETA') ORDER BY sort_order ASC, date DESC LIMIT ${QUERY_ROW_LIMIT}`,
+  ).all()
+  const entries = (results as any[])
+    .filter((row) => isValidProjectId(String(row?.id ?? '')))
+    .map((row) => ({
+      path: pathForRoute(`project/${String(row.id)}` as `project/${string}`),
+      lastmod: toSitemapLastmod(String(row.updated_at ?? '')),
+    }))
+  let latest = entries.reduce(
+    (max, entry) => (entry.lastmod > max ? entry.lastmod : max),
+    '',
+  )
+  try {
+    const settings: any = await c.env.DB.prepare(
+      'SELECT updated_at FROM site_settings WHERE id = 1',
+    ).first()
+    const stamp = toSitemapLastmod(String(settings?.updated_at ?? ''))
+    if (stamp > latest) latest = stamp
+  } catch (err) {
+    console.error('Sitemap settings lookup failed:', err)
+  }
+  const xml = buildSitemap(origin, [{ path: '/', lastmod: latest }, ...entries])
+  return new Response(xml, {
+    headers: {
+      'Content-Type': 'application/xml; charset=utf-8',
+      'Cache-Control': 'public, max-age=3600',
+    },
+  })
+}
+
 // 根应用：/api 交给上面的 API 子应用，根路径与 index.html 走 SEO 注入
 const root = new Hono<Env>()
 root.route('/api', app)
 root.get('/', serveIndexWithSeo)
 root.get('/index.html', serveIndexWithSeo)
+root.get('/robots.txt', serveRobots)
+root.get('/sitemap.xml', serveSitemap)
 // 路径路由后的深链：详情页与 /admin 也要由 Worker 取回首页 HTML 再注入
 // （canonical/og:url/主题标记都在这条路径上；不加这两行，深链会直接由资产层 SPA 兜底返回未注入的那份）
 // 裸路径与尾部斜杠的变体一并登记：Hono 的 '/admin' 不匹配 '/admin/'，'/project/*' 不匹配 '/project'，

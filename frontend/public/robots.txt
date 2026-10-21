@@ -1,5 +1,12 @@
 User-agent: *
 Allow: /
+# 公开读取接口要放行：首页/详情页的正文由这些接口渲染，爬虫渲染时也会请求它们。
+# 管理端与埋点仍由 /api/ 的兜底规则挡住（robots 按最长匹配优先）。
+Allow: /api/projects
+Allow: /api/site-settings
+Allow: /api/img
 Disallow: /api/
 # 管理端不参与收录：公开站上的 /admin 会跳到 admin.<主域>（那边还有 Access 挡着）
 Disallow: /admin
+
+# Sitemap 行由 Worker 按请求 origin 追加（worker/index.ts 的 /robots.txt 路由）

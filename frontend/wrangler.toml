@@ -10,13 +10,15 @@ preview_urls = false
 # - binding: 暴露 ASSETS，Worker 才能取到首页 HTML 做 SEO 注入（删掉会导致首页 503！）
 # - run_worker_first: /api/*、首页与**路径路由的深链**（/project/*、/admin）先进入 Worker 处理
 #   （取代 Pages 的 _routes.json）。深链也必须进来，否则拿到的是资产层 SPA 兜底那份**没注入**的 HTML：
-#   canonical / og:url / 主题标记全在 Worker 的注入里
+#   canonical / og:url / 主题标记全在 Worker 的注入里。
+#   robots.txt / sitemap.xml 也要先过 Worker：sitemap 从 D1 生成，robots 末尾追加按 origin 的
+#   Sitemap 行；漏登记会让它们被 SPA 兜底成 HTML（站长平台会直接拒收）。
 # - not_found_handling: 未知路径回退 index.html（SPA 兜底；前端把它们渲染成首页，canonical 回站点根）
 [assets]
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api", "/api/*", "/", "/index.html", "/project", "/project/*", "/admin", "/admin/*"]
+run_worker_first = ["/api", "/api/*", "/", "/index.html", "/project", "/project/*", "/admin", "/admin/*", "/robots.txt", "/sitemap.xml"]
 
 # Cloudflare D1 边缘数据库绑定
 [[d1_databases]]

@@ -49,7 +49,7 @@ check('跟随系统的兜底只在"还没打标记"时生效', () => {
 
 check('Worker 只在显式 dark/light 时往 <html> 上注入 data-theme', () => {
   const worker = read('worker', 'index.ts')
-  assert.match(worker, /SELECT seo_title, seo_description, default_theme FROM site_settings/, '没有把 default_theme 读出来')
+  assert.match(worker, /SELECT seo_title, seo_description, default_theme, logo_text FROM site_settings/, '没有把 default_theme 读出来')
   assert.match(worker, /const theme = seo\.theme === 'dark' \|\| seo\.theme === 'light' \? seo\.theme : ''/, '缺少"仅显式值才注入"的判据')
   assert.match(worker, /out\.replace\(\/<html\\b\[\^>\]\*>\/i/, '没有改写 <html> 标签')
 })
