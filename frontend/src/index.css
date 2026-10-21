@@ -529,6 +529,12 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 .plate-code { position: absolute; top: 34px; left: 36px; font: 10px var(--font-mono); letter-spacing: .16em; color: var(--ink-tertiary); }
 .detail-plate .hand-note { position: absolute; bottom: 33px; left: 36px; transform: rotate(-2deg); }
 .plate-status { position: absolute; right: 35px; bottom: 36px; font: 10px var(--font-mono); letter-spacing: .12em; }
+/* 三枚叠加标签都受画框约束：长 habitat / 长版本号一律省略，绝不互相压住 */
+.detail-plate .plate-code,
+.detail-plate .plate-status,
+.detail-plate .hand-note {
+  max-width: calc(100% - 32px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .plate-status b { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--accent); }
 /* 有真实封面时：相框跟随图片比例（--plate-ratio 由 onLoad 写入并夹在 [0.8,2.2]）。
    解码前先用 16/10 兜底——封面绝大多数是横图，比沿用占位的 4/5 少一次尺寸跳变 */
@@ -660,6 +666,14 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
 }
 @media (max-width: 760px) {
   .preview-orbit { display: none; }
+}
+/* 首图三枚标签按**画框宽度**排：hero 右栏在视口 ≤1080 时会缩到约 360px，
+   底部同行放手记（约 162px）与状态（约 135px）会重叠（800px 视口实测重叠 67px）。
+   窄画框改为 编号左上 / 状态右上 / 手记独占底部；内边距 24px，长值走省略号。 */
+@media (max-width: 1080px) {
+  .detail-plate .plate-code { top: 24px; left: 24px; }
+  .detail-plate .plate-status { top: 24px; right: 24px; bottom: auto; max-width: calc(100% - 140px); }
+  .detail-plate .hand-note { left: 24px; bottom: 24px; max-width: calc(100% - 48px); }
 }
 /* 画框高度固定、宽度随主图方向变：竖图不该被塞进横框裁掉。
    所有牌共用同一尺寸约束，侧牌的 translate 百分比才是同一个基准 */
@@ -1407,8 +1421,9 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .detail-register div { border-bottom: 1px solid var(--line-default); }
   .detail-register div:nth-child(even) { border-right: 0; }
   .detail-register div:last-child { grid-column: 1 / -1; }
-  .detail-tabs { overflow-x: auto; }
-  .detail-tabs button { min-width: 125px; padding: 0 16px; }
+  /* 三个页签在 343px 内容宽里放不下（3×125=375），以前靠横向滚动、末端 8px 被裁。
+     手机上改为等分，不换行也不滚动；触控高度仍是 54px。 */
+  .detail-tabs button { flex: 1 1 0; min-width: 0; padding: 0 8px; white-space: nowrap; }
   .detail-section-label { margin-bottom: 42px; }
   /* 手机上换一套交互，而不是把桌面 3D 封面流缩小：主牌占 78% 时两侧残片只剩 20–30px，
      「后面还有图」这个线索基本读不出来，十几个格子还会换 3 排挤占正文。
@@ -1420,13 +1435,20 @@ button.index-row { width: 100%; color: inherit; text-align: left; font-family: i
   .preview-copy h2 { font-size: 40px; margin: 14px 0 16px; }
   .preview-copy > p { font-size: 14px; }
   .preview-pagination { margin: 22px 0 0; }
-  .preview-stage { height: 340px; }
-  .preview-frame { width: 86%; height: min(74%, 320px); }
+  /* 画框高度跟图片自身比例走：固定 340px 时，宽图上下会留一大块空白
+     （543×200 的横版整标在 306px 画框里只占约 90px 高）。 */
+  .preview-stage { height: auto; display: flex; justify-content: center; padding: 14px 0 6px; }
+  .preview-frame { width: 86%; height: auto; }
   .preview-stage.is-portrait .preview-frame { width: 62%; }
   .preview-frame[data-position="previous"],
   .preview-frame[data-position="next"],
   .preview-frame[data-position="back"] { display: none; }
-  .preview-frame[data-position="active"] { transform: translate(-50%, -50%); }
+  .preview-frame[data-position="active"] {
+    position: relative; left: auto; top: auto; transform: none;
+  }
+  .frame-shot { flex: 0 0 auto; height: auto; max-height: min(62vh, 460px); }
+  /* 坏图/加载中：保留一块可见的占位，不让画框塌成只剩图注 */
+  .preview-stage .frame-shot.is-pending { height: 180px; }
   .frame-caption { min-height: 46px; padding: 8px 12px; }
   .frame-caption small { display: none; }
   .preview-controls { flex-wrap: wrap; }

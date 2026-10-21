@@ -350,13 +350,16 @@ if [ -n "$TOKEN" ]; then
     process.stdin.on("data", (d) => (s += d)).on("end", () => {
       const rows = JSON.parse(s)
       const row = rows.find((x) => String(x.id) === id) || {}
-      process.stdout.write("readme_zh" in row ? "list-carries-docs" : "ok")
+      const leaked = ["readme_zh", "readme_en", "compose_dev", "compose_prod", "internal_notes"].filter(
+        (key) => key in row,
+      )
+      process.stdout.write(leaked.length ? "list-carries:" + leaked.join(",") : "ok")
     })
   ' "$TMP_ID")
-  echo "  列表不带长文档：$LIST_LEAN（应为 ok）"
+  echo "  列表不带长文档与内部笔记：$LIST_LEAN（应为 ok）"
   if [ "$LIST_LEAN" != "ok" ]; then
     PROBE_FAIL=1
-    echo "  !! 列表仍然带上了文档正文（响应体积会随馆藏放大）"
+    echo "  !! 列表仍然带上了文档正文或内部笔记（响应体积会随馆藏放大）"
   fi
   probe "DELETE 收尾（要 200）" -X DELETE "http://127.0.0.1:$PORT/api/admin/projects/$TMP_ID" \
     -H @"$AUTH_HEADER" -H 'Content-Type: application/json'

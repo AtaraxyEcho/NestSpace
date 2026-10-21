@@ -1142,17 +1142,13 @@ async function readJsonBody(c: any): Promise<Record<string, any> | null> {
 // 管理端：获取全量项目（含草稿、归档、内部笔记）
 adminApp.get('/projects', async (c) => {
   try {
-    // 列表**不带四份长文档**（每份上限 10 万字符 × 最多 500 行）：抽屉打开时再按需取全文。
-    // has_* 让列表能显示"这份文档有没有"，而不必把正文一起搬过来。
+    // 列表**不带四份长文档与内部笔记**（文档每份上限 10 万字符 × 最多 500 行，内部笔记无上限）：
+    // 抽屉打开时用 GET /api/admin/projects/:id 取整行。界面上这两类内容本来就只在抽屉里用。
     const { results } = await c.env.DB.prepare(`
       SELECT id, date, status, name, cn, latin, habitat, type, language, stars, year, shape, version, updated,
-             repository, license, internal_notes, sort_order, demo_url, demo_enabled,
+             repository, license, sort_order, demo_url, demo_enabled,
              challenge_json, solution_json, description_json, features_json, metrics_json, timeline_json,
-             preview_image_url, preview_images_json,
-             (readme_zh <> '') AS has_readme_zh,
-             (readme_en <> '') AS has_readme_en,
-             (compose_dev <> '') AS has_compose_dev,
-             (compose_prod <> '') AS has_compose_prod
+             preview_image_url, preview_images_json
       FROM projects ORDER BY sort_order ASC, date DESC LIMIT ${QUERY_ROW_LIMIT}
     `).all()
 
@@ -2332,7 +2328,9 @@ export function buildProjectSyncUpdate(
   const licenseId = String(meta.license?.spdx_id ?? '').trim()
   if (licenseId && licenseId !== 'NOASSERTION' && row.has_license !== 1) {
     columns.license = licenseId
-    notes.push(`协议已填充 ${licenseId}`)
+    // 备注只描述"仓库提供的值与填充规则"，不宣称已经写入：写回是 SQL CASE，
+    // 同步期间管理员刚填的内容会被保留，此时"已填充"就是假报告。
+    notes.push(`协议：仓库为 ${licenseId}，仅在该字段为空时填入`)
   }
 
   const topics = Array.isArray(meta.topics)
@@ -2371,7 +2369,7 @@ export function buildProjectSyncUpdate(
           columns.preview_images_json = JSON.stringify(images)
           filled.push(`相册 ${images.length} 张`)
         }
-        notes.push(`预览图已从 README 提取（${filled.join(' / ')}）`)
+        notes.push(`预览图：从 README 提取到 ${filled.join(' / ')}，仅在为空时填入`)
       }
     }
   }
@@ -2393,7 +2391,7 @@ export function buildProjectSyncUpdate(
     // 抓取过就刷新时间戳，哪怕这次一个字都没写（原来的实现只在填充时更新，界面会显示旧时间）
     columns.docs_synced_at = nowStamp()
     const fetchedAny = Boolean(docs.readmeZh || docs.readmeEn || docs.composeDev || docs.composeProd)
-    if (filled.length > 0) notes.push(`文档已填充 ${filled.join(' / ')}`)
+    if (filled.length > 0) notes.push(`文档：抓到 ${filled.join(' / ')}，仅在为空时填入`)
     else if (!fetchedAny) notes.push('未抓到文档（仓库无对应文件，或已达到 GitHub 频率限制）')
     else notes.push('文档均已存在，未覆盖')
   }
@@ -3229,6 +3227,7 @@ const SITE_SETTINGS_TEXT_MAX = 5000
 function isHttpUrlText(text: string): boolean {
   try {
     const url = new URL(text)
+    if (url.username || url.password) return false // 凭据不许写进公开链接
     return (url.protocol === 'http:' || url.protocol === 'https:') && Boolean(url.hostname)
   } catch {
     return false

@@ -175,7 +175,7 @@ assert.equal('description_json' in noDesc.columns, false, 'case 4e: 仓库无描
 // 开源协议：与文档同一规则——只填空白，不覆盖管理端手填的值
 const licBlank = buildProjectSyncUpdate(baseRow({ has_license: 0 }), meta({ license: { spdx_id: 'MIT' } }), [], null)
 assert.equal(licBlank.columns.license, 'MIT', 'case 4h: 协议为空 → 填 GitHub 识别出的 SPDX 标识')
-assert.ok(licBlank.notes.some((n) => n.includes('协议已填充')), 'case 4i: 填充有说明')
+assert.ok(licBlank.notes.some((n) => n.includes('协议：仓库为 MIT')), 'case 4i: 填充有说明')
 const licOwn = buildProjectSyncUpdate(baseRow({ has_license: 1 }), meta({ license: { spdx_id: 'Apache-2.0' } }), [], null)
 assert.equal('license' in licOwn.columns, false, 'case 4j: 已手填协议 → 同步不覆盖')
 const licNoAssert = buildProjectSyncUpdate(baseRow({ has_license: 0 }), meta({ license: { spdx_id: 'NOASSERTION' } }), [], null)
@@ -192,7 +192,7 @@ const withDocs = buildProjectSyncUpdate(
 assert.equal(withDocs.columns.readme_en, '# EN', 'case 5a: 空白文档被填充')
 assert.equal(withDocs.columns.compose_dev, 'services:', 'case 5b: compose 同样填充')
 assert.ok(typeof withDocs.columns.docs_synced_at === 'string' && withDocs.columns.docs_synced_at.length > 0, 'case 5c: 抓取过就刷新时间戳')
-assert.ok(withDocs.notes.some((n) => n.includes('文档已填充')), 'case 5d: 填充有说明')
+assert.ok(withDocs.notes.some((n) => n.includes('文档：抓到')), 'case 5d: 填充有说明')
 
 const keepDocs = buildProjectSyncUpdate(
   baseRow({ has_readme_en: 1, has_compose_dev: 1, has_readme_zh: 1, has_compose_prod: 1 }),
@@ -656,21 +656,25 @@ const selectList = adminListSql.match(/SELECT([\s\S]*?)FROM projects/)?.[1] ?? '
 const selectedColumns = selectList
   .split(',')
   .map((part) => part.trim().split(/[\s)]+/).filter(Boolean).pop() ?? '')
-const docColumns = Object.values(EDITABLE_COLUMNS).filter((column) => /^(readme_|compose_)/.test(column))
-const requiredInList = Object.values(EDITABLE_COLUMNS).filter((column) => !docColumns.includes(column))
+// 列表不带的列：四份文档（体量大）+ 内部笔记（无长度上限，且只在大抽屉里用）
+const detailOnlyColumns = Object.values(EDITABLE_COLUMNS).filter(
+  (column) => /^(readme_|compose_)/.test(column) || column === 'internal_notes',
+)
+const requiredInList = Object.values(EDITABLE_COLUMNS).filter(
+  (column) => !detailOnlyColumns.includes(column),
+)
 const missingInList = requiredInList.filter((column) => !selectedColumns.includes(column))
 assert.deepEqual(
   missingInList,
   [],
   `case 17e: 管理端列表漏列（抽屉打开会缺字段）：${missingInList.join(', ')}`,
 )
-for (const column of docColumns) {
+for (const column of detailOnlyColumns) {
   assert.ok(
     !selectedColumns.includes(column),
-    `case 17e: 列表不该带 ${column} 正文——它属于单件详情接口`,
+    `case 17e: 列表不该带 ${column}——它属于单件详情接口`,
   )
 }
-assert.ok(selectedColumns.includes('has_readme_zh'), 'case 17e: 列表应带 has_readme_zh 供界面判断文档有无')
 assert.match(workerSrc, /adminApp\.get\('\/projects\/:id'/, 'case 17e: 缺少单件详情接口（抽屉靠它取全文）')
 
 // case 17f：**代码引用的列必须真的存在于 migrations/**
@@ -1098,5 +1102,8 @@ const goodUrls = buildSiteSettingsWrite({
 })
 assert.equal(goodUrls.error, undefined, 'case 25c: 合法 http(s) 与空串都放行')
 assert.deepEqual(goodUrls.columns, ['github_url', 'icp_url', 'logo_image_url'], 'case 25d: 三列按请求顺序落库')
+const credentialUrl = buildSiteSettingsWrite({ githubUrl: 'https://user:pass@github.com/x' })
+assert.ok(credentialUrl.error && credentialUrl.error.includes('githubUrl'), 'case 25e: 带 userinfo 的地址要拒绝（凭据不许写进公开链接）')
+assert.deepEqual(credentialUrl.columns, [], 'case 25f: 被拒绝的 URL 不能顺带写库')
 
 console.log('sync_update：全部用例通过（字段归属 / 格式口径 / 文档规则 / 地址解析 / 时间线 / 预览图 / 相册 / 写入校验 / 两种拼写冲突 / 管理端投影字段集 / 站点设置三份清单双向对齐 / 空白文案判据 / 站点设置写侧 / 改动集接线 / 写路径类型闸门 / 新建列覆盖 / 设置 URL 写侧校验）✓')

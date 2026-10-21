@@ -309,7 +309,10 @@ function settingsHref(raw: string | null | undefined): string | null {
   const url = (raw ?? "").trim()
   if (!/^https?:\/\//i.test(url)) return null
   try {
-    return new URL(url).hostname ? url : null
+    const parsed = new URL(url)
+    // 带 userinfo 的地址（https://user:pass@host）会把凭据塞进公开链接，直接不渲染
+    if (parsed.username || parsed.password) return null
+    return parsed.hostname ? url : null
   } catch {
     return null
   }
@@ -5558,7 +5561,7 @@ function AdminPage({
                       setEditing({ ...editing, version: event.target.value })
                     }
                   />
-                  <small>由 GitHub 同步覆盖：有 Release 时会被最新 tag 重写</small>
+                  <small>由 GitHub 同步覆盖：每次同步按仓库最新 Release 重写，没有 Release 时清空</small>
                 </label>
                 <label>
                   状态
@@ -5755,7 +5758,7 @@ function AdminPage({
                   value={featuresText}
                   onChange={(event) => setFeaturesText(event.target.value)}
                 />
-                <small>每行一条；仓库有 topics 时会被同步覆盖，无 topics 则保留此处内容</small>
+                <small>每行一条；每次同步按仓库 topics 重写（取前 4 个），仓库没有 topics 时清空</small>
               </label>
               <label>
                 指标

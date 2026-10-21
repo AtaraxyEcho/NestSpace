@@ -44,3 +44,6 @@ desktop.ini
 /.figma/design-context/
 /.plugins/
 /.opencode-skills/
+
+# `wrangler deploy --dry-run --outdir .dryrun` 的产物（CI 与本地预检用）
+.dryrun/

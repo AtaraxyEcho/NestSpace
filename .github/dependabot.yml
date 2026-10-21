@@ -1,0 +1,14 @@
+version: 2
+# 依赖更新走 PR：仓库里没有任何自动升级机制时，告警只能靠人偶尔跑一次 pnpm audit。
+# 分成两条：前端依赖与 GitHub Actions 各一条；限额压到 3，避免一次刷出一屏 PR。
+updates:
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 2

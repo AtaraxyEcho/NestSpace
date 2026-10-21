@@ -98,7 +98,7 @@ npx wrangler deploy
 
 ```bash
 cd frontend
-pnpm run typecheck   # 前端 + Worker 两套 tsconfig
+pnpm run typecheck   # 前端 / Worker / vite.config 三套 tsconfig
 pnpm test            # 18 条闸门（纯函数，不联网）
 pnpm run build      # 含 typecheck（Workers Builds 只跑这一条）
 bash ../scripts/usage-probe.sh      # 接口探针：自起 8898、自收尾

@@ -42,8 +42,16 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
-      - name: 类型检查（前端 + Worker 两套 tsconfig）
+      - name: 类型检查（前端 + Worker + vite.config 三套 tsconfig）
         run: pnpm run typecheck
+
+      # 脚本在仓库根，不在 frontend 下（本 job 的默认工作目录），所以单独指回根目录
+      - name: Shell 语法检查
+        working-directory: .
+        run: |
+          for f in scripts/*.sh; do
+            bash -n "$f"
+          done
 
       # 闸门是 Node 直跑的纯函数测试（原生 type stripping 吃 .ts 源码，≥22.18），
       # 不需要起服务、不联网、不碰 D1；17f/18 这两条会在校验阶段拦住"代码引用了不存在的列"。
@@ -52,6 +60,11 @@ jobs:
 
       - name: 构建静态资产
         run: pnpm run build
+
+      # wrangler 已是 devDependencies，这一步不再需要额外安装；--dry-run 不需要账号凭据，
+      # 只解析配置与绑定（run_worker_first / D1 / assets / observability 写错了这里就红）
+      - name: 配置预检
+        run: pnpm exec wrangler deploy --dry-run --outdir .dryrun
 
       # 这里**不放** `wrangler deploy --dry-run`：wrangler 不是本项目的依赖（devDependencies 里没有它，
       # 本地用的是全局二进制），CI 里为它单独装一次只会让这一步变成"能不能联网装工具"的噪声。

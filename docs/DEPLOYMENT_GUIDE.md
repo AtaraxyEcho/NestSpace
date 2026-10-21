@@ -62,6 +62,7 @@ NestSpace/
 │   │                             # 客户端与限流层：usage_stats（退出统计两层契约与回滚 / 会话级入口来源 /
 │   │                             #   访客 ID 形态 / 条形高度只由权重派生 / Cache API 限流三分支 / 名单单一来源）
 │   ├── wrangler.toml             # Worker 配置：入口 + 静态资产 + D1 绑定（Analytics Engine 数据集可选、默认注释）
+│   ├── pnpm-workspace.yaml       # pnpm 的 overrides（把 miniflare 钉死的 sharp 抬到补丁版本，仅开发链）
 │   └── package.json
 │
 ├── migrations/                   # Cloudflare D1 边缘数据库建表与种子数据
@@ -485,19 +486,20 @@ bash scripts/usage-probe.sh
 
 ### CI（`.github/workflows/ci.yml`）
 
-push / PR 时跑的就是上面这三条：`pnpm run typecheck`（前端 + Worker 两套 tsconfig）、`pnpm test`（十八个纯函数闸门）、
-`pnpm run build`。用 **pnpm** 不是风格问题：仓库里只有 `pnpm-lock.yaml`，`npm ci` 会直接 ENOLOCK 失败。
-版本钉在 `frontend/.mise.toml` 的同一套（node 22 / pnpm 10.34.3）。
+push / PR 时依次跑：`pnpm run typecheck`（三套 tsconfig：前端 / Worker / `vite.config.ts`）、
+`bash -n scripts/*.sh`、`pnpm test`（十八个纯函数闸门）、`pnpm run build`（内含 typecheck）、
+`wrangler deploy --dry-run`（只解析配置与绑定，不需要账号凭据）。用 **pnpm** 不是风格问题：仓库里只有
+`pnpm-lock.yaml`，`npm ci` 会直接 ENOLOCK 失败。版本由 `frontend/package.json` 的 `packageManager`
+与 `frontend/.mise.toml` 双重钉住（node 22 / pnpm 10.34.3）。
+依赖更新由 `.github/dependabot.yml` 每周开 PR（前端依赖）与每月（GitHub Actions），限额各 3 / 2 条。
 
 闸门里 `17f` 与 `18` 两条是 CI 真正的价值所在：**代码引用的列必须存在于 `migrations/`**、
 **站点设置的三份清单（内置默认 / Worker 白名单 / 迁移列）必须双向对齐**。这两种错在本地全是运行时问题
 （保存 500、或"保存成功但字段被丢弃"），只有钉进闸门才会在 CI 里被拦住。
 
-两点刻意的取舍：
-- **没有 `wrangler deploy --dry-run` 这一步**：wrangler 不在 `devDependencies` 里（本地用的是全局二进制），
-  为它在 CI 单独装一次只会把这一步变成"能不能联网装工具"的噪声。要预检就在本地跑
-  `npx wrangler deploy --dry-run`（实测不需要账号凭据，只打印解析后的绑定列表）。
+一点刻意的取舍：
 - **CI 跑不了 `scripts/usage-probe.sh`**：它要起 Worker、要 `.dev.vars` 里的本地口令，也会写库。
+  接口级验证仍在本地做（脚本会先探测端口，占用即退出）。
 
 本工作流在本机没有被"执行"过（没有 GitHub runner、且装依赖要联网），能验的都验了：YAML 可解析、
 步骤里的三条命令在本地用 pnpm 逐条跑过并退出 0、`cache-dependency-path` 指向的锁文件真实存在。
@@ -788,8 +790,8 @@ SEO 的 `seo_title` 同样如此——否则管理端敲一个空格就会把 `<
     （公开数据只有一份 `items` 时，标签页重新聚焦会拿对外投影覆盖它——切出去复制个 URL 再回来，这九项就整片空了），
     退出后台时再显式重取一次公开数据给前台用。`saveProject` 成功后**重取管理端列表**而不是把本地 payload
     拼回列表——回显显示的永远是库里的行，服务端的规范化结果不会看不见。
-    管理端列表也**不带四份长文档**（各上限 10 万字符 × 最多 500 行会让响应随馆藏线性放大），
-    只回 `has_readme_*` 之类的有无标记；抽屉打开时用 `GET /api/admin/projects/:id` 取全文再渲染。
+    管理端列表也**不带四份长文档与内部笔记**（文档各上限 10 万字符 × 最多 500 行、笔记无上限，
+    都会让响应随馆藏线性放大）；抽屉打开时用 `GET /api/admin/projects/:id` 取整行再渲染。
   - **PUT 只提交改动过的列**（`saveProject` 拿列表里的当前行做基线逐项比较）：整行全量回写会把抽屉打开期间
     后台同步/导入刚写进库的字段（`stars`、`version`、`README`、时间线…）用陈旧值悄悄盖回去，
     那是另一种"提示成功但库里被改坏"。没有检测到任何改动时直接不发请求（也不报"已保存"）。
