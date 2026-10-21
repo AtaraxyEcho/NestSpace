@@ -28,15 +28,21 @@
 
 ## 预览
 
+桌面：
+
 | 陈列（浅色） | 详情页 |
 |---|---|
 | ![陈列](docs/screenshots/home.png) | ![详情页](docs/screenshots/detail.png) |
 | 陈列（深色） | 关于 / 手记 |
 | ![深色陈列](docs/screenshots/home-dark.png) | ![关于](docs/screenshots/curator.png) |
 
-<p align="center"><img src="docs/screenshots/detail-mobile.png" width="260" alt="移动端详情"></p>
+手机（390px）：
 
-线上实拍；支持深浅主题、中英切换与移动端。
+| 首页 | 详情页 |
+|---|---|
+| <img src="docs/screenshots/home-mobile.png" width="260" alt="手机首页"> | <img src="docs/screenshots/detail-mobile.png" width="260" alt="手机详情页"> |
+
+线上实拍（桌面与手机）；支持深浅主题、中英切换与移动端。
 
 ---
 

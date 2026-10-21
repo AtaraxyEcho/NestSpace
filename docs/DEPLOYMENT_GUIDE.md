@@ -263,7 +263,13 @@ npx wrangler secret put GITHUB_TOKEN
    - **Project name**：`nestspace`
    - **Root directory（根目录）**：`frontend`（Advanced settings 中设置，关键）
    - **Build command**：`pnpm run build`（仓库只有 `frontend/pnpm-lock.yaml`，构建环境的包管理器按锁文件识别为 pnpm；写 `npm run build` 与 CI 口径不一致）
-   - **Deploy command**：保持默认 `npx wrangler deploy`（Workers 形态开箱即用）
+   - **Deploy command**：`npx wrangler deploy`（生产部署）。
+     若控制台里还开着 **Preview builds**，平台会额外执行 `npx wrangler preview`——那是 **Worker Previews
+     （beta）**，要求 `wrangler.toml` 里声明 `[[previews.d1_databases]]` 并指向一个**预览专用**的 D1；
+     本项目没有 `[previews]` 段，于是预览构建会在“Build 成功”之后报
+     `Your Wrangler configuration is missing a previews block`（2026-10-21 实测；生产部署不受影响）。
+     **不需要预览就关掉 Preview builds**；确实需要时按第三节「Preview 部署」建独立 D1、补该块，
+     **不要指向生产库**（预览里的管理端会直接改生产数据）
    - **Enable Preview builds**：保持关闭（`frontend/wrangler.toml` 的 `preview_urls = false` 刻意不留预览入口；确需预览见下方安全说明，必须同时加 Access 且注意默认连同一个 D1）
    - **Protect with Cloudflare Access**：开启（保护 preview 部署，不影响公开生产站）
 3. D1 绑定由 `frontend/wrangler.toml` 声明，Git 构建自动生效，无需控制台手动绑定。
@@ -406,6 +412,17 @@ Worker 级 Access 下令牌形态是否仍带同样的 `iss`/`aud` **未经实�
 2. **Preview 部署**：仓库默认 `preview_urls = false` / `workers_dev = false`，不生成任何绕过自定义域名的入口
    （README 已说明这是刻意的）。若你手动开启：必须给 preview 域名单独加 Access，并注意 preview 环境默认连接
    **同一个 D1 数据库**——写操作会直接影响生产数据；要隔离就另建库。
+   **Worker Previews（`wrangler preview`，Workers Builds 的预览构建会调用它）还要额外声明预览绑定**：
+   ```toml
+   [[previews.d1_databases]]
+   binding = "DB"
+   database_name = "nestspace-preview"
+   database_id = "<预览库 id>"
+   ```
+   预览库单独建（`npx wrangler d1 create nestspace-preview`）并跑一遍迁移
+   （`bash scripts/d1-migrate.sh remote nestspace-preview`）；管理端口令用
+   `npx wrangler preview secret put ADMIN_SECRET_KEY` 单独下发（预览的 secret 与生产不共享）。
+   **不要把预览指向生产库**。不需要预览就在 Workers Builds 里关掉 Preview builds，这一步根本不会执行。
 3. **速率限制（建议，先确认套餐）**：在 **Security ➔ WAF ➔ Rate limiting rules** 里配规则
    （例：1 分钟内每 IP 超过 60 次就质询或拦截；`/api/admin/*` 可以更严，如 1 分钟 10 次）。
    免费版**是否包含**这条规则各账号/时期并不一致——控制台里看得到就配上；看不到也不必为此升级套餐：

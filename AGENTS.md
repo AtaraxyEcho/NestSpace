@@ -67,5 +67,5 @@
   并在正文标注非本会话产物的归属。本地端口 8787 / 8898 / 8899 可能正被另一个会话占用。
 - 改 `.figma/make/site.json` 前先看 `vite.config.ts` —— 它是构建输入，不是临时文件。
 - `docs/screenshots/*.png` 直接进 Git、不走 LFS：`.gitattributes` 只放在 `frontend/` 下，根目录的图不在
-  它的管辖范围，而这批图共约 2.4 MB、只给 README 看、不参与构建，留在 Git 里克隆即见。要转 LFS 得先在
+  它的管辖范围，而这批图共约 2.1 MB（桌面 960px、手机 390px）、只给 README 看、不参与构建，留在 Git 里克隆即见。要转 LFS 得先在
   仓库根放一份 `.gitattributes`，并确认 GitHub 与 Workers Builds 两边的拉取方式都还能拿到真字节。
