@@ -89,7 +89,10 @@ export function brandFromTitle(title: string, fallback: string): string {
 
 export function buildProjectSeo(input: ProjectSeoInput, brand: string): ProjectSeo {
   const name = String(input.name ?? '').trim() || 'Project'
-  const cn = String(input.cn ?? '').trim()
+  const cnRaw = String(input.cn ?? '').trim()
+  // 生产数据里有些项目的中文名与英文名完全相同（OmniNest / OmniNest），
+  // 再套一层括号就变成 "OmniNest（OmniNest）"；同名时不重复。
+  const cn = cnRaw.toLowerCase() === name.toLowerCase() ? '' : cnRaw
   const site = String(brand ?? '').trim() || 'NestSpace'
   const displayName = cn ? `${name}（${cn}）` : name
   const title = `${displayName} · ${site}`

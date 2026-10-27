@@ -109,6 +109,14 @@ check('详情页 SEO：中英标题、英文摘要优先、缺英文回退中文
   )
   assert.equal(zh.title, 'Aperture · NestSpace')
   assert.equal(zh.description, '中文摘要')
+
+  const sameName = buildProjectSeo(
+    { name: 'OmniNest', cn: 'OmniNest', descriptionEn: '', descriptionZh: '', repository: '' },
+    'NestSpace',
+  )
+  assert.equal(sameName.title, 'OmniNest · NestSpace', '中英文名相同不重复括号')
+  assert.match(sameName.noscript, /<h1>OmniNest<\/h1>/)
+  assert.doesNotMatch(sameName.noscript, /OmniNest（OmniNest）/)
 })
 
 check('详情页 noscript：转义正文与仓库地址，非法仓库地址不生成链接', () => {
